@@ -20,8 +20,9 @@
     },
     "production": {
       "extends": "base",
+      "credentialsSource": "local",
       "android": {
-        "buildType": "app-bundle"
+        "buildType": "apk"
       }
     }
   },
