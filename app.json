@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "kodeshRead",
+    "slug": "kodeshread",
+    "scheme": "kodeshread",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.kodeshread.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#F6F0E1",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "supportsRTL": true,
+      "forcesRTL": true
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-sqlite", { "enableFTS": true }],
+      "expo-asset",
+      ["expo-build-properties", { "android": { "minSdkVersion": 24 } }],
+      ["./plugins/withAndroidNoCompress", { "noCompress": ["db"] }],
+      "expo-font",
+      "expo-status-bar"
+    ]
+  }
+}
