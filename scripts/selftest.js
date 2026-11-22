@@ -666,6 +666,7 @@ async function main() {
   await resumableIngestionTests();
   await refAlignTests();
   await otzariaSampleTests();
+  await otzariaIndexTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -1129,6 +1130,189 @@ async function otzariaSampleTests() {
       const vs = await toc.fetchInlineVerses(db, AH, 4, 14, refAlign.inlineUnitWord('סימן א', 'הלכה'));
       assert.strictEqual(vs.length, 10);
       assert.deepStrictEqual([vs[0].title, vs[9].title], ['סעיף א', 'סעיף י']);
+    });
+    db.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Commentary pairing + alignment against the REAL Otzaria library map (otzaria_index_only.txt,
+ * 7,674 books): the full-library pairing regression, then a fixture library built at real paths.
+ */
+async function otzariaIndexTests() {
+  const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+  if (!fs.existsSync(indexPath)) {
+    console.warn('! otzaria_index_only.txt missing; skipping the full-library pairing checks.');
+    return;
+  }
+  const pairing = require('../shared/pairing');
+  const paths = fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''));
+  const books = paths.map((p, i) => {
+    const parts = p.split('/');
+    const title = parts.pop();
+    return { id: i + 1, title, categoryPath: parts.join('/'), aliases: generateBookAliases(parts, title) };
+  });
+  const idOf = new Map(paths.map((p, i) => [p, i + 1]));
+  const t0 = Date.now();
+  const pairs = pairing.pairCommentaries(books);
+  const ms = Date.now() - t0;
+  const baseOf = new Map(pairs.map((p) => [p.commId, paths[p.baseId - 1]]));
+  const multiOf = new Map((pairs.multi || []).map((m) => [m.commId, m.scope]));
+
+  await check('otzaria index: pairs 99%+ of the real "X על Y" commentaries, fast', () => {
+    const comms = books.filter((b) => / על /.test(b.title));
+    assert.ok(comms.length > 5800, `${comms.length} commentaries in the map`);
+    const covered = comms.filter((b) => baseOf.has(b.id) || multiOf.has(b.id)).length;
+    assert.ok(covered / comms.length >= 0.99, `coverage ${covered}/${comms.length}`);
+    assert.ok(pairs.every((p) => p.commId !== p.baseId), 'never paired with itself');
+    assert.ok(ms < 5000, `pairing took ${ms}ms`);
+    console.log(`  full-library pairing: ${covered}/${comms.length} commentaries (+${pairs.length - pairs.filter((p) => / על /.test(books[p.commId - 1].title)).length} named without "על") in ${ms}ms`);
+  });
+  await check('otzaria index: real commentaries pair with the right base (corpus, locality, chains)', () => {
+    const expect = {
+      'תנך/ראשונים/רשי/תורה/רשי על בראשית': 'תנך/תורה/בראשית',
+      'תנך/ראשונים/רמבן/תורה/רמבן על בראשית': 'תנך/תורה/בראשית',
+      'תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות': 'תלמוד בבלי/סדר זרעים/ברכות',
+      'תלמוד בבלי/ראשונים/רשי/סדר זרעים/רשי על ברכות': 'תלמוד בבלי/סדר זרעים/ברכות',
+      'משנה/ראשונים/ברטנורא/סדר זרעים/ברטנורא על משנה ברכות': 'משנה/סדר זרעים/משנה ברכות',
+      'משנה/אחרונים/תוספות יום טוב/סדר זרעים/תוספות יום טוב על משנה ברכות': 'משנה/סדר זרעים/משנה ברכות',
+      'משנה/אחרונים/יכין/סדר זרעים/יכין ברכות': 'משנה/סדר זרעים/משנה ברכות',
+      'תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי/סדר זרעים/פני משה על תלמוד ירושלמי ברכות': 'תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי ברכות',
+      'תלמוד ירושלמי/מפרשים/גליוני השס/מועד/גליוני השס על ירושלמי ביצה': 'תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי ביצה',
+      // A Talmud-folder commentary on a Mishnah-only tractate: the Mishnah, not the commentary "יכין זבים".
+      'תלמוד בבלי/אחרונים/אבן העוזר/אבן העוזר על זבים': 'משנה/סדר טהרות/משנה זבים',
+      // Commentaries on commentaries.
+      'תלמוד בבלי/מחברי זמננו/הערות על ביאור חברותא/הערות על חברותא על ברכות': 'תלמוד בבלי/מחברי זמננו/ביאור חברותא/חברותא על ברכות',
+      'הלכה/משנה תורה/מפרשים/קובץ על היד החזקה/ספר זמנים/קובץ על היד החזקה על משנה תורה, הלכות שבת': 'הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת',
+      'הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים/מגיד משנה על משנה תורה, הלכות שבת': 'הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת',
+      // Shulchan Aruch: known standalone names and "<series> <part>".
+      'הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה': 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים',
+      'הלכה/שולחן ערוך/מפרשים/משנה ברורה/ביאור הלכה': 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים',
+      'הלכה/שולחן ערוך/מפרשים/בית שמואל/בית שמואל': 'הלכה/שולחן ערוך/שולחן ערוך, אבן העזר',
+      'הלכה/שולחן ערוך/מפרשים/באר היטב/באר היטב אורח חיים': 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים',
+      // ".../טור/מפרשים/": the one text of the folder that owns "מפרשים".
+      'הלכה/טור/מפרשים/בית יוסף': 'הלכה/טור/טור',
+      'הלכה/טור/מפרשים/בח': 'הלכה/טור/טור',
+    };
+    for (const [comm, base] of Object.entries(expect)) {
+      assert.ok(idOf.has(comm), `not in the map: ${comm}`);
+      assert.strictEqual(baseOf.get(idOf.get(comm)), base, comm);
+    }
+    // A commentary in ".../ריף/מפרשים/" is on the Rif, not on the Bavli.
+    const maor = paths.find((p) => p.endsWith('/המאור הגדול על בבא קמא'));
+    assert.ok(/^תלמוד בבלי\/ראשונים\/ריף\//.test(baseOf.get(idOf.get(maor))), `${maor} -> ${baseOf.get(idOf.get(maor))}`);
+    assert.strictEqual(baseOf.get(idOf.get('תלמוד בבלי/ראשונים/ריף/מפרשים/השגות הראבד/השגות הראבד גיטין')), 'תלמוד בבלי/ראשונים/ריף/סדר נשים/ריף גיטין', '"<series> <tractate>" inside ריף/מפרשים');
+    // Every "X על שולחן ערוך אורח חיים" pairs with the Shulchan Aruch itself (never באר היטב).
+    const onOc = books.filter((b) => /על (שולחן|שלחן) ערוך,? אורח חיים$/.test(b.title));
+    assert.ok(onOc.length >= 10);
+    for (const b of onOc) assert.strictEqual(baseOf.get(b.id), 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', b.title);
+    // Corpus-wide commentaries are aligned per top-level book heading.
+    assert.strictEqual(multiOf.get(idOf.get('תלמוד בבלי/אחרונים/חידושי מהראל על השס')).corpus, 'bavli');
+    assert.strictEqual(multiOf.get(idOf.get(paths.find((p) => p.endsWith('/אסיפת זקנים על סדר קדשים')))).seder, 'סדר קדשימ');
+    // Not commentaries on one book: left unpaired.
+    assert.ok(!baseOf.has(idOf.get('הלכה/אחרונים/כף החיים')), 'הלכה/אחרונים/כף החיים is another work');
+    for (const t of ['מאמר על ישמעאל', 'אור יקר על ענין הנבואה']) assert.ok(!baseOf.has(books.find((b) => b.title === t).id), t);
+    // Orders are only the six סדרים ("סדר עולם רבה" is a book).
+    assert.strictEqual(baseOf.get(idOf.get(paths.find((p) => p.endsWith('/גרא על סדר עולם רבה')))), paths.find((p) => p.endsWith('/סדר עולם רבה/סדר עולם רבה')));
+  });
+  await check('otzaria index: real naming forms (splits, variants, abbreviations)', () => {
+    assert.deepStrictEqual(pairing.commentarySplits('קובץ על היד החזקה על משנה תורה, הלכות שבת'), ['היד החזקה על משנה תורה, הלכות שבת', 'משנה תורה, הלכות שבת']);
+    const v = (s) => pairing.nameVariants(s);
+    assert.ok(v('מגילה מהדורא קמא').includes('מגילה'));
+    assert.ok(v('שבת [מיוחס להריטבא]').includes('שבת'));
+    assert.ok(v('שולחן ערוך יוד חלק א').includes('שולחנ ערוכ יורה דעה'));
+    assert.ok(v('מסכת ברכות').includes('ברכות'));
+    const place = pairing.placeOf('תלמוד בבלי/ראשונים/ריף/מפרשים/בעל המאור');
+    assert.deepStrictEqual([place.corpus, place.primary, place.owner], ['bavli', false, 'תלמוד בבלי/ראשונימ/ריפ']);
+    assert.strictEqual(refAlign.sharesInlineNumbering('שולחן ערוך, אורח חיים'), false);
+    assert.strictEqual(refAlign.sharesInlineNumbering('משנה תורה, הלכות שבת'), true);
+  });
+
+  // --- a fixture library at real Otzaria paths ----------------------------------------------
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-otzindex-'));
+  try {
+    const lib = path.join(tmp, 'אוצריא');
+    const w = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(lib, rel + '.txt')), { recursive: true }); fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n')); };
+    // Tanach: chapters with inline "(א)" verses; Rashi / Ramban with verse headings, several דיבורים each.
+    w('תנך/תורה/בראשית', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '(א) בראשית ברא', '(ב) והארץ היתה', '(ג) ויאמר אלהים', '<h2>פרק ב</h2>', '(א) ויכלו']);
+    w('תנך/ראשונים/רשי/תורה/רשי על בראשית', ['<h1>רשי על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית. רשי א1', 'ברא. רשי א2', '<h3>פסוק ג</h3>', 'ויאמר. רשי ג1', '<h2>פרק ב</h2>', '<h3>פסוק א</h3>', 'ויכלו. רשי ב-א']);
+    w('תנך/ראשונים/רמבן/תורה/רמבן על בראשית', ['<h1>רמבן על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית ברא. רמבן א1', 'אלהים. רמבן א2', 'השמים. רמבן א3', '<h3>פסוק ב</h3>', 'תהו. רמבן ב1']);
+    // Bavli + Tosafot (daf / amud) + Rashi; Mishnah with inline mishnayot + Bartenura.
+    w('תלמוד בבלי/סדר זרעים/ברכות', ['<h1>ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי קורין', 'גמרא', '<h2>דף ב:</h2>', 'תנו רבנן']);
+    w('תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי. תוס 1', 'קורין. תוס 2', '<h2>דף ב:</h2>', 'תנו רבנן. תוס 3']);
+    w('משנה/סדר זרעים/משנה ברכות', ['<h1>משנה ברכות</h1>', '<h2>פרק א</h2>', '(א) מאימתי קורין', '(ב) מאימתי קורין בשחרית']);
+    w('משנה/ראשונים/ברטנורא/סדר זרעים/ברטנורא על משנה ברכות', ['<h1>ברטנורא על משנה ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'מאימתי. ברט א1', 'עד סוף. ברט א2', '<h3>משנה ב</h3>', 'בשחרית. ברט ב1']);
+    w('תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי ברכות', ['<h1>תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'ירושלמי א', '<h3>הלכה ב</h3>', 'ירושלמי ב']);
+    w('תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי/סדר זרעים/פני משה על תלמוד ירושלמי ברכות', ['<h1>פני משה על תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה ב</h3>', 'פני משה ב1', 'פני משה ב2']);
+    // Rambam: chapters with inline halachot; מגיד משנה numbers its דיבורים like the Rambam.
+    w('הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת', ['<h1>משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה ממלאכה', '(ב) כל מקום', '(ג) העושה']);
+    w('הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים/מגיד משנה על משנה תורה, הלכות שבת', ['<h1>מגיד משנה על משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה. מגיד א1', 'עוד שם. מגיד א2', '(ג) העושה. מגיד ג1']);
+    // Shulchan Aruch with inline seifim; משנה ברורה numbers seifim katanim (another sequence).
+    w('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', ['<h1>שולחן ערוך, אורח חיים</h1>', '<h2>סימן א</h2>', '(א) יתגבר כארי', '(ב) המשכים', '<h2>סימן ב</h2>', '(א) לא ילבש']);
+    w('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה', ['<h1>משנה ברורה</h1>', '<h2>סימן א</h2>', '(א) יתגבר. מב סק א', '(ב) כארי. מב סק ב', '(ג) לעבודת. מב סק ג', '<h2>סימן ב</h2>', '(א) לא ילבש. מב ב-א']);
+    // A corpus-wide commentary: one file, a top-level heading per tractate.
+    w('תלמוד בבלי/אחרונים/חידושי מהראל על השס', ['<h1>חידושי מהראל על השס</h1>', '<h2>מסכת ברכות</h2>', '<h3>דף ב:</h3>', 'מהראל ברכות ב:', '<h2>מסכת שבת</h2>', '<h3>דף ב.</h3>', 'מהראל שבת']);
+    // Commentary on a commentary (2-level chain).
+    w('תלמוד בבלי/מחברי זמננו/ביאור חברותא/חברותא על ברכות', ['<h1>חברותא על ברכות</h1>', '<h2>דף ב.</h2>', 'חברותא 1', '<h2>דף ב:</h2>', 'חברותא 2']);
+    w('תלמוד בבלי/מחברי זמננו/הערות על ביאור חברותא/הערות על חברותא על ברכות', ['<h1>הערות על חברותא על ברכות</h1>', '<h2>דף ב:</h2>', 'הערה על חברותא']);
+    // Non-text files Otzaria folders also contain (pdf / docx) are skipped by the indexer.
+    fs.writeFileSync(path.join(lib, 'הלכה', 'מבוא.pdf'), '%PDF');
+
+    const out = path.join(tmp, 'otz.db');
+    const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`], { encoding: 'utf8' });
+    if (proc.status !== 0) throw new Error('otzaria index fixture build failed:\n' + proc.stderr);
+    const db = openDb(out);
+    const id = async (rel) => (await db.all('SELECT id FROM books WHERE file_path = ?', [rel + '.txt']))[0].id;
+    const blocks = async (rel, line) => {
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, await id(rel), line));
+      return Object.fromEntries(groups.map((g) => [g.bookTitle, g.entries.map((e) => e.display_text)]));
+    };
+
+    await check('otzaria fixture: full commentary block per verse / mishnah / halacha / amud, zero bleed', async () => {
+      const BR = 'תנך/תורה/בראשית';
+      assert.deepStrictEqual(await blocks(BR, 3), { 'רשי על בראשית': ['בראשית. רשי א1', 'ברא. רשי א2'], 'רמבן על בראשית': ['בראשית ברא. רמבן א1', 'אלהים. רמבן א2', 'השמים. רמבן א3'] });
+      assert.deepStrictEqual(await blocks(BR, 4), { 'רמבן על בראשית': ['תהו. רמבן ב1'] }, 'verse ב: only רמבן, nothing of verse א');
+      assert.deepStrictEqual(await blocks(BR, 5), { 'רשי על בראשית': ['ויאמר. רשי ג1'] });
+      assert.deepStrictEqual(await blocks(BR, 7), { 'רשי על בראשית': ['ויכלו. רשי ב-א'] });
+      const BAVLI = 'תלמוד בבלי/סדר זרעים/ברכות';
+      const amudA = await blocks(BAVLI, 3);
+      assert.deepStrictEqual(amudA['תוספות על ברכות'], ['מאימתי. תוס 1', 'קורין. תוס 2']);
+      assert.deepStrictEqual(amudA['חברותא על ברכות'], ['חברותא 1']);
+      assert.ok(!amudA['חידושי מהראל על השס'], 'מהראל has nothing on ב.');
+      const amudB = await blocks(BAVLI, 6);
+      assert.deepStrictEqual(amudB['תוספות על ברכות'], ['תנו רבנן. תוס 3']);
+      assert.deepStrictEqual(amudB['חידושי מהראל על השס'], ['מהראל ברכות ב:'], 'corpus-wide commentary aligned under its "מסכת ברכות" heading');
+      const MISHNA = 'משנה/סדר זרעים/משנה ברכות';
+      assert.deepStrictEqual(await blocks(MISHNA, 3), { 'ברטנורא על משנה ברכות': ['מאימתי. ברט א1', 'עד סוף. ברט א2'] });
+      assert.deepStrictEqual(await blocks(MISHNA, 4), { 'ברטנורא על משנה ברכות': ['בשחרית. ברט ב1'] });
+      const YER = 'תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי ברכות';
+      assert.deepStrictEqual(await blocks(YER, 6), { 'פני משה על תלמוד ירושלמי ברכות': ['פני משה ב1', 'פני משה ב2'] });
+      assert.deepStrictEqual(await blocks(YER, 4), {}, 'הלכה א has no פני משה');
+      const RAMBAM = 'הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת';
+      assert.deepStrictEqual((await blocks(RAMBAM, 3))['מגיד משנה על משנה תורה, הלכות שבת'], ['(א) שביתה. מגיד א1', 'עוד שם. מגיד א2'], 'halacha א: its two דיבורים');
+      assert.ok(!(await blocks(RAMBAM, 4))['מגיד משנה על משנה תורה, הלכות שבת'], 'halacha ב: nothing');
+      assert.deepStrictEqual((await blocks(RAMBAM, 5))['מגיד משנה על משנה תורה, הלכות שבת'], ['(ג) העושה. מגיד ג1']);
+    });
+    await check('otzaria fixture: Shulchan Aruch commentaries align at the siman (seif katan ≠ seif)', async () => {
+      const OC = 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים';
+      assert.deepStrictEqual((await blocks(OC, 4))['משנה ברורה'], ['(א) יתגבר. מב סק א', '(ב) כארי. מב סק ב', '(ג) לעבודת. מב סק ג'], 'all of סימן א, not ס"ק ב on seif ב');
+      assert.deepStrictEqual((await blocks(OC, 6))['משנה ברורה'], ['(א) לא ילבש. מב ב-א']);
+    });
+    await check('otzaria fixture: chains, "פתח בספר" ranges and back-links', async () => {
+      const BAVLI = 'תלמוד בבלי/סדר זרעים/ברכות';
+      const chev = 'תלמוד בבלי/מחברי זמננו/ביאור חברותא/חברותא על ברכות';
+      assert.deepStrictEqual((await blocks(chev, 5))['הערות על חברותא על ברכות'], ['הערה על חברותא'], 'commentary on a commentary');
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, await id(BAVLI), 3));
+      const tos = groups.find((g) => g.bookTitle === 'תוספות על ברכות');
+      assert.deepStrictEqual(tos.block, { refKey: 'דף ב|עמוד א', start: 2, end: 4 }, '"פתח בספר" opens תוספות at its דף ב. block');
+      const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, await id('תלמוד בבלי/אחרונים/חידושי מהראל על השס'), 4));
+      assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries.map((e) => e.display_text)]), [['ברכות', ['תנו רבנן']]], 'back-link from a corpus-wide commentary');
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 100; i++) await commentary.fetchUnitLinks(db, await id(BAVLI), 3);
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / 100;
+      assert.ok(ms < 5, `unit lookup ${ms.toFixed(2)}ms`);
     });
     db.close();
   } finally {

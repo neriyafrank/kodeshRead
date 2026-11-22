@@ -17,7 +17,9 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > **Commentary reference alignment (schema v4):** `ref_links` (base/commentary line ranges + canonical
 > `ref_key` like `פרק א|פסוק א`) is built in the links phase by `shared/refAlign.js` (`indexer.indexRefLinks`,
 > idempotent per commentary book, pause-safe). `shared/commentary.js` merges it with `links`; the drawer shows
-> whole commentary blocks per unit. Query-time Hebrew abbreviation/morphology engine: `shared/hebrewTorahDict.js`.
+> whole commentary blocks per unit (schema v5: covering `(book, partner, start, end)` indexes). Commentary <->
+> base pairing: `shared/pairing.js`, calibrated on the full library map `otzaria_index_only.txt` (regression-tested
+> in `scripts/selftest.js`). Query-time Hebrew abbreviation/morphology engine: `shared/hebrewTorahDict.js`.
 
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).

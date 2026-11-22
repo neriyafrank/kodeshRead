@@ -160,8 +160,21 @@ Base books and their commentaries share parallel heading trees in Otzaria (פר�
 
 - every heading becomes canonical unit labels, so each TOC node gets a reference path
   (`פרק א|פסוק א`, `דף ב|עמוד א` — `דף ב.` and `דף ב` › `עמוד א` are the same unit, `סימן שכח|סעיף ד`);
-- commentaries are paired with their base book by Otzaria naming (`רש"י על בראשית`,
-  `ברטנורא על משנה ברכות` → the Mishnah, not the Talmud) and known bases (`משנה ברורה` → `אורח חיים`);
+- commentaries are paired with their base book by `shared/pairing.js`, calibrated on the full library
+  map (`otzaria_index_only.txt`: 7,674 books, 5,850 named `X על Y`). It pairs 99.7% of them, plus 197
+  books named without `על`, in about 0.5 s:
+  - bare names go to the right corpus (`תוספות על ברכות` → the Bavli);
+  - explicit corpus prefixes are honoured (`ברטנורא על משנה ברכות`, `… על תלמוד ירושלמי, מסכת יומא`);
+  - comma titles match (`… על משנה תורה, הלכות שבת`, `… על שולחן ערוך אורח חיים` → `שולחן ערוך, אורח חיים`);
+  - commentaries on commentaries are followed through every ` על `
+    (`הערות על חברותא על ברכות`, `קובץ על היד החזקה על משנה תורה, …`);
+  - a commentary's `מפרשים` folder decides its base (`ריף/מפרשים/…/המאור הגדול על בבא קמא` → the Rif;
+    `טור/מפרשים/בית יוסף` → `טור`);
+  - `<series> <base>` titles without `על` pair by their suffix (`באר היטב אורח חיים`, `יכין ברכות`);
+  - known standalone names pair directly (`משנה ברורה`, `מגן אברהם`, `בית שמואל`);
+  - primary texts win over same-named commentaries (`אבן העוזר על זבים` → `משנה זבים`, not `יכין זבים`);
+  - corpus-wide commentaries (`… על השס`, `… על התורה`, `… על סדר קדשים`) are aligned per top-level
+    heading that names a base book (`מסכת ברכות`).
 - every commentary unit with its own text (all its דיבורים המתחילים) is stored in `ref_links` with the
   base unit of the same path, as two line ranges. A base without verse headings gets the verse from
   `(א)` markers or one-verse-per-line. Leaves the base lacks (`סעיף קטן`) align at the siman.
@@ -175,6 +188,8 @@ Halacha books in the real Otzaria sample (`otzaria_structure_sample.txt`: ערו
 - a `סעיף` heading in a commentary is resolved to the base's inline `(ב)` line;
 - unmarked paragraphs (ערוך השולחן) are never guessed to be seifim. Only Tanach verses fall back to
   one verse per line;
+- commentaries on the Shulchan Aruch / Tur align at the siman: their `(א)` notes count seifim
+  katanim, which is a different sequence from the base's seifim;
 - TOC columns name inline units by context: סעיף in a סימן / כלל, פסוק in Tanach, משנה in Mishnah.
 
 For each commentator the drawer shows the innermost unit covering the line: the seif's note, or the siman's

@@ -31,7 +31,7 @@ export function makeBaseIndex(units: BookUnit[]): { units: BookUnit[]; find(labe
 export function isCommentaryTitle(title: string): boolean;
 export function linkTypeFor(title: string): 'commentary' | 'targum';
 export function splitCommentaryTitle(title: string): { commentator: string; base: string } | null;
-export function pairCommentaries(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[]): { commId: number; baseId: number }[];
+export function pairCommentaries(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[]): import("./pairing").Pairs;
 /** Name of "(א)" units inside a heading: פסוק (Tanach), משנה, סעיף (סימן / כלל), else אות. */
 export function inlineUnitWord(parentTitle: string, categoryPath?: string | null): string;
 export function markerKey(text: string | null | undefined): string | null;
@@ -43,4 +43,10 @@ export function alignUnits(
   /** With `text`, a unit whose דיבורים carry "(ב)" markers is split per seif / verse. */
   commContent: number[] | Set<number> | { line: number; text?: string | null }[],
   baseContent?: (unit: BookUnit) => Promise<{ line: number; text: string }[]>,
+  opts?: { splitMarkers?: boolean },
 ): Promise<{ refKey: string; baseStart: number; baseEnd: number; commStart: number; commEnd: number }[]>;
+export function multiUnits(commUnits: BookUnit[], targets: Map<string, number>): Map<number, BookUnit[]>;
+export function multiTargets(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[], scope: object): Map<string, number>;
+export function headingBookKey(title: string): string;
+/** False for the Shulchan Aruch / Tur (their commentaries number seifim katanim). */
+export function sharesInlineNumbering(baseTitle: string): boolean;

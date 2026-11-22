@@ -1020,12 +1020,16 @@ async function indexRefLinks(db, opts) {
   );
   const books = rows.map((r) => ({ id: r.id, title: r.title, aliases: String(r.aliases).split('|').filter(Boolean), categoryPath: r.category_path, totalLines: r.total_lines }));
   const byId = new Map(books.map((b) => [b.id, b]));
-  let pairs = refAlign.pairCommentaries(books);
+  const paired = refAlign.pairCommentaries(books);
+  // Jobs: one commentary -> one base (Otzaria "X על Y"), or a corpus-wide commentary ("… על השס")
+  // whose top-level book headings each name a base (resolved below, once its TOC is loaded).
+  let jobs = paired.map((p) => ({ commId: p.commId, baseId: p.baseId }));
+  for (const m of paired.multi || []) jobs.push({ commId: m.commId, scope: m.scope });
   if (o.bookIds) {
     const only = new Set(o.bookIds);
-    pairs = pairs.filter((p) => only.has(p.commId) || only.has(p.baseId));
+    jobs = jobs.filter((j) => only.has(j.commId) || (j.baseId != null ? only.has(j.baseId) : true));
   }
-  stats.pairs = pairs.length;
+  stats.pairs = jobs.length;
   // Base books are reused by many commentaries (רש"י, רמב"ן, ... על בראשית): keep a few cached.
   const unitCache = new Map();
   const unitsOf = async (id) => {
@@ -1038,6 +1042,10 @@ async function indexRefLinks(db, opts) {
     }
     return u;
   };
+  const baseContentOf = (baseId) => (unit) =>
+    db
+      .all('SELECT line_index AS line, clean_text AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end])
+      .then((r) => r.map((x) => ({ line: x.line, text: String(x.text).slice(0, 12) })));
   const perTx = Math.max(1, o.booksPerTransaction || 20);
   let inTx = false;
   let pending = 0;
@@ -1049,38 +1057,38 @@ async function indexRefLinks(db, opts) {
     if (o.onCommit) await o.onCommit();
   };
   try {
-    for (let i = 0; i < pairs.length; i++) {
+    for (let i = 0; i < jobs.length; i++) {
       const stop = o.shouldStop ? o.shouldStop() : null;
       if (stop) {
         stats.stopped = stop;
         break;
       }
-      const { commId, baseId } = pairs[i];
-      const baseUnits = await unitsOf(baseId);
+      const job = jobs[i];
+      const { commId } = job;
       const commNodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [commId]);
       const commUnits = refAlign.bookUnits(commNodes, byId.get(commId).totalLines);
       // Line numbers + the first characters (inline "(ב)" markers split a unit per seif / verse).
-      const content = (await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId]));
-      const aligned = await refAlign.alignUnits(baseUnits, commUnits, content, (unit) =>
-        db
-          .all('SELECT line_index AS line, clean_text AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end])
-          .then((r) => r.map((x) => ({ line: x.line, text: String(x.text).slice(0, 12) }))),
-      );
+      const content = await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId]);
+      const parts = job.baseId != null ? new Map([[job.baseId, commUnits]]) : refAlign.multiUnits(commUnits, refAlign.multiTargets(books, job.scope));
+      const rowsOut = [];
+      for (const [baseId, units] of parts) {
+        const aligned = await refAlign.alignUnits(await unitsOf(baseId), units, content, baseContentOf(baseId), {
+          splitMarkers: refAlign.sharesInlineNumbering(byId.get(baseId).title),
+        });
+        for (const a of aligned) rowsOut.push([baseId, a.baseStart, a.baseEnd, commId, a.commStart, a.commEnd, a.refKey, refAlign.linkTypeFor(byId.get(commId).title)]);
+      }
       if (!inTx) {
         await db.exec('BEGIN');
         inTx = true;
       }
-      await db.run('DELETE FROM ref_links WHERE comm_book_id = ? AND base_book_id = ?', [commId, baseId]);
-      await insertMany(
-        db,
-        'INSERT INTO ref_links (base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type)',
-        8,
-        aligned.map((a) => [baseId, a.baseStart, a.baseEnd, commId, a.commStart, a.commEnd, a.refKey, refAlign.linkTypeFor(byId.get(commId).title)]),
-      );
+      // Idempotent per job (a resumed links phase simply redoes it).
+      if (job.baseId != null) await db.run('DELETE FROM ref_links WHERE comm_book_id = ? AND base_book_id = ?', [commId, job.baseId]);
+      else await db.run('DELETE FROM ref_links WHERE comm_book_id = ?', [commId]);
+      await insertMany(db, 'INSERT INTO ref_links (base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type)', 8, rowsOut);
       stats.aligned++;
-      stats.units += aligned.length;
+      stats.units += rowsOut.length;
       pending++;
-      if (o.onBook) o.onBook({ index: i + 1, total: pairs.length, title: byId.get(commId).title });
+      if (o.onBook) o.onBook({ index: i + 1, total: jobs.length, title: byId.get(commId).title });
       if (pending >= perTx) await commit();
     }
     await commit();

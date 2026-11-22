@@ -179,91 +179,47 @@ function makeBaseIndex(units) {
 // 2. Commentary <-> base book pairing
 // ---------------------------------------------------------------------------
 
-/** Standalone commentaries whose title does not name their base book. */
-const KNOWN_BASES = {
-  'משנה ברורה': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'ביאור הלכה': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'שער הציון': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'מגן אברהם': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'באר היטב': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'כף החיים': ['שולחן ערוך אורח חיים', 'אורח חיים'],
-  'אונקלוס': [],
-};
-const KNOWN_BASES_NORM = new Map(Object.entries(KNOWN_BASES).map(([k, v]) => [aliasKey(k), v.map(aliasKey)]));
+// Pairing lives in ./pairing.js (calibrated on the full Otzaria library index).
+const { KNOWN_BASES, isCommentaryTitle, splitCommentaryTitle, pairCommentaries, multiTargets, headingBookKey } = require('./pairing');
 
-/** Words that may prefix the base name in a commentary title ("על מסכת ברכות", "על ספר בראשית"). */
-const BASE_PREFIXES = ['מסכת', 'ספר', 'משנה', 'תלמוד בבלי', 'תלמוד ירושלמי', 'בבלי', 'ירושלמי', 'שולחן ערוך', 'שלחן ערוך', 'שו"ע', 'רמב"ם', 'משנה תורה'].map(aliasKey);
-
-const isCommentaryTitle = (title) => / על /.test(String(title || ''));
+/**
+ * Whether a commentary's inline "(א)" numbering can be the base's own units. Not for the Shulchan
+ * Aruch / Tur: their commentaries (משנה ברורה, מגן אברהם, ט"ז, ש"ך ...) number seifim katanim,
+ * a different sequence than the base's seifim, so those align at the siman.
+ */
+function sharesInlineNumbering(baseTitle) {
+  return !/^(שולחנ ערוכ|שלחנ ערוכ|טור)( |$)/.test(aliasKey(baseTitle));
+}
 
 /** link_type of an aligned book: translations (אונקלוס, תרגום ...) rank after commentaries. */
 function linkTypeFor(title) {
   return /אונקלוס|תרגום|targum/i.test(String(title || '')) ? 'targum' : 'commentary';
 }
 
-/** "רש\"י על בראשית" -> { commentator: 'רש"י', base: 'בראשית' } (null when not "X על Y"). */
-function splitCommentaryTitle(title) {
-  const t = String(title || '').trim();
-  const i = t.indexOf(' על ');
-  if (i <= 0) return null;
-  return { commentator: t.slice(0, i).trim(), base: t.slice(i + 4).trim() };
-}
-
 /**
- * Pairs commentary books with base books.
- * @param {{ id, title, aliases: string[], categoryPath: string }[]} books
- * @returns {{ commId, baseId }[]}
+ * Units of a corpus-wide commentary ("… על השס", "… על התורה") split per base book: a heading in
+ * the top two levels that names a base book ("מסכת ברכות", "בראשית", "הלכות שבת") starts that
+ * book's section; its descendants are re-rooted below it ("ברכות|דף ב|עמוד א" -> "דף ב|עמוד א").
+ * @param {object[]} commUnits  bookUnits() of the commentary
+ * @param {Map<string, number>} targets  multiTargets(): bare book key -> base book id
+ * @returns {Map<number, object[]>} base book id -> re-rooted commentary units
  */
-function pairCommentaries(books) {
-  const byKey = new Map();
-  const add = (k, b) => {
-    if (!k) return;
-    const cur = byKey.get(k) || [];
-    if (!cur.includes(b)) cur.push(b);
-    byKey.set(k, cur);
-  };
-  const bases = books.filter((b) => !isCommentaryTitle(b.title));
-  for (const b of bases) {
-    add(aliasKey(b.title), b);
-    for (const a of b.aliases || []) add(a, b);
-    // "שולחן ערוך - אורח חיים" / "שולחן ערוך, אורח חיים" -> also "אורח חיים".
-    const parts = String(b.title).split(/\s*[-–—,]\s*/);
-    if (parts.length > 1) add(aliasKey(parts[parts.length - 1]), b);
-  }
-  const shared = (a, b) => {
-    const x = String(a || '').split('/');
-    const y = String(b || '').split('/');
-    let n = 0;
-    while (n < x.length && n < y.length && x[n] === y[n]) n++;
-    return n;
-  };
-  const pick = (cands, comm, hint) => {
-    if (!cands || !cands.length) return null;
-    const scored = cands
-      .filter((c) => c.id !== comm.id)
-      .map((c) => ({ c, s: shared(c.categoryPath, comm.categoryPath) * 10 + (hint && String(c.categoryPath).includes(hint) ? 5 : 0) }));
-    scored.sort((p, q) => q.s - p.s || p.c.id - q.c.id);
-    return scored.length ? scored[0].c : null;
-  };
-  const out = [];
-  for (const comm of books) {
-    let base = null;
-    const split = splitCommentaryTitle(comm.title);
-    if (split) {
-      let key = aliasKey(split.base);
-      base = pick(byKey.get(key), comm);
-      // "ברטנורא על משנה ברכות", "תוספות על מסכת שבת", "ט\"ז על שולחן ערוך אורח חיים".
-      for (const p of BASE_PREFIXES) {
-        if (base) break;
-        if (key.startsWith(p + ' ')) base = pick(byKey.get(key.slice(p.length + 1)), comm, p.split(' ')[0]);
-      }
-    } else {
-      for (const k of KNOWN_BASES_NORM.get(aliasKey(comm.title)) || []) {
-        base = pick(byKey.get(k), comm);
-        if (base) break;
-      }
+function multiUnits(commUnits, targets) {
+  const out = new Map();
+  const sorted = commUnits.slice().sort((a, b) => a.start - b.start || a.labels.length - b.labels.length);
+  for (const head of sorted) {
+    if (head.labels.length > 2) continue;
+    const baseId = targets.get(headingBookKey(head.title));
+    if (baseId == null) continue;
+    const depth = head.labels.length;
+    const list = out.get(baseId) || [];
+    for (const u of sorted) {
+      if (u === head || u.start < head.start || u.start > head.end || u.labels.length <= depth) continue;
+      if (refKeyOf(u.labels.slice(0, depth)) !== head.refKey) continue;
+      const labels = u.labels.slice(depth);
+      list.push({ ...u, labels, refKey: refKeyOf(labels) });
     }
-    if (base && base.id !== comm.id) out.push({ commId: comm.id, baseId: base.id });
+    if (list.length) out.set(baseId, list);
   }
   return out;
 }
@@ -345,9 +301,12 @@ function intToHebrew(n) {
  *        commentary (with `text`, a unit whose דיבורים carry "(ב)" markers is split per seif / verse)
  * @param {(unit) => Promise<{ line, text }[]>} [baseContent]  content lines of a base unit
  *        (only loaded when a verse / seif has to be resolved inline)
+ * @param {{ splitMarkers?: boolean }} [opts]  splitMarkers: false when the commentary's "(א)" numbering
+ *        is its own (seif katan of the Shulchan Aruch commentaries), not the base's units
  * @returns {Promise<{ refKey, baseStart, baseEnd, commStart, commEnd }[]>}
  */
-async function alignUnits(baseUnits, commUnits, commContent, baseContent) {
+async function alignUnits(baseUnits, commUnits, commContent, baseContent, opts) {
+  const splitMarkers = !opts || opts.splitMarkers !== false;
   const index = makeBaseIndex(baseUnits);
   const raw = Array.isArray(commContent) ? commContent : [...commContent];
   const content = raw.map((x) => (typeof x === 'number' ? { line: x, text: null } : x)).sort((a, b) => a.line - b.line);
@@ -404,7 +363,7 @@ async function alignUnits(baseUnits, commUnits, commContent, baseContent) {
     // The commentary marks its דיבורים per seif / verse inline, like the base ("(ב) ..." under
     // "סימן א"): split the unit so each segment links to that seif / verse only.
     const markers = own.filter((l) => l.text != null && markerKey(l.text));
-    if (base && markers.length >= 1 && baseContent && !(base.labels.length > u.labels.length)) {
+    if (splitMarkers && base && markers.length >= 1 && baseContent && !(base.labels.length > u.labels.length)) {
       const word = inlineUnitWord(base.title);
       // Verses may also be one per line (no markers in the base); seifim always need markers.
       const inline = await inlineOf(base, word === 'פסוק' ? 'פסוק' : 'סעיף');
@@ -434,8 +393,12 @@ module.exports = {
   bookUnits,
   makeBaseIndex,
   KNOWN_BASES,
+  multiTargets,
+  multiUnits,
+  headingBookKey,
   isCommentaryTitle,
   linkTypeFor,
+  sharesInlineNumbering,
   splitCommentaryTitle,
   pairCommentaries,
   inlineUnitWord,
