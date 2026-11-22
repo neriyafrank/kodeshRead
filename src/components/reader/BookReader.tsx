@@ -9,6 +9,9 @@
  * - Jumps (Quick Jump / TOC / search) scroll inside the window when the target is
  *   loaded, otherwise the window is re-centred; the target row glows for 2s.
  * - The exact position (top line + pixel offset into it) is saved to the tab.
+ * - Paragraphs with entries in `links` carry a small count badge (counts are fetched
+ *   with each window chunk). Tapping such a paragraph opens the commentary drawer,
+ *   docked under the text as a resizable split view and synchronized to it.
  */
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -24,6 +27,7 @@ import {
   useWindowDimensions,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
+  type ViewStyle,
 } from 'react-native';
 
 import {
@@ -37,12 +41,14 @@ import {
   type LineRange,
   type ParagraphRow,
 } from '../../../shared/reader';
+import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
 import { useSettings } from '../../state/settingsStore';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
 import { spacing, useAppTheme, type Palette } from '../../theme';
 import { RichText } from '../RichText';
+import { CommentaryPane, commentaryPaneHeight } from './CommentaryPane';
 
 export const BREADCRUMB_HEIGHT = 40;
 /**
@@ -56,8 +62,11 @@ const HIGHLIGHT_MS = 2000;
 const SAVE_DEBOUNCE_MS = 300;
 const useNative = Platform.OS !== 'web';
 
+/** A window row plus the number of linked commentaries/links on that line. */
+type ReaderRow = ParagraphRow & { link_count: number };
+
 interface WindowState {
-  rows: ParagraphRow[];
+  rows: ReaderRow[];
   range: LineRange;
   /** Bumped on every re-centre; remounts the list with a fresh initialScrollIndex. */
   epoch: number;
@@ -87,6 +96,9 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const fontFamily = useSettings((s) => s.fontFamily);
   const showNiqqud = useSettings((s) => s.showNiqqud);
   const updatePosition = useTabs((s) => s.updatePosition);
+  const openBook = useTabs((s) => s.openBook);
+  const commentaryFollow = useSettings((s) => s.commentaryFollow);
+  const commentaryRatio = useSettings((s) => s.commentaryRatio);
   const consumeJump = useTabs((s) => s.consumeJump);
   const pendingJump = useTabs((s) => (s.pendingJump?.tabId === tab.tabId ? s.pendingJump : null));
 
@@ -97,8 +109,13 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const [highlight, setHighlight] = useState<{ line: number; nonce: number } | null>(null);
   const [topRow, setTopRow] = useState<{ line: number; tocPath: string | null }>({ line: tab.currentLineIndex, tocPath: tab.tocPath });
   const [error, setError] = useState<string | null>(null);
+  /** Paragraph the commentary drawer is showing (null = drawer closed). */
+  const [selected, setSelected] = useState<{ line: number; tocPath: string | null } | null>(null);
+  const [areaHeight, setAreaHeight] = useState(0);
+  const [resizing, setResizing] = useState(false);
+  const listHeight = useRef(0);
 
-  const listRef = useRef<FlashListRef<ParagraphRow>>(null);
+  const listRef = useRef<FlashListRef<ReaderRow>>(null);
   const winRef = useRef<WindowState | null>(null);
   const commitWin = useCallback((next: WindowState) => {
     winRef.current = next;
@@ -151,11 +168,20 @@ export function BookReader({ tab, onOpenToc }: Props) {
 
 
   // --- window loading -----------------------------------------------------------
+  /** Paragraphs [from, to] with their link counts (one indexed query each). */
+  const loadRows = useCallback(
+    async (from: number, to: number): Promise<ReaderRow[]> => {
+      const [rows, counts] = await Promise.all([fetchRange(adapter, bookId, from, to), fetchLinkCounts(adapter, bookId, from, to)]);
+      return attachLinkCounts(rows, counts);
+    },
+    [adapter, bookId],
+  );
+
   /** Re-centre the window on `target`, `lineOffset` px into that row at the reading line. */
   const loadAround = useCallback(
     async (target: number, total: number, lineOffset: number) => {
       const range = windowAround(target, total);
-      const rows = await fetchRange(adapter, bookId, range.from, range.to);
+      const rows = await loadRows(range.from, range.to);
       let idx = indexOfLine(rows, target);
       if (idx < 0) idx = rows.length - 1;
       epochRef.current += 1;
@@ -170,7 +196,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
       }
       return row?.line_index ?? target;
     },
-    [adapter, bookId, scheduleSave, commitWin],
+    [loadRows, scheduleSave, commitWin],
   );
 
   const jumpTo = useCallback(
@@ -257,7 +283,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
           if (!w || w.epoch !== epoch) return;
           const chunk = nextChunk(w.range, direction, total);
           if (!chunk) return;
-          const rows = await fetchRange(adapter, bookId, chunk.from, chunk.to);
+          const rows = await loadRows(chunk.from, chunk.to);
           if (epochRef.current !== epoch || !winRef.current) return;
           const merged = mergeChunk(winRef.current.rows, winRef.current.range, rows, chunk, direction);
           commitWin({ ...winRef.current, rows: merged.rows, range: merged.range });
@@ -267,7 +293,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         if (epochRef.current === epoch) loadingEdge.current[direction] = false;
       }
     },
-    [adapter, bookId, totalLines, commitWin],
+    [loadRows, totalLines, commitWin],
   );
 
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -292,24 +318,101 @@ export function BookReader({ tab, onOpenToc }: Props) {
     if (!row || !layout) return;
     const lineOffset = Math.max(0, Math.round(lineY - layout.y));
     const prev = position.current;
-    if (prev.currentLineIndex !== row.line_index) setTopRow({ line: row.line_index, tocPath: row.toc_path });
+    if (prev.currentLineIndex !== row.line_index) {
+      setTopRow({ line: row.line_index, tocPath: row.toc_path });
+      if (followRef.current) followReadingLine(w.rows, i);
+    }
     if (prev.currentLineIndex !== row.line_index || prev.lineOffset !== lineOffset) {
       position.current = { currentLineIndex: row.line_index, tocPath: row.toc_path, lineOffset };
       scheduleSave();
     }
   };
 
+  // --- commentary drawer --------------------------------------------------------------
+  const selectedLine = selected?.line ?? null;
+  const selectedRef = useRef<number | null>(null);
+  selectedRef.current = selectedLine;
+  const followRef = useRef(commentaryFollow);
+  followRef.current = commentaryFollow && selectedLine != null;
+
+  /** Follow mode: show the first paragraph with links at/after the reading line (a few rows ahead). */
+  const followReadingLine = useCallback((rows: ReaderRow[], from: number) => {
+    for (let j = from; j < Math.min(rows.length, from + 6); j++) {
+      const r = rows[j];
+      if (r.link_count > 0) {
+        if (selectedRef.current !== r.line_index) setSelected({ line: r.line_index, tocPath: r.toc_path });
+        return;
+      }
+    }
+  }, []);
+
+  /** Keep the selected paragraph visible above the drawer (it may now cover it). */
+  const revealRow = useCallback((line: number) => {
+    requestAnimationFrame(() => {
+      const list = listRef.current;
+      const w = winRef.current;
+      if (!list || !w) return;
+      const idx = indexOfLine(w.rows, line);
+      const layout = idx >= 0 ? list.getLayout(idx) : undefined;
+      if (!layout || !listHeight.current) return;
+      const top = layout.y + list.getFirstItemOffset() - lastY.current;
+      const bottom = top + layout.height;
+      if (top < ANCHOR || bottom > listHeight.current) {
+        settleUntil.current = Date.now() + JUMP_SETTLE_MS;
+        list.scrollToIndex({ index: idx, animated: true, viewOffset: -ANCHOR });
+      }
+    });
+  }, []);
+
+  const onPressRow = useCallback((row: ReaderRow) => {
+    const open = selectedRef.current != null;
+    if (open && selectedRef.current === row.line_index) {
+      setSelected(null); // tapping the selected paragraph again closes the drawer
+      return;
+    }
+    if (row.link_count > 0 || open) {
+      setSelected({ line: row.line_index, tocPath: row.toc_path });
+      if (!open) setTimeout(() => revealRow(row.line_index), 50);
+    }
+  }, [revealRow]);
+
+  /** Neighbouring paragraph with links inside the loaded window. */
+  const linkedNeighbour = (dir: 1 | -1): ReaderRow | null => {
+    const rows = win?.rows;
+    if (!rows || selectedLine == null) return null;
+    let i = indexOfLine(rows, selectedLine);
+    if (i < 0) return null;
+    for (i += dir; i >= 0 && i < rows.length; i += dir) if (rows[i].link_count > 0) return rows[i];
+    return null;
+  };
+  const prevLinked = linkedNeighbour(-1);
+  const nextLinked = linkedNeighbour(1);
+  const stepTo = (row: ReaderRow | null) => {
+    if (!row) return;
+    setSelected({ line: row.line_index, tocPath: row.toc_path });
+    jumpTo(row.line_index, false);
+  };
+
   const renderItem = useCallback(
-    ({ item }: { item: ParagraphRow }) => (
-      <ParagraphView row={item} typo={typo} highlightNonce={highlight && highlight.line === item.line_index ? highlight.nonce : 0} />
+    ({ item }: { item: ReaderRow }) => (
+      <ParagraphView
+        row={item}
+        typo={typo}
+        selected={item.line_index === selectedLine}
+        onPress={onPressRow}
+        highlightNonce={highlight && highlight.line === item.line_index ? highlight.nonce : 0}
+      />
     ),
-    [typo, highlight],
+    [typo, highlight, selectedLine, onPressRow],
   );
 
   const crumbs = topRow.tocPath ? topRow.tocPath.split(' > ') : [];
 
   return (
-    <View style={[styles.root, { backgroundColor: palette.background }]}>
+    <View style={[styles.root, { backgroundColor: palette.background }]} onLayout={(e) => setAreaHeight(e.nativeEvent.layout.height)}>
+      <View
+        style={[styles.textArea, { marginBottom: selected && areaHeight > 0 ? commentaryPaneHeight(areaHeight, commentaryRatio) : 0 }, resizing && styles.noSelect]}
+        onLayout={(e) => (listHeight.current = e.nativeEvent.layout.height)}>
       {error ? (
         <Text style={[styles.message, { color: palette.danger }]}>{error}</Text>
       ) : !win ? (
@@ -373,18 +476,41 @@ export function BookReader({ tab, onOpenToc }: Props) {
           <Text style={[styles.crumbIcon, { color: palette.accent }]}>☰</Text>
         </Pressable>
       </Animated.View>
+      </View>
+
+      {selected && areaHeight > 0 ? (
+        <CommentaryPane
+          bookId={bookId}
+          line={selected.line}
+          tocPath={selected.tocPath}
+          areaHeight={areaHeight}
+          hasPrev={!!prevLinked}
+          hasNext={!!nextLinked}
+          onPrev={() => stepTo(prevLinked)}
+          onNext={() => stepTo(nextLinked)}
+          onClose={() => setSelected(null)}
+          onDragging={setResizing}
+          onOpenEntry={(e) => {
+            flush();
+            openBook({ bookId: e.bookId, bookTitle: e.bookTitle }, { line: e.line, highlight: true });
+          }}
+        />
+      ) : null}
     </View>
   );
 }
 
 interface RowProps {
-  row: ParagraphRow;
+  row: ReaderRow;
   typo: Typography;
+  /** The commentary drawer is showing this paragraph. */
+  selected: boolean;
+  onPress: (row: ReaderRow) => void;
   /** Non-zero while this row is the highlighted jump target. */
   highlightNonce: number;
 }
 
-const ParagraphView = memo(function ParagraphView({ row, typo, highlightNonce }: RowProps) {
+const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce }: RowProps) {
   const html = useMemo(() => prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud }), [row.display_text, typo.showNiqqud]);
   const [glow] = useState(() => new Animated.Value(0));
   useEffect(() => {
@@ -406,8 +532,15 @@ const ParagraphView = memo(function ParagraphView({ row, typo, highlightNonce }:
     headingStyle = { color: depth === 0 ? c.text : c.accent, marginTop: depth <= 1 ? spacing.lg : spacing.sm, textAlign: depth === 0 ? ('center' as const) : undefined };
   }
 
+  const links = row.link_count;
   return (
-    <View style={styles.row} testID={`para-${row.line_index}`}>
+    <Pressable
+      onPress={() => onPress(row)}
+      style={[styles.row, selected && { backgroundColor: c.accentSoft }]}
+      accessibilityHint={links ? `${links} מפרשים` : undefined}
+      testID={`para-${row.line_index}`}
+    >
+      {selected ? <View pointerEvents="none" style={[styles.selectedBar, { backgroundColor: c.accent }]} /> : null}
       <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: glow }]} />
       <RichText
         html={html}
@@ -424,15 +557,42 @@ const ParagraphView = memo(function ParagraphView({ row, typo, highlightNonce }:
           headingStyle,
         ]}
       />
-    </View>
+      {links ? (
+        <View
+          pointerEvents="none"
+          style={[styles.badge, { backgroundColor: selected ? c.accent : c.accentSoft, borderColor: c.border }]}
+          testID={`links-badge-${row.line_index}`}
+        >
+          <Text style={[styles.badgeText, { color: selected ? c.surface : c.accent }]}>{links > 99 ? '99+' : links}</Text>
+        </View>
+      ) : null}
+    </Pressable>
   );
 });
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  textArea: { flex: 1 },
+  // Web preview: a mouse drag on the drawer grabber must not select (and auto-scroll) the text.
+  noSelect: { userSelect: 'none' } as ViewStyle,
   content: { paddingHorizontal: spacing.md },
   row: { paddingVertical: 6, paddingHorizontal: spacing.sm },
   glow: { position: 'absolute', top: 0, bottom: 0, start: 0, end: 0, borderRadius: 6 },
+  selectedBar: { position: 'absolute', top: 4, bottom: 4, start: -spacing.sm, width: 3, borderRadius: 2 },
+  // Sits in the end-side gutter (content + row padding) so text layout is unchanged.
+  badge: {
+    position: 'absolute',
+    top: 8,
+    end: -spacing.md + 1,
+    minWidth: 17,
+    height: 17,
+    paddingHorizontal: 3,
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  badgeText: { fontSize: 10, fontWeight: '700', lineHeight: 13 },
   text: { writingDirection: 'rtl', textAlign: 'justify' },
   message: { textAlign: 'center', marginTop: spacing.xl, fontSize: 16 },
   end: { textAlign: 'center', paddingVertical: spacing.xl * 2, fontSize: 14 },

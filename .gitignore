@@ -49,3 +49,5 @@ assets/db/db-version.json
 # Full Otzaria library is too large for git; only raw_library/sample/ is tracked
 raw_library/full/**
 !raw_library/full/.gitkeep
+raw_links/full/**
+!raw_links/full/.gitkeep

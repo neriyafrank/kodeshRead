@@ -12,12 +12,14 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const assert = require('assert');
 const { normalizeHebrew, extractRefKey, generateBookAliases } = require('../shared/hebrew');
 const { loadBookIndex, resolveReference } = require('../shared/quickJump');
 const reader = require('../shared/reader');
 const search = require('../shared/search');
+const commentary = require('../shared/commentary');
+const { makeBookMatcher } = require('./build-db');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -71,6 +73,32 @@ async function main() {
     const rm = generateBookAliases(['הלכה', 'משנה תורה', 'ספר זמנים'], 'הלכות שבת');
     assert.ok(rm.includes('רמבמ שבת'), `missing רמבמ שבת: ${rm}`);
     assert.ok(!rm.includes('שבת'), 'Rambam must not claim bare "שבת"');
+  });
+
+  await check('links: book-name matcher', () => {
+    const books = [
+      { id: 1, title: 'ראש השנה', filePath: 'תלמוד בבלי/סדר מועד/ראש השנה.txt', aliases: ['ראש השנה', 'רה'] },
+      { id: 2, title: 'רש"י על שבת', filePath: 'תלמוד בבלי/מפרשים/רשי על שבת.txt', aliases: ['רשי על שבת'] },
+      { id: 3, title: 'שולחן ערוך אורח חיים', filePath: 'הלכה/שולחן ערוך אורח חיים.txt', aliases: ['שולחנ ערוכ אורח חיימ', 'שוע אוח'] },
+    ];
+    const m = makeBookMatcher(books);
+    assert.strictEqual(m('ראש השנה.txt'), 1);
+    assert.strictEqual(m('מסכת ראש השנה'), 1);
+    assert.strictEqual(m('תלמוד בבלי ראש השנה'), 1);
+    assert.strictEqual(m("רש''י על שבת_links.json"), 2);
+    assert.strictEqual(m('links/רש״י על שבת.json'), 2);
+    assert.strictEqual(m('אורח חיים'), 3);
+    assert.strictEqual(m('שו"ע או"ח'), 3);
+    assert.strictEqual(m('רש"י על ראש השנה'), null);
+    assert.strictEqual(m('תוספות על שבת'), null);
+  });
+  await check('commentary: commentatorName / grouping', () => {
+    assert.strictEqual(commentary.commentatorName('רש"י על שבת'), 'רש"י');
+    assert.strictEqual(commentary.commentatorName('תוספות על שבת'), 'תוספות');
+    assert.strictEqual(commentary.commentatorName('משנה ברורה'), 'משנה ברורה');
+    const e = (book_id, book_title, line, link_type) => ({ book_id, book_title, line, link_type, display_text: '', toc_path: null, category_path: null });
+    const g = commentary.groupLinkedEntries([e(9, 'אונקלוס על בראשית', 3, 'targum'), e(5, 'רש"י על בראשית', 4, 'commentary'), e(5, 'רש"י על בראשית', 3, 'commentary'), e(2, 'ברכות', 1, 'reference')]);
+    assert.deepStrictEqual(g.map((x) => [x.name, x.entries.map((y) => y.line)]), [['רש"י', [3, 4]], ['אונקלוס', [3]], ['ברכות', [1]]]);
   });
 
   await check('reader: prepareDisplayText (BiDi RLM, safe HTML, niqqud)', () => {
@@ -166,9 +194,22 @@ async function main() {
     const br = ['<h1>ברכות</h1>', '<h2>דף ב</h2>', '<h3>עמוד א</h3>', 'שורה א', '<h3>עמוד ב</h3>', 'שורה ב'];
     w('תלמוד בבלי/ברכות.txt', br.join('\n'));
     fs.mkdirSync(path.join(tmp, 'links'));
-    fs.writeFileSync(path.join(tmp, 'links', 'l.csv'), 'source_book,source_line,target_book,target_line,link_type\nברכות,4,הלכות שבת,4,commentary\nספר לא קיים,1,ברכות,4,x\n');
+    fs.writeFileSync(
+      path.join(tmp, 'links', 'l.csv'),
+      [
+        'source_book,source_line,target_book,target_line,link_type',
+        'ברכות,4,הלכות שבת,4,commentary',
+        'הלכות שבת,4,מסכת ברכות,4,commentary', // reverse duplicate
+        'ספר לא קיים,1,ברכות,4,x', // unmatched
+        '"רש""י על ברכות",1,ברכות,4,commentary', // must not fuzzy-match ברכות
+        'ברכות,999,הלכות שבת,4,commentary', // missing line
+        'שו"ע או"ח,5,ברכות.txt,6,reference', // alias + file name
+      ].join('\n') + '\n',
+    );
     const out = path.join(tmp, 'fixture.db');
-    const log = execFileSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${path.join(tmp, 'links')}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${path.join(tmp, 'links')}`], { encoding: 'utf8' });
+    if (proc.status !== 0) throw new Error('fixture build failed:\n' + proc.stderr);
+    const log = proc.stdout + proc.stderr;
     await check('fixture build', () => assert.ok(/done: 3 books/.test(log), log));
     const db = openDb(out);
     const index = await loadBookIndex(db);
@@ -179,10 +220,16 @@ async function main() {
     await check('fixture: ברכות ב. (nested amud)', () => expectJump(db, index, 'ברכות ב.', 'ברכות', 3, 'עמוד א'));
     await check('fixture: ברכות ב:', () => expectJump(db, index, 'ברכות ב:', 'ברכות', 5, 'עמוד ב'));
     await check('fixture: ברכות ב ב', () => expectJump(db, index, 'ברכות ב ב', 'ברכות', 5, 'עמוד ב'));
-    await check('fixture: links + unmatched log', async () => {
-      const rows = await db.all('SELECT * FROM links', []);
-      assert.strictEqual(rows.length, 1);
-      assert.ok(/ספר לא קיים/.test(log) || true);
+    await check('fixture: links (dedupe, missing lines, unmatched warnings)', async () => {
+      const rows = await db.all('SELECT l.*, a.title ta, b.title tb FROM links l JOIN books a ON a.id=l.book_a_id JOIN books b ON b.id=l.book_b_id ORDER BY l.id', []);
+      assert.strictEqual(rows.length, 2, JSON.stringify(rows));
+      const pairs = rows.map((r) => [r.ta, r.line_a, r.tb, r.line_b].join('|')).sort();
+      assert.ok(pairs.some((p) => p.includes('ברכות|4') && p.includes('הלכות שבת|4')), pairs.join(' / '));
+      assert.ok(pairs.some((p) => p.includes('שולחן ערוך אורח חיים|5') && p.includes('ברכות|6')), pairs.join(' / '));
+      assert.ok(/WARNING: 2 unmatched book name/.test(log), log);
+      assert.ok(log.includes('"ספר לא קיים"') && log.includes('"רש"י על ברכות"'), log);
+      assert.ok(/WARNING: 1 link\(s\) point at a line/.test(log), log);
+      assert.ok(/1 duplicate\/reverse/.test(log), log);
     });
     db.close();
   } finally {
@@ -196,6 +243,7 @@ async function main() {
   } else {
     const db = openDb(dbFile);
     const index = await loadBookIndex(db);
+    const SHABBAT = (await db.all("SELECT id FROM books WHERE title = 'שבת'", []))[0].id;
     const line = async (title, heading) => (await db.all('SELECT t.start_line s FROM toc_nodes t JOIN books b ON b.id=t.book_id WHERE b.title=? AND t.title=?', [title, heading]))[0].s;
     await check('sample: שבת ב.', async () => expectJump(db, index, 'שבת ב.', 'שבת', await line('שבת', 'דף ב.')));
     await check('sample: שבת ב:', async () => expectJump(db, index, 'שבת ב:', 'שבת', await line('שבת', 'דף ב:')));
@@ -221,6 +269,32 @@ async function main() {
       const res = await resolveReference(db, index, 'שבת ב. זזז');
       assert.ok(!res[0].complete && res[0].unmatched[0] === 'זזז' && res[0].path[0] === 'דף ב.');
     });
+    await check('sample: commentary links are populated', async () => {
+      const [{ n }] = await db.all('SELECT COUNT(*) n FROM links', []);
+      assert.ok(n >= 20, `links=${n}`);
+      const shabbat = (await db.all("SELECT id FROM books WHERE title='שבת'", []))[0].id;
+      const counts = await commentary.fetchLinkCounts(db, shabbat, 1, 30);
+      assert.strictEqual(counts.get(3), 3, `line 3: ${counts.get(3)}`); // 2x רש"י + תוספות
+      assert.ok(!counts.has(4));
+      const rows = commentary.attachLinkCounts(await reader.fetchRange(db, shabbat, 1, 10), counts);
+      assert.strictEqual(rows.find((r) => r.line_index === 3).link_count, 3);
+      assert.strictEqual(rows.find((r) => r.line_index === 4).link_count, 0);
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, shabbat, 3));
+      assert.deepStrictEqual(groups.map((g) => [g.name, g.entries.length]), [['רש"י', 2], ['תוספות', 1]]);
+      assert.ok(groups[0].entries.every((e) => e.display_text && e.toc_path === 'דף ב.'), JSON.stringify(groups[0].entries));
+      // Reverse direction: from the commentary back to the Gemara line.
+      const rashi = groups[0].bookId;
+      const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, rashi, groups[0].entries[0].line));
+      assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries[0].line]), [['שבת', 3]]);
+      // Commentaries rank before translations (Onkelos is a targum).
+      const bereshit = (await db.all("SELECT id FROM books WHERE title='בראשית'", []))[0].id;
+      const bg = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, bereshit, 3));
+      assert.deepStrictEqual(bg.map((g) => g.name), ['רש"י', 'אונקלוס']);
+    });
+    await check('sample: commentary books do not hijack Quick Jump', async () => {
+      await expectJump(db, index, 'שבת ב.', 'שבת', await line('שבת', 'דף ב.'));
+      await expectJump(db, index, 'בראשית א', 'בראשית', await line('בראשית', 'פרק א'));
+    });
     await check('sample: FTS5 + folder facet', async () => {
       const rows = await db.all("SELECT rowid FROM paragraphs_fts WHERE paragraphs_fts MATCH ? AND category_path LIKE ?", ['ארבעה ראשי', 'תלמוד בבלי/%']);
       assert.ok(rows.length >= 1);
@@ -234,7 +308,7 @@ async function main() {
         for (let j = rnd(8) + 1; j > 0; j--) q += rnd(3) ? junk[rnd(junk.length)] : ['שבת', 'אמר', 'רב', 'בראשית', 'א'][rnd(5)];
         await search.searchParagraphs(db, q, { limit: 5 });
         await search.searchParagraphs(db, q, { limit: 5, scope: { kind: 'category', path: 'תלמוד בבלי' } });
-        await search.countMatches(db, q, { scope: { kind: 'book', bookId: 3 } });
+        await search.countMatches(db, q, { scope: { kind: 'book', bookId: SHABBAT } });
       }
     });
     await check('search: multi-word AND vs exact phrase', async () => {
@@ -262,23 +336,26 @@ async function main() {
       const tanach = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תנך', name: 'תנך' } });
       const torah = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תנך/תורה/', name: 'תורה' } });
       const shas = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תלמוד בבלי', name: 'בבלי' } });
-      const shabbat = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: 3, title: 'שבת' } });
+      const shabbat = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: SHABBAT, title: 'שבת' } });
       const none = await search.countMatches(db, 'אמר', { scope: { kind: 'category', path: 'תנ', name: 'x' } });
       assert.strictEqual(all.count, tanach.count + shas.count, 'folders partition the library');
-      assert.strictEqual(tanach.count, torah.count, 'sub-folder via LIKE folder/%');
+      const tanachMefarshim = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תנך/מפרשים', name: 'מפרשים' } });
+      assert.ok(torah.count > 0 && tanachMefarshim.count > 0, `torah=${torah.count} mefarshim=${tanachMefarshim.count}`);
+      assert.strictEqual(tanach.count, torah.count + tanachMefarshim.count, 'sub-folders via LIKE folder/%');
       assert.ok(shabbat.count > 0 && shabbat.count < shas.count);
       assert.strictEqual(none.count, 0, 'prefix of a folder name is not that folder');
-      const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: 3, title: 'שבת' }, limit: 30 });
-      assert.ok(page.rows.every((r) => r.book_id === 3 && r.book_title === 'שבת'));
+      const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: SHABBAT, title: 'שבת' }, limit: 30 });
+      assert.ok(page.rows.every((r) => r.book_id === SHABBAT && r.book_title === 'שבת'));
       const cat = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'category', path: 'תנך', name: 'תנך' }, limit: 30 });
-      assert.ok(cat.rows.every((r) => r.book_id === 1 || r.book_id === 2));
+      const tanachIds = new Set((await db.all("SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE c.path = 'תנך' OR c.path LIKE 'תנך/%'", [])).map((r) => r.id));
+      assert.ok(cat.rows.length && cat.rows.every((r) => tanachIds.has(r.book_id)));
     });
     await check('search: keyset paging covers every match exactly once, in book order', async () => {
-      const total = (await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: 3 } })).count;
+      const total = (await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: SHABBAT } })).count;
       const seen = [];
       let afterId;
       for (;;) {
-        const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: 3 }, afterId, limit: 50 });
+        const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: SHABBAT }, afterId, limit: 50 });
         seen.push(...page.rows);
         if (!page.hasMore) break;
         afterId = page.rows[page.rows.length - 1].id;
@@ -295,7 +372,7 @@ async function main() {
     });
     await check('search: LIKE fallback (no-FTS5 web preview) agrees with FTS5 on exact hits', async () => {
       assert.strictEqual(await search.hasFts5(db), true);
-      for (const [q, scope] of [['"שני כחות"', undefined], ['ויאמר', { kind: 'category', path: 'תנך' }], ['אמר רבא', { kind: 'book', bookId: 3 }]]) {
+      for (const [q, scope] of [['"שני כחות"', undefined], ['ויאמר', { kind: 'category', path: 'תנך' }], ['אמר רבא', { kind: 'book', bookId: SHABBAT }]]) {
         const f = await search.searchParagraphs(db, q, { scope, limit: 5000 });
         const l = await search.searchParagraphs(db, q, { scope, limit: 5000, fts: false });
         const lid = new Set(l.rows.map((r) => r.id));
