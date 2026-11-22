@@ -2,6 +2,7 @@
   "expo": {
     "name": "kodeshRead",
     "slug": "kodeshread",
+    "owner": "shmuelks-team",
     "scheme": "kodeshread",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -27,7 +28,10 @@
     "extra": {
       "supportsRTL": true,
       "forcesRTL": true,
-      "libraryManifestUrl": "https://github.com/neriyafrank/kodeshRead/releases/latest/download/manifest.json"
+      "libraryManifestUrl": "https://github.com/neriyafrank/kodeshRead/releases/latest/download/manifest.json",
+      "eas": {
+        "projectId": "a999e9f2-82e3-41af-a11b-d09d6e85c2eb"
+      }
     },
     "plugins": [
       "expo-router",
