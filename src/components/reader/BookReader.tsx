@@ -42,6 +42,7 @@ import {
   type ParagraphRow,
 } from '../../../shared/reader';
 import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
+import { markTerms } from '../../../shared/search';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
 import { useSettings } from '../../state/settingsStore';
@@ -106,7 +107,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const { height: windowHeight } = useWindowDimensions();
   const [totalLines, setTotalLines] = useState<number | null>(null);
   const [win, setWin] = useState<WindowState | null>(null);
-  const [highlight, setHighlight] = useState<{ line: number; nonce: number } | null>(null);
+  const [highlight, setHighlight] = useState<{ line: number; nonce: number; terms?: string[] } | null>(null);
   const [topRow, setTopRow] = useState<{ line: number; tocPath: string | null }>({ line: tab.currentLineIndex, tocPath: tab.tocPath });
   const [error, setError] = useState<string | null>(null);
   /** Paragraph the commentary drawer is showing (null = drawer closed). */
@@ -200,7 +201,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   );
 
   const jumpTo = useCallback(
-    async (line: number, withHighlight: boolean) => {
+    async (line: number, withHighlight: boolean, terms?: string[]) => {
       const total = totalLines;
       if (total == null) return;
       const target = Math.min(Math.max(1, line), total);
@@ -221,7 +222,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         landed = await loadAround(target, total, 0);
       }
       showHeader(true);
-      if (withHighlight) setHighlight({ line: landed, nonce: Date.now() });
+      if (withHighlight) setHighlight({ line: landed, nonce: Date.now(), terms });
     },
     [totalLines, loadAround, showHeader, scheduleSave],
   );
@@ -239,7 +240,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         if (pj && pj.tabId === tabId) {
           consumeJump(pj.nonce);
           const landed = await loadAround(pj.line, book.total_lines, 0);
-          if (alive && pj.highlight) setHighlight({ line: landed, nonce: pj.nonce });
+          if (alive && pj.highlight) setHighlight({ line: landed, nonce: pj.nonce, terms: pj.terms });
         } else {
           const saved = useTabs.getState().tabs.find((t) => t.tabId === tabId);
           await loadAround(saved?.currentLineIndex ?? 1, book.total_lines, saved?.lineOffset ?? 0);
@@ -260,7 +261,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   useEffect(() => {
     if (!pendingJump || totalLines == null || !winRef.current) return;
     consumeJump(pendingJump.nonce);
-    jumpTo(pendingJump.line, pendingJump.highlight);
+    jumpTo(pendingJump.line, pendingJump.highlight, pendingJump.terms);
   }, [pendingJump, totalLines, consumeJump, jumpTo]);
 
   // Highlight lasts 2 seconds.
@@ -401,6 +402,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         selected={item.line_index === selectedLine}
         onPress={onPressRow}
         highlightNonce={highlight && highlight.line === item.line_index ? highlight.nonce : 0}
+        highlightTerms={highlight && highlight.line === item.line_index ? highlight.terms : undefined}
       />
     ),
     [typo, highlight, selectedLine, onPressRow],
@@ -508,10 +510,18 @@ interface RowProps {
   onPress: (row: ReaderRow) => void;
   /** Non-zero while this row is the highlighted jump target. */
   highlightNonce: number;
+  /** Search terms marked inside the row while it is highlighted. */
+  highlightTerms?: string[];
 }
 
-const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce }: RowProps) {
-  const html = useMemo(() => prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud }), [row.display_text, typo.showNiqqud]);
+const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms }: RowProps) {
+  const html = useMemo(() => {
+    const prepared = prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud });
+    // The search hit stays marked for the highlight's lifetime (2 s), then the row re-renders plain.
+    return highlightNonce && highlightTerms?.length ? markTerms(prepared, highlightTerms) : prepared;
+  }, [row.display_text, typo.showNiqqud, highlightNonce, highlightTerms]);
+  // Accent at ~35% alpha: stays visible on top of the (highlight-coloured) row glow.
+  const markStyle = useMemo(() => ({ backgroundColor: `${typo.palette.accent}59`, borderRadius: 3 }), [typo.palette.accent]);
   const [glow] = useState(() => new Animated.Value(0));
   useEffect(() => {
     glow.stopAnimation();
@@ -546,6 +556,7 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
         html={html}
         fontSize={size}
         boldFamily={typo.bold}
+        markStyle={markStyle}
         style={[
           styles.text,
           {

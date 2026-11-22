@@ -6,6 +6,7 @@ import type { JumpResult } from '../../shared/quickJump';
 import { SearchIcon } from '../components/Icons';
 import { JobStatus } from '../components/library/JobStatus';
 import { OnboardingCard } from '../components/library/OnboardingCard';
+import { ResumeCards } from '../components/library/ResumeCard';
 import { LibraryTree } from '../components/LibraryTree';
 import { QuickJumpBar } from '../components/QuickJumpBar';
 import { useLibrary } from '../db/LibraryContext';
@@ -68,6 +69,7 @@ export default function LibraryScreen() {
         }}
       />
       <JobStatus compact onPress={() => router.navigate('/library-manager')} />
+      <ResumeCards />
       <QuickJumpBar onJump={onJump} />
       <View style={s.divider} />
       <View style={s.tree}>

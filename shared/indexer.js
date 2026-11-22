@@ -18,8 +18,12 @@
 
 const { normalizeHebrew, extractRefKey, generateBookAliases, aliasKey, decodeEntities, stripHtml } = require('./hebrew');
 
-/** Bump when the schema or the parsing rules change (stored in meta.script_version). */
-const SCHEMA_VERSION = 2;
+/**
+ * Bump when the schema or the parsing rules change (stored in meta.script_version).
+ * 3: books.is_complete + ingestion_state / ingestion_errors (resumable imports). Readers never
+ *    depend on them, so version-2 libraries stay fully usable.
+ */
+const SCHEMA_VERSION = 3;
 /** First id of the personal library's namespace (core ids stay below it). */
 const USER_ID_BASE = 1000000000;
 /** Root folder of the personal library in the merged tree. */
@@ -44,7 +48,9 @@ CREATE TABLE books (
   title TEXT NOT NULL,
   aliases TEXT NOT NULL,
   file_path TEXT UNIQUE NOT NULL,
-  total_lines INTEGER NOT NULL
+  total_lines INTEGER NOT NULL,
+  -- 0 while the book's rows are being written; a resumed import redoes such books.
+  is_complete INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE toc_nodes (
@@ -101,6 +107,36 @@ CREATE INDEX idx_links_a ON links(book_a_id, line_a);
 CREATE INDEX idx_links_b ON links(book_b_id, line_b);
 `;
 
+/**
+ * Checkpoint tables of a resumable import (one import per database at a time, row id = 1).
+ * Written in the same transaction as the books they describe, so after a crash the state
+ * always matches what is on disk. Applied to older databases by migrateSchema().
+ */
+const INGESTION_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ingestion_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  source_uri TEXT NOT NULL,
+  source_name TEXT,
+  source_kind TEXT NOT NULL DEFAULT 'folder',
+  target_db TEXT NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'books',
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  base_book_id INTEGER NOT NULL DEFAULT 0,
+  last_book_path TEXT,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ingestion_errors (
+  id INTEGER PRIMARY KEY,
+  file_path TEXT NOT NULL,
+  message TEXT NOT NULL,
+  at TEXT NOT NULL
+);
+`;
+
 const FTS_TABLE_RE = /CREATE VIRTUAL TABLE paragraphs_fts[\s\S]*?\);\n/;
 
 async function sqliteHasFts5(db) {
@@ -119,8 +155,11 @@ async function sqliteHasFts5(db) {
 async function ensureSchema(db, opts) {
   const kind = (opts && opts.kind) || 'core';
   const rows = await db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'", []);
-  if (rows.length) return false;
-  const ddl = (await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '');
+  if (rows.length) {
+    await migrateSchema(db);
+    return false;
+  }
+  const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + INGESTION_SCHEMA;
   // DDL is transactional in SQLite: a failure never leaves a half-created schema behind.
   await db.exec('BEGIN');
   try {
@@ -132,6 +171,70 @@ async function ensureSchema(db, opts) {
     throw e;
   }
   return true;
+}
+
+/**
+ * Brings a writable library created by an older version up to the current schema
+ * (adds books.is_complete and the ingestion tables). Idempotent and cheap.
+ */
+async function migrateSchema(db) {
+  const cols = await db.all('PRAGMA table_info(books)', []);
+  if (cols.length && !cols.some((c) => c.name === 'is_complete')) {
+    await db.exec('ALTER TABLE books ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 1');
+  }
+  await db.exec(INGESTION_SCHEMA);
+}
+
+// ---------------------------------------------------------------------------
+// Ingestion checkpoints
+// ---------------------------------------------------------------------------
+const nowIso = () => new Date().toISOString();
+
+/** The import checkpoint of this database, or null (also null on pre-v3 read-only DBs). */
+async function readIngestionState(db) {
+  try {
+    const rows = await db.all('SELECT * FROM ingestion_state WHERE id = 1', []);
+    return rows[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Upserts the checkpoint row (only the given columns change; updated_at is always refreshed). */
+async function writeIngestionState(db, patch) {
+  const cur = await readIngestionState(db);
+  const t = nowIso();
+  if (!cur) {
+    const row = Object.assign(
+      { source_uri: '', source_name: null, source_kind: 'folder', target_db: 'user', status: 'in_progress', phase: 'books', processed_count: 0, total_count: 0, error_count: 0, base_book_id: 0, last_book_path: null, started_at: t },
+      patch,
+      { updated_at: t },
+    );
+    const keys = Object.keys(row);
+    await db.run(`INSERT INTO ingestion_state (id, ${keys.join(', ')}) VALUES (1, ${keys.map(() => '?').join(', ')})`, keys.map((k) => row[k]));
+    return;
+  }
+  const entries = Object.entries(Object.assign({}, patch, { updated_at: t }));
+  await db.run(`UPDATE ingestion_state SET ${entries.map(([k]) => `${k} = ?`).join(', ')} WHERE id = 1`, entries.map(([, v]) => v));
+}
+
+/** Removes the checkpoint and its error log (after a finished or discarded import). */
+async function clearIngestionState(db) {
+  await db.run('DELETE FROM ingestion_state', []);
+  await db.run('DELETE FROM ingestion_errors', []);
+}
+
+async function readIngestionErrors(db, limit) {
+  try {
+    return await db.all('SELECT file_path, message, at FROM ingestion_errors ORDER BY id LIMIT ?', [limit || 50]);
+  } catch {
+    return [];
+  }
+}
+
+/** An interrupted (resumable) checkpoint: in_progress after a crash, or paused. */
+function isResumableState(st) {
+  return !!st && (st.status === 'in_progress' || st.status === 'paused');
 }
 
 async function readMeta(db) {
@@ -276,6 +379,24 @@ function sortEntries(entries, localOrder) {
 
 const stripBom = (s) => String(s).replace(/^﻿/, '');
 
+/** System / metadata folders that never hold books (checked before anything is read). */
+const IGNORED_DIRS = new Set(['__macosx', '$recycle.bin', 'system volume information', 'lost.dir', '.trashes', '.thumbnails']);
+/**
+ * Hidden files, OS junk and Office lock files. Non-.txt files (pdf, jpg, epub, docx, ...) are
+ * filtered by extension in scanBooks(), so their contents are never read into memory.
+ */
+function isIgnoredEntry(e) {
+  const n = String(e.name || '');
+  if (!n || n.startsWith('.') || n.startsWith('~$')) return true;
+  if (e.isDir) return IGNORED_DIRS.has(n.toLowerCase());
+  return /^(thumbs\.db|desktop\.ini)$/i.test(n);
+}
+
+/** True for the files scanBooks() indexes as books. */
+function isBookFileName(name) {
+  return /\.txt$/i.test(name) && !String(name).startsWith('.');
+}
+
 /**
  * Walks a book folder: every sub-folder is a category, every `.txt` a book.
  * @returns {Promise<{ dirs: string[][], files: { handle, name, rel: string[], dir: string[] }[] }>}
@@ -283,7 +404,7 @@ const stripBom = (s) => String(s).replace(/^﻿/, '');
 async function scanBooks(fsa, root, rel) {
   const base = rel || [];
   const out = { dirs: [], files: [] };
-  const entries = (await fsa.list(root)).filter((e) => !e.name.startsWith('.'));
+  const entries = (await fsa.list(root)).filter((e) => !isIgnoredEntry(e));
   const orderEntry = entries.find((e) => !e.isDir && e.name.toLowerCase() === 'order.json');
   let order = null;
   if (orderEntry) {
@@ -299,7 +420,7 @@ async function scanBooks(fsa, root, rel) {
       const sub = await scanBooks(fsa, e.handle, base.concat(e.name));
       out.dirs.push(...sub.dirs);
       out.files.push(...sub.files);
-    } else if (e.name.toLowerCase().endsWith('.txt')) {
+    } else if (isBookFileName(e.name)) {
       out.files.push({ handle: e.handle, name: e.name, rel: base.concat(e.name), dir: base });
     }
   }
@@ -312,7 +433,7 @@ const NON_LINK_JSON = new Set(['order.json', 'aliases.json', 'manifest.json', 'p
 async function scanLinkFiles(fsa, root, rel) {
   const files = [];
   const base = rel || [];
-  const entries = (await fsa.list(root)).filter((e) => !e.name.startsWith('.')).sort((a, b) => (a.name < b.name ? -1 : 1));
+  const entries = (await fsa.list(root)).filter((e) => !isIgnoredEntry(e)).sort((a, b) => (a.name < b.name ? -1 : 1));
   for (const e of entries) {
     if (e.isDir) files.push(...(await scanLinkFiles(fsa, e.handle, base.concat(e.name))));
     else if (/\.(csv|json)$/i.test(e.name) && !NON_LINK_JSON.has(e.name.toLowerCase())) files.push({ handle: e.handle, name: e.name, rel: base.concat(e.name) });
@@ -499,8 +620,32 @@ async function pruneEmptyCategories(db, keepIds) {
   }
 }
 
+/** Thrown out of an onFile / shouldStop hook to stop indexLinks (the link transaction rolls back). */
+class IngestionStopped extends Error {
+  constructor(reason) {
+    super(reason === 'cancel' ? 'cancelled' : 'paused');
+    this.reason = reason || 'pause';
+  }
+}
+
+const errorMessage = (e) => String((e && e.message) || e).slice(0, 500);
+
 /**
  * Indexes book files into a database that already has the schema.
+ *
+ * Resumable & crash-safe:
+ *  - every book is written inside its own SAVEPOINT and flagged books.is_complete = 1 only
+ *    after its paragraphs, TOC and FTS rows are in; a book that throws (malformed file,
+ *    read error) is rolled back alone, reported through onError / stats.errors and skipped;
+ *  - transactions are committed every `booksPerTransaction` books, or earlier once
+ *    `maxLinesPerTransaction` paragraphs are pending (big books), so progress keeps
+ *    reaching the disk;
+ *  - with `ingestion`, the checkpoint row (ingestion_state) and the error log
+ *    (ingestion_errors) are written in the same transaction as the books they describe;
+ *  - with `ingestion.resume`, books already completed by the interrupted run (same
+ *    file_path, is_complete = 1, id > the run's base_book_id) are skipped without reading;
+ *  - `shouldStop()` is polled between books: on 'pause' / 'cancel' the pending books are
+ *    committed (checkpoint status 'paused') and indexBooks returns with `stopped` set.
  *
  * @param {object} db     writer adapter { exec, run, all }
  * @param {object} fsa    file adapter { list, readText }
@@ -510,18 +655,26 @@ async function pruneEmptyCategories(db, keepIds) {
  *   categoryPrefix     path segments every category/book is placed under (e.g. [USER_ROOT_NAME])
  *   aliasOverrides     mergeAliasOverrides() result
  *   replaceExisting    re-importing a file_path replaces that book (default true)
- *   booksPerTransaction  books per BEGIN/COMMIT (default 1; the PC build uses one big transaction)
+ *   booksPerTransaction    books per BEGIN/COMMIT (default 1; the PC build uses one big transaction)
+ *   maxLinesPerTransaction commit early once this many paragraphs are pending (default 20000)
+ *   ingestion          { sourceUri, sourceName?, sourceKind?, targetDb, resume? } checkpointing
+ *   shouldStop()       -> null | 'pause' | 'cancel', polled between books
+ *   onError({ relPath, error })  a book failed and was skipped (default: rethrow = abort)
  *   onFileRead(relPath, raw)   hook (the PC build hashes the sources for DB_VERSION)
- *   onBook({ index, total, relPath, title, lines, tocNodes })
- *   yieldEvery()       awaited between transactions so a UI stays responsive
- * @returns {Promise<{ books: number, paragraphs: number, tocNodes: number, categories: number, bookIds: number[] }>}
+ *   onBook({ index, total, relPath, title, lines, tocNodes, skipped? })
+ *   onCommit()         awaited after every COMMIT (e.g. a WAL checkpoint)
+ *   yieldEvery()       awaited between books so a UI stays responsive
+ * @returns {Promise<{ books, paragraphs, tocNodes, categories, bookIds, skipped, failed, errors, processed, stopped }>}
  */
 async function indexBooks(db, fsa, opts) {
   const idBase = opts.idBase || 0;
   const prefix = opts.categoryPrefix || [];
   const overrides = opts.aliasOverrides || {};
   const perTx = Math.max(1, opts.booksPerTransaction || 1);
+  const maxLines = Math.max(1, opts.maxLinesPerTransaction || 20000);
   const replace = opts.replaceExisting !== false;
+  const ing = opts.ingestion || null;
+  const isolate = typeof opts.onError === 'function';
 
   let catId = await maxId(db, 'categories', idBase);
   let bookId = await maxId(db, 'books', idBase);
@@ -531,6 +684,7 @@ async function indexBooks(db, fsa, opts) {
   const catIds = new Map(); // 'a/b' -> id
   for (const r of await db.all('SELECT id, path FROM categories', [])) catIds.set(r.path, r.id);
   let newCats = 0;
+  let bookCats = null; // categories created by the book being written (forgotten on rollback)
   const ensureCategory = async (parts) => {
     const p = parts.join('/');
     if (catIds.has(p)) return catIds.get(p);
@@ -538,79 +692,162 @@ async function indexBooks(db, fsa, opts) {
     const id = ++catId;
     await db.run('INSERT INTO categories (id, parent_id, name, path) VALUES (?, ?, ?, ?)', [id, parentId, parts[parts.length - 1], p]);
     catIds.set(p, id);
+    if (bookCats) bookCats.push(p);
     newCats++;
     return id;
   };
 
   const files = opts.files || [];
+  const stats = { books: 0, paragraphs: 0, tocNodes: 0, categories: 0, bookIds: [], skipped: 0, failed: 0, errors: [], processed: 0, stopped: null };
+
+  // --- checkpoint -------------------------------------------------------------
+  let baseBookId = bookId;
+  let resume = false;
+  let pendingErrors = [];
+  let lastPath = null;
+  if (ing) {
+    const st = await readIngestionState(db);
+    resume = !!ing.resume && isResumableState(st);
+    if (resume) baseBookId = Number(st.base_book_id) || 0;
+  }
+  const checkpoint = async (status) => {
+    if (!ing) return;
+    for (const e of pendingErrors) await db.run('INSERT INTO ingestion_errors (file_path, message, at) VALUES (?, ?, ?)', [e.relPath, e.message, nowIso()]);
+    pendingErrors = [];
+    const patch = { status, phase: 'books', processed_count: stats.processed, total_count: files.length, last_book_path: lastPath };
+    patch.error_count = Number((await db.all('SELECT COUNT(*) AS n FROM ingestion_errors', []))[0].n);
+    await writeIngestionState(db, patch);
+  };
+
   let inTx = false;
+  let pendingBooks = 0;
+  let pendingLines = 0;
   const begin = async () => {
     if (!inTx) {
       await db.exec('BEGIN');
       inTx = true;
     }
   };
-  const commit = async () => {
-    if (inTx) {
-      await db.exec('COMMIT');
-      inTx = false;
-    }
+  const commit = async (status) => {
+    if (!inTx) return;
+    await checkpoint(status || 'in_progress');
+    await db.exec('COMMIT');
+    inTx = false;
+    pendingBooks = 0;
+    pendingLines = 0;
+    if (opts.onCommit) await opts.onCommit();
   };
 
-  const stats = { books: 0, paragraphs: 0, tocNodes: 0, categories: 0, bookIds: [] };
   try {
     await begin();
-    if (prefix.length) await ensureCategory(prefix);
-    for (const parts of opts.dirs || []) await ensureCategory(prefix.concat(parts));
-
-    for (let fi = 0; fi < files.length; fi++) {
-      const file = files[fi];
-      await begin();
-      const raw = await fsa.readText(file.handle);
-      const relPath = prefix.concat(file.rel).join('/');
-      if (opts.onFileRead) opts.onFileRead(file.rel.join('/'), raw);
-      const fallback = file.name.replace(/\.[^.]+$/, '');
-      const parsed = parseBook(raw, fallback);
-      const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(file.rel.join('/'))] || [], overrides[aliasKey(fallback)] || []);
-      const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
-
-      if (replace) {
-        const old = await db.all('SELECT id FROM books WHERE file_path = ?', [relPath]);
-        for (const o of old) await deleteBook(db, o.id);
-      }
-      const dirParts = prefix.concat(file.dir);
-      const categoryId = dirParts.length ? await ensureCategory(dirParts) : null;
-      const id = ++bookId;
-      // Stored as "|a|b|c|" so a single alias can also be matched in SQL with LIKE '%|alias|%'.
-      await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines) VALUES (?, ?, ?, ?, ?, ?)', [
-        id, categoryId, parsed.title, '|' + aliases.join('|') + '|', relPath, parsed.totalLines,
-      ]);
-      const tocIds = [];
-      const tocRows = [];
-      for (const n of parsed.toc) {
-        const nid = ++tocId;
-        tocIds.push(nid);
-        tocRows.push([nid, id, n.parentIdx == null ? null : tocIds[n.parentIdx], n.level, n.title, n.refKey, n.startLine]);
-      }
-      await insertMany(db, 'INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line)', 7, tocRows);
-      const paraRows = parsed.paragraphs.map((p) => [++paraId, id, p.lineIndex, p.tocPath, p.display, p.clean, p.isHeading ? 1 : 0]);
-      await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, paraRows);
-      await db.run(
-        `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
-         SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE book_id = ?`,
-        [id],
-      );
-      stats.books++;
-      stats.paragraphs += parsed.paragraphs.length;
-      stats.tocNodes += parsed.toc.length;
-      stats.bookIds.push(id);
-      if (opts.onBook) opts.onBook({ index: fi + 1, total: files.length, relPath, title: parsed.title, lines: parsed.paragraphs.length, tocNodes: parsed.toc.length });
-      if ((fi + 1) % perTx === 0) {
-        await commit();
-        if (opts.yieldEvery) await opts.yieldEvery();
+    if (ing) {
+      if (!resume) {
+        await clearIngestionState(db);
+        await writeIngestionState(db, {
+          source_uri: String(ing.sourceUri || ''),
+          source_name: ing.sourceName || null,
+          source_kind: ing.sourceKind || 'folder',
+          target_db: ing.targetDb || 'user',
+          status: 'in_progress',
+          base_book_id: baseBookId,
+          total_count: files.length,
+          started_at: nowIso(),
+        });
+      } else {
+        await writeIngestionState(db, { status: 'in_progress', source_uri: String(ing.sourceUri || ''), total_count: files.length });
       }
     }
+    if (prefix.length) await ensureCategory(prefix);
+    for (const parts of opts.dirs || []) await ensureCategory(prefix.concat(parts));
     await commit();
+
+    for (let fi = 0; fi < files.length; fi++) {
+      const stop = opts.shouldStop ? opts.shouldStop() : null;
+      if (stop) {
+        stats.stopped = stop;
+        break;
+      }
+      const file = files[fi];
+      const relPath = prefix.concat(file.rel).join('/');
+      await begin();
+
+      const old = replace || resume ? await db.all('SELECT id, is_complete FROM books WHERE file_path = ?', [relPath]) : [];
+      if (resume && old.length === 1 && Number(old[0].is_complete) === 1 && Number(old[0].id) > baseBookId) {
+        // Finished by the interrupted run: skip without reading the file.
+        stats.skipped++;
+        stats.processed = fi + 1;
+        lastPath = relPath;
+        if (opts.onBook) opts.onBook({ index: fi + 1, total: files.length, relPath, title: file.name.replace(/\.[^.]+$/, ''), lines: 0, tocNodes: 0, skipped: true });
+        // Skips are cheap: yield now and then so a long resume scan stays responsive.
+        if (opts.yieldEvery && stats.skipped % 50 === 0) await opts.yieldEvery();
+        continue;
+      }
+
+      if (isolate) await db.exec('SAVEPOINT book');
+      bookCats = [];
+      let parsed;
+      try {
+        const raw = await fsa.readText(file.handle);
+        if (opts.onFileRead) opts.onFileRead(file.rel.join('/'), raw);
+        const fallback = file.name.replace(/\.[^.]+$/, '');
+        parsed = parseBook(raw, fallback);
+        const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(file.rel.join('/'))] || [], overrides[aliasKey(fallback)] || []);
+        const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
+
+        if (replace || resume) for (const o of old) await deleteBook(db, o.id);
+        const dirParts = prefix.concat(file.dir);
+        const categoryId = dirParts.length ? await ensureCategory(dirParts) : null;
+        const id = ++bookId;
+        // Stored as "|a|b|c|" so a single alias can also be matched in SQL with LIKE '%|alias|%'.
+        await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines, is_complete) VALUES (?, ?, ?, ?, ?, ?, 0)', [
+          id, categoryId, parsed.title, '|' + aliases.join('|') + '|', relPath, parsed.totalLines,
+        ]);
+        const tocIds = [];
+        const tocRows = [];
+        for (const n of parsed.toc) {
+          const nid = ++tocId;
+          tocIds.push(nid);
+          tocRows.push([nid, id, n.parentIdx == null ? null : tocIds[n.parentIdx], n.level, n.title, n.refKey, n.startLine]);
+        }
+        await insertMany(db, 'INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line)', 7, tocRows);
+        const paraRows = parsed.paragraphs.map((p) => [++paraId, id, p.lineIndex, p.tocPath, p.display, p.clean, p.isHeading ? 1 : 0]);
+        await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, paraRows);
+        await db.run(
+          `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
+           SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE book_id = ?`,
+          [id],
+        );
+        await db.run('UPDATE books SET is_complete = 1 WHERE id = ?', [id]);
+        if (isolate) await db.exec('RELEASE book');
+        stats.books++;
+        stats.paragraphs += parsed.paragraphs.length;
+        stats.tocNodes += parsed.toc.length;
+        stats.bookIds.push(id);
+        pendingLines += parsed.paragraphs.length;
+      } catch (e) {
+        if (!isolate) throw e;
+        await db.exec('ROLLBACK TO book');
+        await db.exec('RELEASE book');
+        for (const p of bookCats) catIds.delete(p);
+        newCats -= bookCats.length;
+        stats.failed++;
+        const err = { relPath, message: errorMessage(e) };
+        stats.errors.push(err);
+        pendingErrors.push(err);
+        opts.onError({ relPath, error: e });
+        parsed = null;
+      } finally {
+        bookCats = null;
+      }
+      stats.processed = fi + 1;
+      lastPath = relPath;
+      pendingBooks++;
+      if (parsed && opts.onBook) opts.onBook({ index: fi + 1, total: files.length, relPath, title: parsed.title, lines: parsed.paragraphs.length, tocNodes: parsed.toc.length });
+      if (pendingBooks >= perTx || pendingLines >= maxLines) await commit();
+      if (opts.yieldEvery) await opts.yieldEvery();
+    }
+    await begin();
+    await commit(stats.stopped ? 'paused' : 'in_progress');
   } catch (e) {
     if (inTx) await db.exec('ROLLBACK').catch(() => undefined);
     throw e;
@@ -719,10 +956,40 @@ async function indexLinks(db, fsa, linkFiles, opts) {
   return stats;
 }
 
-/** Merges FTS segments and refreshes planner statistics after indexing. */
+/**
+ * Merges FTS segments and refreshes planner statistics after indexing.
+ *
+ * Default ('optimize'): one statement that rewrites the whole FTS index (fine on the PC).
+ * `incremental: true` (on the device): repeated bounded FTS5 'merge' steps, each its own
+ * short transaction followed by `onStep()` (e.g. a WAL checkpoint), so the WAL and memory
+ * stay bounded on multi-GB libraries; `shouldStop()` may end it early (the index is valid
+ * after every step, merely less compact).
+ */
 async function finalizeIndex(db, opts) {
-  await db.exec("INSERT INTO paragraphs_fts(paragraphs_fts) VALUES('optimize')");
-  if (opts && opts.analyze) await db.exec('ANALYZE');
+  const o = opts || {};
+  const hasFts = (await db.all("SELECT 1 AS ok FROM sqlite_master WHERE name = 'paragraphs_fts'", [])).length > 0;
+  if (hasFts && o.incremental) {
+    const pages = o.mergePages || 256;
+    for (let i = 0; i < (o.maxSteps || 4000); i++) {
+      if (o.shouldStop && o.shouldStop()) break;
+      const before = Number((await db.all('SELECT total_changes() AS n', []))[0].n);
+      await db.exec('BEGIN');
+      try {
+        await db.run('INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES(?, ?)', ['merge', pages]);
+        await db.exec('COMMIT');
+      } catch (e) {
+        await db.exec('ROLLBACK').catch(() => undefined);
+        throw e;
+      }
+      const after = Number((await db.all('SELECT total_changes() AS n', []))[0].n);
+      if (o.onStep) await o.onStep(i + 1);
+      // FTS5: fewer than 2 changed rows means there was nothing left to merge.
+      if (after - before < 2) break;
+    }
+  } else if (hasFts) {
+    await db.exec("INSERT INTO paragraphs_fts(paragraphs_fts) VALUES('optimize')");
+  }
+  if (o.analyze) await db.exec('ANALYZE');
   await db.exec('PRAGMA optimize');
 }
 
@@ -740,6 +1007,16 @@ async function libraryCounts(db) {
 
 module.exports = {
   SCHEMA,
+  INGESTION_SCHEMA,
+  IngestionStopped,
+  migrateSchema,
+  readIngestionState,
+  writeIngestionState,
+  clearIngestionState,
+  readIngestionErrors,
+  isResumableState,
+  isIgnoredEntry,
+  isBookFileName,
   SCHEMA_VERSION,
   USER_ID_BASE,
   USER_ROOT_NAME,

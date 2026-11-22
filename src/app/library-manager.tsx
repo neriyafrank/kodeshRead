@@ -10,6 +10,7 @@ import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, 
 
 import { USER_ROOT_NAME } from '../../shared/sources';
 import { JobStatus } from '../components/library/JobStatus';
+import { ResumeCards } from '../components/library/ResumeCard';
 import { useLibrary } from '../db/LibraryContext';
 import { isWeb } from '../db/library';
 import { cleanupDownloads, defaultManifestUrl, type ReleaseInfo } from '../services/coreLibrary';
@@ -104,7 +105,7 @@ export default function LibraryManagerScreen() {
   const onBuild = () =>
     confirm(
       'בניית ספרייה מהמכשיר',
-      'בחרו את תיקיית אוצריא (התיקייה שמכילה את "אוצריא" ו-"links", או תיקיית ספרים). הבנייה של ספרייה מלאה עשויה להימשך זמן רב; הספרייה הנוכחית תוחלף רק בסיום מוצלח.',
+      'בחרו את תיקיית אוצריא (התיקייה שמכילה את "אוצריא" ו-"links", או תיקיית ספרים). הבנייה של ספרייה מלאה עשויה להימשך זמן רב; ההתקדמות נשמרת אחרי כל קבוצת ספרים, כך שאפשר להשהות ולהמשיך גם אחרי סגירת האפליקציה. הספרייה הנוכחית תוחלף רק בסיום מוצלח.',
       'בחר תיקייה',
       () => void actions.buildCoreFromDevice(),
     );
@@ -131,6 +132,9 @@ export default function LibraryManagerScreen() {
       <Stack.Screen options={{ title: 'ניהול ספרייה ועדכונים' }} />
 
       <JobStatus />
+      <View style={s.resumeWrap}>
+        <ResumeCards />
+      </View>
 
       {/* ---------------- core library ---------------- */}
       <Text style={s.sectionTitle}>ספריית הליבה</Text>
@@ -275,6 +279,8 @@ function Button({ label, onPress, disabled, kind = 'primary', testID }: { label:
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     screen: { flex: 1, backgroundColor: c.background },
+    // ResumeCard carries the Library screen's side margins; the manager already has padding.
+    resumeWrap: { marginHorizontal: -spacing.lg },
     content: { padding: spacing.lg, paddingBottom: spacing.xl * 2 },
     sectionTitle: { fontSize: 18, fontWeight: '800', color: c.text, marginTop: spacing.sm, marginBottom: spacing.sm, writingDirection: 'rtl' },
     card: { backgroundColor: c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: c.border, padding: spacing.lg, gap: spacing.md, marginBottom: spacing.lg },

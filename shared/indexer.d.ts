@@ -42,6 +42,61 @@ export interface BookProgress {
   title: string;
   lines: number;
   tocNodes: number;
+  /** True when the book was finished by an interrupted run and skipped on resume. */
+  skipped?: boolean;
+}
+
+export type TargetDb = 'core' | 'user';
+export type IngestionStatus = 'in_progress' | 'paused' | 'completed';
+export type StopReason = 'pause' | 'cancel';
+
+/** Row of the ingestion_state checkpoint table (id = 1). */
+export interface IngestionState {
+  source_uri: string;
+  source_name: string | null;
+  source_kind: 'folder' | 'files' | string;
+  target_db: TargetDb;
+  status: IngestionStatus;
+  phase: 'books' | 'links' | 'finalize' | string;
+  processed_count: number;
+  total_count: number;
+  error_count: number;
+  base_book_id: number;
+  last_book_path: string | null;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface IngestionError {
+  file_path: string;
+  message: string;
+  at: string;
+}
+
+export interface IngestionOptions {
+  sourceUri: string;
+  sourceName?: string | null;
+  sourceKind?: 'folder' | 'files';
+  targetDb: TargetDb;
+  /** Continue the interrupted checkpoint (skip books it completed) instead of starting over. */
+  resume?: boolean;
+}
+
+export interface IndexBooksStats {
+  books: number;
+  paragraphs: number;
+  tocNodes: number;
+  categories: number;
+  bookIds: number[];
+  /** Completed by the interrupted run and skipped (resume). */
+  skipped: number;
+  /** Books that threw and were rolled back (see errors). */
+  failed: number;
+  errors: { relPath: string; message: string }[];
+  /** Files handled so far (indexed + skipped + failed). */
+  processed: number;
+  /** Set when shouldStop() ended the run early (everything before it is committed). */
+  stopped: StopReason | null;
 }
 
 export interface IndexBooksOptions<H = unknown> {
@@ -52,6 +107,11 @@ export interface IndexBooksOptions<H = unknown> {
   aliasOverrides?: Record<string, string[]>;
   replaceExisting?: boolean;
   booksPerTransaction?: number;
+  maxLinesPerTransaction?: number;
+  ingestion?: IngestionOptions;
+  shouldStop?: () => StopReason | null;
+  onError?: (e: { relPath: string; error: unknown }) => void;
+  onCommit?: () => Promise<void>;
   onFileRead?: (relPath: string, raw: string) => void;
   onBook?: (p: BookProgress) => void;
   yieldEvery?: () => Promise<void>;
@@ -76,6 +136,19 @@ export interface LibraryCounts {
 }
 
 export const SCHEMA: string;
+export const INGESTION_SCHEMA: string;
+export class IngestionStopped extends Error {
+  constructor(reason?: StopReason);
+  reason: StopReason;
+}
+export function migrateSchema(db: WriterDb): Promise<void>;
+export function readIngestionState(db: { all: WriterDb['all'] }): Promise<IngestionState | null>;
+export function writeIngestionState(db: WriterDb, patch: Partial<IngestionState>): Promise<void>;
+export function clearIngestionState(db: WriterDb): Promise<void>;
+export function readIngestionErrors(db: { all: WriterDb['all'] }, limit?: number): Promise<IngestionError[]>;
+export function isResumableState(st: IngestionState | null | undefined): st is IngestionState;
+export function isIgnoredEntry(e: { name: string; isDir: boolean }): boolean;
+export function isBookFileName(name: string): boolean;
 export const SCHEMA_VERSION: number;
 export const USER_ID_BASE: number;
 export const USER_ROOT_NAME: string;
@@ -100,7 +173,7 @@ export function indexBooks<H>(
   db: WriterDb,
   fsa: FsAdapter<H>,
   opts: IndexBooksOptions<H>,
-): Promise<{ books: number; paragraphs: number; tocNodes: number; categories: number; bookIds: number[] }>;
+): Promise<IndexBooksStats>;
 export function indexLinks<H>(
   db: WriterDb,
   fsa: FsAdapter<H>,
@@ -111,5 +184,8 @@ export function indexLinks<H>(
     onError?: (f: ScannedLinkFile<H>, e: unknown) => void;
   },
 ): Promise<LinkStats>;
-export function finalizeIndex(db: WriterDb, opts?: { analyze?: boolean }): Promise<void>;
+export function finalizeIndex(
+  db: WriterDb,
+  opts?: { analyze?: boolean; incremental?: boolean; mergePages?: number; maxSteps?: number; onStep?: (step: number) => Promise<void>; shouldStop?: () => unknown },
+): Promise<void>;
 export function libraryCounts(db: WriterDb): Promise<LibraryCounts>;

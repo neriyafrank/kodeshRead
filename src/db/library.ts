@@ -26,6 +26,12 @@ export const CORE_DB = 'core_library.db';
 export const USER_DB = 'user_library.db';
 /** Staging name for a downloaded / locally built core DB before the atomic swap. */
 export const CORE_TMP_DB = 'core_library.db.tmp';
+/**
+ * Working file of an on-device core build. Unlike CORE_TMP_DB it survives restarts: it holds
+ * the build's checkpoint (ingestion_state), so an interrupted build resumes where it stopped.
+ * Renamed to CORE_TMP_DB once complete, then installed like a download.
+ */
+export const CORE_BUILD_DB = 'core_library.build.db';
 /** Pre-Milestone-5 builds copied the bundled library here. */
 const LEGACY_DB = 'library.db';
 const WEB_SEED_VERSION_KEY = 'kodeshread.webSeedVersion';

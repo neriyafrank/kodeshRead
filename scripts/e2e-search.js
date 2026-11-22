@@ -94,6 +94,15 @@ try {
     await shot('3-reader');
     step('result opens the book at the line');
 
+    // The matched word is marked inside the target paragraph while it is highlighted.
+    const marked = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid^="para-"] span, [data-testid^="para-"] div')]
+        .filter((el) => el.children.length === 0 && getComputedStyle(el).backgroundColor.startsWith('rgba') && !getComputedStyle(el).backgroundColor.endsWith(', 0)'))
+        .map((el) => el.textContent.replace(/[\u0591-\u05C7]/g, '')),
+    );
+    assert.ok(marked.some((t) => t.includes('ויאמר')), `search hit marked in the reader: ${JSON.stringify(marked)}`);
+    step('search hit is marked in the reader paragraph');
+
     // Dark theme is applied to the search screen.
     await page.evaluate(() => {
       const k = 'kodeshread.appearance';

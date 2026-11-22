@@ -1,14 +1,17 @@
 /**
  * Renders the sanitized inline HTML stored in paragraphs.display_text
- * (<b> <strong> <i> <em> <u> <small> <big> <sup> <sub>) as nested <Text>.
+ * (<b> <strong> <i> <em> <u> <small> <big> <sup> <sub>) as nested <Text>, plus the
+ * reader-only <mark> added around search hits (shared/search.js markTerms).
  */
 import { memo, useMemo } from 'react';
 import { Text, type TextProps, type TextStyle } from 'react-native';
 
-const TAG_RE = /<(\/?)(b|strong|i|em|u|small|big|sup|sub)>/g;
+const TAG_RE = /<(\/?)(b|strong|i|em|u|small|big|sup|sub|mark)>/g;
 
-function styleFor(tag: string, baseSize: number, boldFamily?: string): TextStyle {
+function styleFor(tag: string, baseSize: number, boldFamily?: string, markStyle?: TextStyle): TextStyle {
   switch (tag) {
+    case 'mark':
+      return markStyle ?? { backgroundColor: '#FFE58A' };
     case 'b':
     case 'strong':
       // Custom fonts need their bold face selected by family name (Android ignores fontWeight).
@@ -58,15 +61,17 @@ interface Props extends TextProps {
   fontSize: number;
   /** Family name of the bold face of the current font (for <b>/<strong>). */
   boldFamily?: string;
+  /** Style of <mark> (search hits flashed after a jump). */
+  markStyle?: TextStyle;
 }
 
-export const RichText = memo(function RichText({ html, fontSize, boldFamily, style, ...rest }: Props) {
+export const RichText = memo(function RichText({ html, fontSize, boldFamily, markStyle, style, ...rest }: Props) {
   const segments = useMemo(() => parseInline(html), [html]);
   return (
     <Text style={[{ fontSize }, style]} {...rest}>
       {segments.map((s, i) =>
         s.tags.length ? (
-          <Text key={i} style={s.tags.map((t) => styleFor(t, fontSize, boldFamily))}>
+          <Text key={i} style={s.tags.map((t) => styleFor(t, fontSize, boldFamily, markStyle))}>
             {s.text}
           </Text>
         ) : (

@@ -10,6 +10,9 @@
  *    library (ids >= USER_ID_BASE), the core+user router (shared/sources.js) across Quick
  *    Jump / reader / search / commentaries, book deletion, and the release artifact
  *    (dist/manifest.json + .gz, streaming .gz/.zip decompression from shared/release.js).
+ * 5. Resumable ingestion: pause / resume checkpoints (ingestion_state), crash recovery,
+ *    per-book error isolation (ingestion_errors), non-text file filtering, schema migration,
+ *    incremental FTS merge, FTS query sanitization fuzzing and reader hit marking.
  */
 'use strict';
 
@@ -437,9 +440,245 @@ async function main() {
   // 4. Milestone 5: personal library + core/user router + release artifacts ---------
   await dualDbTests();
   await releaseTests();
+  await resumableIngestionTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
+}
+
+/** Synthetic library for the resumable-ingestion tests: `n` books in two folders + junk files. */
+function makeResumeFixture(n) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-resume-'));
+  const words = ['שבת', 'ברכה', 'תורה', 'מצוה', 'תפילה', 'חסד'];
+  for (let i = 1; i <= n; i++) {
+    const sub = path.join(dir, i % 2 ? 'א' : 'ב');
+    fs.mkdirSync(sub, { recursive: true });
+    const lines = [`<h1>ספר ${i}</h1>`, '<h2>פרק א</h2>'];
+    for (let j = 0; j < 30; j++) lines.push(`שורה ${j} של ספר ${i} ${words[(i + j) % words.length]} ייחודי${i}`);
+    fs.writeFileSync(path.join(sub, `ספר ${String(i).padStart(3, '0')}.txt`), lines.join('\n'));
+  }
+  // Files that must be ignored before anything is read.
+  for (const junk of ['scan.pdf', 'cover.jpg', 'book.epub', '.DS_Store', '._ספר.txt', 'Thumbs.db', '~$lock.txt']) fs.writeFileSync(path.join(dir, junk), 'x');
+  fs.mkdirSync(path.join(dir, '__MACOSX'));
+  fs.writeFileSync(path.join(dir, '__MACOSX', 'ספר 999.txt'), 'junk');
+  fs.mkdirSync(path.join(dir, '.hidden'));
+  fs.writeFileSync(path.join(dir, '.hidden', 'ספר 998.txt'), 'junk');
+  return dir;
+}
+
+async function freshDb(dir, name) {
+  const db = openWritable(path.join(dir, name));
+  await indexer.ensureSchema(db.w, { kind: 'core' });
+  return db;
+}
+
+const one = async (db, sql, params) => (await db.read.all(sql, params || []))[0];
+
+async function resumableIngestionTests() {
+  const N = 23;
+  const src = makeResumeFixture(N);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-resume-db-'));
+  const tree = await indexer.scanBooks(nodeFs, src);
+  const ing = (resume) => ({ sourceUri: 'file://' + src, sourceName: 'fixture', sourceKind: 'folder', targetDb: 'core', resume });
+
+  await check('ingestion: non-text, hidden and system files are never read', () => {
+    assert.strictEqual(tree.files.length, N, tree.files.map((f) => f.rel.join('/')).join(', '));
+    assert.ok(tree.files.every((f) => /^ספר \d{3}\.txt$/.test(f.name)));
+    assert.deepStrictEqual(tree.dirs.map((d) => d.join('/')).sort(), ['א', 'ב']);
+  });
+
+  // Reference: one uninterrupted run.
+  const ref = await freshDb(work, 'ref.db');
+  const refStats = await indexer.indexBooks(ref.w, nodeFs, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 4, ingestion: ing(false) });
+  const snapshot = async (db) => ({
+    books: (await db.read.all('SELECT file_path, title, total_lines, is_complete FROM books ORDER BY file_path')).map((b) => `${b.file_path}|${b.title}|${b.total_lines}|${b.is_complete}`),
+    paragraphs: Number((await one(db, 'SELECT COUNT(*) AS n FROM paragraphs')).n),
+    fts: Number((await one(db, `SELECT COUNT(*) AS n FROM paragraphs_fts WHERE paragraphs_fts MATCH '"שבת"'`)).n),
+    toc: Number((await one(db, 'SELECT COUNT(*) AS n FROM toc_nodes')).n),
+    cats: (await db.read.all('SELECT path FROM categories ORDER BY path')).map((c) => c.path),
+  });
+  const refSnap = await snapshot(ref);
+
+  await check('ingestion: checkpoint row tracks a finished run', async () => {
+    assert.strictEqual(refStats.books, N);
+    assert.strictEqual(refStats.stopped, null);
+    const st = await indexer.readIngestionState(ref.read);
+    assert.strictEqual(st.status, 'in_progress', 'caller marks completed after links/finalize');
+    assert.strictEqual(st.processed_count, N);
+    assert.strictEqual(st.total_count, N);
+    assert.strictEqual(st.target_db, 'core');
+    assert.strictEqual(st.source_name, 'fixture');
+    assert.ok(st.last_book_path.endsWith('.txt'));
+    assert.ok(refSnap.books.every((b) => b.endsWith('|1')), 'every book is_complete = 1');
+  });
+
+  await check('ingestion: pause between books commits, then resume skips completed books', async () => {
+    const db = await freshDb(work, 'pause.db');
+    let seen = 0;
+    const read = [];
+    const fsa = { list: nodeFs.list, readText: async (f) => (read.push(f), nodeFs.readText(f)) };
+    const r1 = await indexer.indexBooks(db.w, fsa, {
+      files: tree.files, dirs: tree.dirs, booksPerTransaction: 4, ingestion: ing(false),
+      onBook: () => seen++,
+      shouldStop: () => (seen >= 9 ? 'pause' : null),
+    });
+    assert.strictEqual(r1.stopped, 'pause');
+    assert.strictEqual(r1.books, 9);
+    let st = await indexer.readIngestionState(db.read);
+    assert.strictEqual(st.status, 'paused');
+    assert.strictEqual(st.processed_count, 9);
+    assert.strictEqual(Number((await one(db, 'SELECT COUNT(*) AS n FROM books')).n), 9, 'paused books are on disk');
+    assert.ok(indexer.isResumableState(st));
+
+    read.length = 0;
+    const r2 = await indexer.indexBooks(db.w, fsa, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 4, ingestion: ing(true) });
+    assert.strictEqual(r2.skipped, 9);
+    assert.strictEqual(r2.books, N - 9);
+    assert.strictEqual(read.length, N - 9, 'completed books are not even read');
+    st = await indexer.readIngestionState(db.read);
+    assert.strictEqual(st.processed_count, N);
+    assert.deepStrictEqual(await snapshot(db), refSnap, 'resumed library == uninterrupted library');
+  });
+
+  await check('ingestion: crash mid-batch rolls back only the open batch; resume completes it', async () => {
+    const db = await freshDb(work, 'crash.db');
+    let reads = 0;
+    const crashing = { list: nodeFs.list, readText: async (f) => {
+      if (++reads === 11) throw Object.assign(new Error('process killed'), { fatal: true });
+      return nodeFs.readText(f);
+    } };
+    // No onError: the error aborts the run like an OS kill would.
+    await assert.rejects(indexer.indexBooks(db.w, crashing, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 4, ingestion: ing(false) }), /process killed/);
+    const st = await indexer.readIngestionState(db.read);
+    assert.strictEqual(st.status, 'in_progress', 'interrupted, not paused');
+    assert.strictEqual(st.processed_count, 8, 'checkpoint = last committed batch');
+    assert.strictEqual(Number((await one(db, 'SELECT COUNT(*) AS n FROM books')).n), 8);
+    const r = await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 4, ingestion: ing(true) });
+    assert.strictEqual(r.skipped, 8);
+    assert.deepStrictEqual(await snapshot(db), refSnap);
+  });
+
+  await check('ingestion: an incomplete book (is_complete = 0) is redone on resume', async () => {
+    const db = await freshDb(work, 'partial.db');
+    await indexer.indexBooks(db.w, nodeFs, { files: tree.files.slice(0, 5), dirs: tree.dirs, ingestion: ing(false) });
+    await db.w.run('UPDATE books SET is_complete = 0 WHERE file_path = ?', [tree.files[4].rel.join('/')]);
+    const r = await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(true) });
+    assert.strictEqual(r.skipped, 4);
+    assert.strictEqual(r.books, N - 4);
+    assert.deepStrictEqual(await snapshot(db), refSnap);
+  });
+
+  await check('ingestion: a fresh re-import (no resume) replaces every book', async () => {
+    const db = await freshDb(work, 'reimport.db');
+    await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(false) });
+    const r = await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(false) });
+    assert.strictEqual(r.skipped, 0);
+    assert.strictEqual(r.books, N);
+    assert.deepStrictEqual(await snapshot(db), refSnap);
+  });
+
+  await check('ingestion: resume after a replace-run only skips books replaced by that run', async () => {
+    const db = await freshDb(work, 'replace-resume.db');
+    await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(false) });
+    let seen = 0;
+    await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(false), onBook: () => seen++, shouldStop: () => (seen >= 6 ? 'pause' : null) });
+    const r = await indexer.indexBooks(db.w, nodeFs, { files: tree.files, dirs: tree.dirs, ingestion: ing(true) });
+    assert.strictEqual(r.skipped, 6, 'old copies from before the run are re-imported');
+    assert.strictEqual(r.books, N - 6);
+  });
+
+  await check('ingestion: a malformed book is isolated, logged and skipped', async () => {
+    const db = await freshDb(work, 'errors.db');
+    const bad = tree.files[3].handle;
+    const fsa = { list: nodeFs.list, readText: async (f) => {
+      if (f === bad) throw new Error('invalid UTF-8 sequence');
+      return nodeFs.readText(f);
+    } };
+    const failed = [];
+    const r = await indexer.indexBooks(db.w, fsa, {
+      files: tree.files, dirs: tree.dirs, booksPerTransaction: 5, ingestion: ing(false), onError: (e) => failed.push(e.relPath),
+    });
+    assert.strictEqual(r.failed, 1);
+    assert.strictEqual(r.books, N - 1);
+    assert.deepStrictEqual(failed, [tree.files[3].rel.join('/')]);
+    const errs = await indexer.readIngestionErrors(db.read);
+    assert.strictEqual(errs.length, 1);
+    assert.ok(errs[0].message.includes('invalid UTF-8'));
+    assert.strictEqual((await indexer.readIngestionState(db.read)).error_count, 1);
+    const orphanCats = await db.read.all('SELECT b.id FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE c.id IS NULL');
+    assert.strictEqual(orphanCats.length, 0, 'categories stay consistent after a rollback');
+  });
+
+  await check('ingestion: a failure while writing a book rolls back only that book (savepoint)', async () => {
+    const db = await freshDb(work, 'savepoint.db');
+    // Fails the paragraph INSERT of "ספר 5" after its book + TOC rows were already written.
+    const w = { ...db.w, run: async (sql, params) => {
+      if (/INSERT INTO paragraphs \(/.test(sql) && params.some((p) => typeof p === 'string' && p.includes('ייחודי5'))) throw new Error('constraint failed');
+      return db.w.run(sql, params);
+    } };
+    const files = tree.files.filter((f) => /ספר 00[1-8]/.test(f.name));
+    const r = await indexer.indexBooks(w, nodeFs, { files, dirs: tree.dirs, booksPerTransaction: 10, ingestion: ing(false), onError: () => undefined });
+    assert.strictEqual(r.failed, 1);
+    assert.strictEqual(r.books, files.length - 1);
+    const leftovers = await one(db, "SELECT COUNT(*) AS n FROM books WHERE title = 'ספר 5'");
+    assert.strictEqual(Number(leftovers.n), 0, 'no half-written book');
+    const tocLeft = await one(db, 'SELECT COUNT(*) AS n FROM toc_nodes t LEFT JOIN books b ON b.id = t.book_id WHERE b.id IS NULL');
+    assert.strictEqual(Number(tocLeft.n), 0, 'no orphan TOC rows');
+  });
+
+  await check('ingestion: large books commit early (maxLinesPerTransaction)', async () => {
+    const db = await freshDb(work, 'lines.db');
+    let commits = 0;
+    const w = { ...db.w, exec: async (sql) => (sql === 'COMMIT' && commits++, db.w.exec(sql)) };
+    await indexer.indexBooks(w, nodeFs, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 1000, maxLinesPerTransaction: 60 });
+    // 32 paragraphs per book -> a commit every 2 books (+ the initial and final commits).
+    assert.ok(commits >= Math.floor(N / 2), `commits: ${commits}`);
+  });
+
+  await check('ingestion: incremental FTS merge keeps the index queryable', async () => {
+    const db = await freshDb(work, 'merge.db');
+    for (const f of tree.files) await indexer.indexBooks(db.w, nodeFs, { files: [f], dirs: tree.dirs });
+    let steps = 0;
+    await indexer.finalizeIndex(db.w, { incremental: true, mergePages: 16, onStep: async () => { steps++; } });
+    assert.ok(steps >= 1);
+    const n = await one(db, `SELECT COUNT(*) AS n FROM paragraphs_fts WHERE paragraphs_fts MATCH '"שבת"'`);
+    assert.strictEqual(Number(n.n), refSnap.fts);
+    const integrity = await db.read.all("INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES('integrity-check', 1)");
+    assert.ok(Array.isArray(integrity));
+  });
+
+  await check('ingestion: version-2 databases migrate (is_complete + checkpoint tables)', async () => {
+    const db = openWritable(path.join(work, 'v2.db'));
+    await db.w.exec(indexer.SCHEMA.replace(/,\s*-- 0 while[^\n]*\n\s*is_complete INTEGER NOT NULL DEFAULT 1/, ''));
+    await db.w.run("INSERT INTO meta (key, value) VALUES ('kind', 'user'), ('script_version', '2')", []);
+    assert.ok(!(await db.read.all('PRAGMA table_info(books)')).some((c) => c.name === 'is_complete'));
+    assert.strictEqual(await indexer.ensureSchema(db.w, { kind: 'user' }), false);
+    assert.ok((await db.read.all('PRAGMA table_info(books)')).some((c) => c.name === 'is_complete'));
+    assert.strictEqual(await indexer.readIngestionState(db.read), null);
+    const r = await indexer.indexBooks(db.w, nodeFs, { files: tree.files.slice(0, 2), dirs: tree.dirs, idBase: indexer.USER_ID_BASE, ingestion: { ...ing(false), targetDb: 'user' } });
+    assert.strictEqual(r.books, 2);
+    await indexer.clearIngestionState(db.w);
+    assert.strictEqual(await indexer.readIngestionState(db.read), null);
+  });
+
+  await check('search: hostile input never raises an FTS5 syntax error', async () => {
+    const nasty = ['"', "'", '״', '׳', 'שו"ע', "גמ'", '-שבת', 'שבת*', '(שבת', 'שבת)', 'NEAR(שבת', 'AND OR NOT', ':', '^שבת', '"שבת', 'שבת"', '״שבת״ ״', '״', '״״', '\\', '{}[]', '%_', ';DROP TABLE books;', '־', '׀', '…', '“שבת”', '‘תורה’', 'תורה–שבת', 'א״ב׳ג', '****', '"" ""'];
+    for (const q of nasty) {
+      const parsed = search.parseSearchQuery(q);
+      await search.searchParagraphs(ref.read, parsed, { limit: 5 });
+      await search.countMatches(ref.read, parsed, { cap: 10 });
+    }
+    const r = await search.searchParagraphs(ref.read, '״שבת״', { limit: 5 });
+    assert.ok(r.rows.length > 0, 'gershayim-quoted phrase still finds hits');
+  });
+
+  await check('reader: search hits are marked inside the target paragraph', () => {
+    const terms = search.parseSearchQuery('שבת').terms;
+    assert.strictEqual(search.markTerms('<b>שַׁבָּת</b> קודש ושבת', terms), '<b><mark>שַׁבָּת</mark></b> קודש ושבת');
+    assert.strictEqual(search.markTerms('לפני שבת־קודש', terms), 'לפני <mark>שבת</mark>־קודש');
+    assert.strictEqual(search.markTerms('ללא התאמה', terms), 'ללא התאמה');
+    assert.strictEqual(search.markTerms('שבת', []), 'שבת');
+  });
 }
 
 /** Writable node:sqlite DB wrapped for shared/indexer.js. */

@@ -24,6 +24,8 @@ export interface JumpRequest {
   tabId: string;
   line: number;
   highlight: boolean;
+  /** Normalized search terms to flash inside the target paragraph (search results). */
+  terms?: string[];
   nonce: number;
 }
 
@@ -34,7 +36,7 @@ interface TabsState {
   activeTabId: string | null;
   pendingJump: JumpRequest | null;
   /** Opens (or re-uses) a tab for the book and jumps to `line`. Returns the tab id. */
-  openBook: (book: { bookId: number; bookTitle: string }, opts?: { line?: number; highlight?: boolean; newTab?: boolean }) => string;
+  openBook: (book: { bookId: number; bookTitle: string }, opts?: { line?: number; highlight?: boolean; terms?: string[]; newTab?: boolean }) => string;
   activate: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   closeAll: () => void;
@@ -74,7 +76,7 @@ export const useTabs = create<TabsState>()(
         set({
           tabs: next,
           activeTabId: tabId,
-          pendingJump: keepPosition ? null : { tabId, line, highlight: !!opts.highlight, nonce: ++nonce },
+          pendingJump: keepPosition ? null : { tabId, line, highlight: !!opts.highlight, terms: opts.terms?.length ? opts.terms : undefined, nonce: ++nonce },
         });
         return tabId;
       },

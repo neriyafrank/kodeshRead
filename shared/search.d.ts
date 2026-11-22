@@ -54,4 +54,6 @@ export function countMatches(
   opts?: { scope?: SearchScope; cap?: number; fts?: boolean },
 ): Promise<{ count: number; capped: boolean }>;
 export function buildKwic(displayText: string, terms: string[], opts?: { before?: number; after?: number; showNiqqud?: boolean }): Kwic;
+/** Wraps words of sanitized inline HTML matching `terms` in <mark>…</mark>. */
+export function markTerms(html: string, terms: string[]): string;
 export function formatTocPath(tocPath: string | null | undefined): string;

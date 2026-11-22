@@ -298,6 +298,26 @@ function buildKwic(displayText, terms, opts) {
   return { segments: merged, hitCount, clippedStart: from > 0, clippedEnd: to < words.length };
 }
 
+/**
+ * Wraps the words of sanitized inline HTML (prepareDisplayText output) that match the
+ * search terms in <mark>…</mark>, normalizing each word exactly like the index (niqqud,
+ * finals, gershayim). Tags are left untouched; used by the reader to flash the hit.
+ */
+function markTerms(html, terms) {
+  const termSet = new Set((terms || []).filter(Boolean));
+  if (!html || !termSet.size) return html || '';
+  return String(html)
+    .split(/(<[^>]*>)/)
+    .map((part) => {
+      if (!part || part[0] === '<') return part;
+      return part
+        .split(/(\s+|[־׀])/)
+        .map((w, i) => (i % 2 === 0 && w && toTokens(w).some((t) => termSet.has(t)) ? `<mark>${w}</mark>` : w))
+        .join('');
+    })
+    .join('');
+}
+
 /** "Part > Chapter > Section" from the stored toc_path (separator agnostic). */
 function formatTocPath(tocPath) {
   if (!tocPath) return '';
@@ -318,5 +338,6 @@ module.exports = {
   searchParagraphs,
   countMatches,
   buildKwic,
+  markTerms,
   formatTocPath,
 };

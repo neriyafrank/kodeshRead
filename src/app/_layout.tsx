@@ -6,6 +6,7 @@ import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-nativ
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { LibraryProvider } from '../db/LibraryContext';
+import { IngestionLifecycle } from '../services/ingestionLifecycle';
 import { ensureRTL } from '../lib/rtl';
 import { useLibrarySettings, useLibraryUi } from '../state/libraryStore';
 import { useSearch } from '../state/searchStore';
@@ -65,6 +66,7 @@ export default function RootLayout() {
         <StatusBar style={theme.statusBar} />
         {ready ? (
           <LibraryProvider fallback={(error) => <BootScreen error={error} />}>
+            <IngestionLifecycle />
             <Stack
               screenOptions={{
                 headerStyle: { backgroundColor: theme.background },

@@ -114,10 +114,10 @@ export default function SearchScreen() {
     (row: SearchRow) => {
       Keyboard.dismiss();
       remember(query);
-      openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true });
+      openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true, terms: shown?.terms ?? [] });
       router.navigate('/reader');
     },
-    [openBook, query, remember, router],
+    [openBook, query, remember, router, shown?.terms],
   );
 
   const renderItem = useCallback(

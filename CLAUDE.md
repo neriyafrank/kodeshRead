@@ -8,6 +8,11 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > and `user_library.db` (personal imports, ids >= 1,000,000,000) in `documentDirectory + 'SQLite/'`, and
 > queries both through `shared/sources.js`. Ingestion logic lives in `shared/indexer.js`, shared by
 > `scripts/build-db.js` and `src/services/localIndexer.ts`. See section 5 and README "Library storage & updates".
+>
+> **Resumable ingestion (schema v3):** `books.is_complete` plus `ingestion_state` / `ingestion_errors`
+> checkpoint tables (written in the same transaction as the books); per-book SAVEPOINT error isolation;
+> pause on `AppState` background + auto-resume; `expo-keep-awake` during jobs; on-device core builds in
+> `core_library.build.db` until complete. APKs target `arm64-v8a` only (`plugins/withAndroidAbiFilters.js`).
 
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).

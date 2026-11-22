@@ -1,8 +1,17 @@
 /** Live progress of the running library job (bar + stage + detail + cancel) and its result. */
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
+
+/** Cancelling an import discards its progress (pausing keeps it): ask first on the device. */
+function confirmCancel(resumable: boolean, onOk: () => void) {
+  if (!resumable || Platform.OS === 'web') return onOk();
+  Alert.alert('לבטל את הפעולה?', 'ההתקדמות תימחק. כדי להמשיך מאותה נקודה מאוחר יותר בחרו ״השהה״.', [
+    { text: 'חזרה', style: 'cancel' },
+    { text: 'בטל ומחק', style: 'destructive', onPress: onOk },
+  ]);
+}
 
 export function ProgressBar({ fraction }: { fraction: number | null }) {
   const s = useThemedStyles(createStyles);
@@ -21,6 +30,8 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
   const result = useLibraryJobs((x) => x.result);
   const cancelRequested = useLibraryJobs((x) => x.cancelRequested);
   const requestCancel = useLibraryJobs((x) => x.requestCancel);
+  const requestPause = useLibraryJobs((x) => x.requestPause);
+  const stopRequested = useLibraryJobs((x) => x.stopRequested);
   const clearResult = useLibraryJobs((x) => x.clearResult);
 
   if (job) {
@@ -44,8 +55,13 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
             {job.stage}
             {pct}
           </Text>
+          {job.resumable ? (
+            <Pressable onPress={() => requestPause(false)} disabled={!!stopRequested} hitSlop={8} accessibilityRole="button" testID="job-pause">
+              <Text style={[s.pause, !!stopRequested && s.muted]}>{stopRequested === 'pause' ? 'משהה…' : 'השהה'}</Text>
+            </Pressable>
+          ) : null}
           {job.kind !== 'delete' ? (
-            <Pressable onPress={requestCancel} disabled={cancelRequested} hitSlop={8} accessibilityRole="button" testID="job-cancel">
+            <Pressable onPress={() => confirmCancel(job.resumable, requestCancel)} disabled={cancelRequested} hitSlop={8} accessibilityRole="button" testID="job-cancel">
               <Text style={[s.cancel, cancelRequested && s.muted]}>{cancelRequested ? 'מבטל…' : 'ביטול'}</Text>
             </Pressable>
           ) : null}
@@ -56,18 +72,29 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
             {job.detail}
           </Text>
         ) : null}
+        {job.resumable ? <Text style={s.hint}>ההתקדמות נשמרת אחרי כל ספר — אפשר להשהות ולהמשיך גם אחרי סגירת האפליקציה.</Text> : null}
       </View>
     );
   }
   if (result && !compact) {
     return (
-      <View style={[s.card, result.ok ? s.ok : s.fail]} testID="job-result">
+      <View style={[s.card, result.ok && !result.paused ? s.ok : result.ok ? null : s.fail]} testID="job-result">
         <View style={s.row}>
           <Text style={[s.resultText, !result.ok && s.failText]}>{result.message}</Text>
           <Pressable onPress={clearResult} hitSlop={10} accessibilityRole="button" accessibilityLabel="סגור">
             <Text style={s.muted}>✕</Text>
           </Pressable>
         </View>
+        {result.errors?.length ? (
+          <View style={s.errors} testID="job-errors">
+            <Text style={s.errorsTitle}>קבצים שדולגו בגלל שגיאה ({result.errors.length}):</Text>
+            {result.errors.slice(0, 8).map((e) => (
+              <Text key={e.path} style={s.errorLine} numberOfLines={2}>
+                • {e.path} — {e.message}
+              </Text>
+            ))}
+          </View>
+        ) : null}
       </View>
     );
   }
@@ -86,6 +113,11 @@ const createStyles = (c: Palette) =>
     stage: { flex: 1, fontSize: 16, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
     detail: { marginTop: spacing.xs, fontSize: 13, color: c.textMuted, writingDirection: 'rtl' },
     cancel: { color: c.danger, fontSize: 15, fontWeight: '600' },
+    pause: { color: c.accent, fontSize: 15, fontWeight: '600', marginEnd: spacing.sm },
+    hint: { marginTop: spacing.xs, fontSize: 12, color: c.textMuted, writingDirection: 'rtl' },
+    errors: { marginTop: spacing.sm, gap: 2 },
+    errorsTitle: { fontSize: 13, fontWeight: '700', color: c.danger, writingDirection: 'rtl' },
+    errorLine: { fontSize: 12, color: c.textMuted, writingDirection: 'rtl' },
     muted: { color: c.textMuted },
     resultText: { flex: 1, fontSize: 15, color: c.text, writingDirection: 'rtl' },
     failText: { color: c.danger },

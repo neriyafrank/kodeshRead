@@ -161,9 +161,41 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
     (sub-folders become categories; link CSV/JSON files in the folder, an `aliases.json` and
     `order.json` are honoured). Re-importing the same file replaces it. Books or whole folders
     can be deleted (text, TOC, FTS rows and links are removed).
-  * Each book is indexed in its own transaction with a yield to the UI in between, so the app
-    stays usable while importing. Jobs keep running if you leave the screen (a progress banner
-    shows on the Library screen).
+  * Jobs keep running if you leave the screen (a progress banner shows on the Library screen),
+    and the device is kept awake (`expo-keep-awake`) while one runs.
+* **Resumable, crash-proof imports** (core builds and personal imports, built for 4GB+ Otzaria
+  folders):
+  * *Checkpoints.* Each target DB has an `ingestion_state` row (`source_uri`, `target_db`,
+    `status` = `in_progress` / `paused` / `completed`, `phase` = books / links / finalize,
+    `processed_count` / `total_count`, `last_book_path`, `base_book_id`, `updated_at`) and an
+    `ingestion_errors` log. They are written **in the same transaction** as the books they
+    describe, so after a crash the checkpoint always matches what is on disk.
+  * *Small commits.* Core builds commit every 10 books, personal imports every book, and any
+    batch commits early once 20,000 paragraphs are pending (huge tractates). Every book is
+    inserted with `books.is_complete = 0` and flipped to `1` only after its paragraphs, TOC and
+    FTS rows are in.
+  * *Idempotent resume.* Resuming the same folder skips books that the interrupted run already
+    completed (same `file_path`, `is_complete = 1`, id above the run's `base_book_id`) without
+    reading them, and redoes anything half-written. A finished link or finalize phase is not
+    repeated.
+  * *Pause / background.* **השהה** in the progress card, or the app going to the background
+    (`AppState` `background` / `inactive`), stops the job right after the current book commits
+    (status `paused`). When the app is active again the job continues automatically. If the OS
+    killed the app instead, the next launch shows **המשך בנייה שנעצרה** / **המשך ייבוא שנעצר**
+    (Library screen + manager) with `X / Y ספרים הושלמו` and **המשך** / **מחק ואפס**. If the
+    folder permission did not survive the restart, you are asked to pick the same folder again.
+    **ביטול** (after a confirmation) stops and discards the partial import.
+  * *Error isolation.* Every book runs in a `SAVEPOINT`: a malformed or unreadable file is
+    rolled back alone, logged (`ingestion_errors`, shown in the result card) and skipped.
+    Hidden files, `__MACOSX`, `Thumbs.db`, Office lock files and every non-`.txt` file (pdf,
+    jpg, epub, ...) are filtered by name before anything is read.
+  * *Bounded memory.* A UI yield after every book; the core build file uses WAL with
+    `synchronous = NORMAL`, a 16 MB page cache and on-disk temp tables, and runs
+    `wal_checkpoint(TRUNCATE)` every few commits. FTS rows are added per book and merged at the
+    end with incremental FTS5 `merge` steps (each its own short transaction + WAL checkpoint)
+    instead of one giant `optimize`.
+  * The on-device core build lives in `SQLite/core_library.build.db` (kept across restarts);
+    when complete it is moved to `core_library.db.tmp` and installed atomically like a download.
 * Tabs and search scopes pointing at books that disappeared (core replaced, book deleted) are
   closed or reset automatically.
 * Upgrading from a pre-M5 build: the old copied `library.db` is adopted as `core_library.db`.
@@ -241,6 +273,13 @@ Settings (already configured):
 * `app.json`: `android.package` `com.kodeshread.app`, `versionCode` (bump it for every
   release), `expo-sqlite` `enableFTS`, `minSdkVersion` 24, `expo-updates` for the first-launch
   RTL reload, `extra.libraryManifestUrl` (where **הורד** looks for a library).
+* **arm64-v8a only** (APK ~100 MB -> ~35-40 MB): `expo-build-properties` `android.buildArchs`
+  limits what React Native / Expo modules compile (`reactNativeArchitectures`), and
+  `plugins/withAndroidAbiFilters.js` adds `defaultConfig { ndk { abiFilters "arm64-v8a" } }`
+  so prebuilt native libraries inside AARs are not packaged for the other ABIs either. Every
+  64-bit Android phone runs arm64-v8a. For an x86_64 emulator build, override at prebuild time:
+  `KODESHREAD_ABIS=arm64-v8a,x86_64 npx expo prebuild --platform android --clean` (EAS: set
+  `KODESHREAD_ABIS` in the build profile's `env`).
 * `metro.config.js`: `db` in `resolver.assetExts` (only the web preview imports the sample DB
   asset, via `src/db/webSeed.web.ts`; native bundles never reference it), `raw_library/` and
   `raw_links/` blocked from the bundler.
