@@ -1,14 +1,17 @@
 # kodeshRead
 
 Offline-first Android Torah library (Expo + TypeScript) powered by
-[Otzaria](https://github.com/Sivan22/otzaria) text files. The whole library is
-pre-built into one SQLite database (`assets/db/library.db`, FTS5-indexed) that is
-bundled inside the APK. See [`CLAUDE.md`](CLAUDE.md) for the full spec.
+[Otzaria](https://github.com/Sivan22/otzaria) text files. The library lives in FTS5-indexed
+SQLite databases on the device. The APK itself stays small and bundles no books: the main
+library is downloaded once as a compressed release from GitHub, or indexed on the device
+from an Otzaria folder, and personal books can be imported next to it. See
+[`CLAUDE.md`](CLAUDE.md) for the full spec.
 
-**Status:** Milestone 4 (all spec milestones done): project setup, the DB build pipeline,
-the Library screen with Quick Source Jump and the RTL tree (M1), the windowed reader
-workspace (M2), Hebrew full-text search (M3), and parallel commentaries plus standalone
-Android APK packaging (M4):
+**Status:** Milestone 5: project setup, the DB build pipeline, the Library screen with
+Quick Source Jump and the RTL tree (M1), the windowed reader workspace (M2), Hebrew
+full-text search (M3), parallel commentaries and Android APK packaging (M4), and a
+lightweight APK with downloadable / on-device-indexed libraries (M5, see
+[Library storage & updates](#library-storage--updates)):
 
 * **Sliding-window reader** (`src/components/reader/BookReader.tsx`): ~400 lines around
   the current line, +200-line chunks fetched near either edge, far edge trimmed at 800 rows;
@@ -63,17 +66,19 @@ Requires **Node ≥ 22.13** (the DB build script uses the built-in `node:sqlite`
 
 ```bash
 npm install
-npm run db:sample      # raw_library/sample -> assets/db/library.db
-npm test               # pipeline, Quick Jump, reader & FTS5 search self-test
-npm start              # Expo dev server (also auto-builds the DB if missing)
+npm run db:sample      # raw_library/sample -> assets/db/library.db (tests + web preview)
+npm test               # pipeline, Quick Jump, reader, FTS5 search, dual-DB & release self-test
+npm start              # Expo dev server (also auto-builds the sample DB if missing)
 ```
 
 `npm run android` builds a native dev build (`expo run:android`, needs the Android SDK).
 To build an installable APK, see [Building the Android APK](#building-the-android-apk).
 The app uses `expo-updates` for the first-launch RTL reload, so run it as a dev build
 rather than in Expo Go. `npm run web` gives a quick browser preview of the UI;
-with it running, `npm run e2e:search` and `npm run e2e:commentary` drive the Search screen
-and the commentary drawer end to end with Playwright (needs `playwright` + Chromium available).
+with it running, `npm run e2e:search`, `npm run e2e:commentary` and `npm run e2e:library`
+drive the Search screen, the commentary drawer and the Library Manager end to end with
+Playwright (needs `playwright` + Chromium available). The web preview has no file system, so
+it shows the sample library as the core library and disables download / import.
 
 ## Library sources
 
@@ -106,115 +111,164 @@ Layout: `raw_library/<source>/<Category>/<SubCategory>/<Book>.txt`. Headings use
 The sample library includes four small commentary books with links: רש"י and תוספות on
 שבת ב (JSON, Otzaria format) and רש"י and אונקלוס on בראשית א (JSON and CSV).
 
-Every build writes `assets/db/db-version.json`. When the bundled version differs from
-the copy on the device, the app re-copies the DB on next launch.
+Every build writes `assets/db/library.db` + `assets/db/db-version.json`. They are used by
+`npm test` and the web preview only; the APK does not contain them. `--release` also writes
+the compressed release artifact (see [Publishing a library release](#publishing-a-library-release)).
 
 ## Quick Source Jump examples
 
 `שבת ב.` · `שבת קנז ב` · `ר"ה טז:` · `מסכת ראש השנה ג` · `בראשית יב א` (verse) ·
 `שוע אוח כה ה` · `רמבם שבת א א` (once those books are in the library)
 
-## Building the Android APK
+## Library storage & updates
 
-The library DB is **bundled inside the APK** (`assets/db/library.db`, stored uncompressed
-via `plugins/withAndroidNoCompress.js`; FTS5 via `expo-sqlite`'s `enableFTS`). So the DB
-must be built **before** the native build. `scripts/eas-build-db.js` checks this for
-every build:
+Nothing is bundled in the APK. On the device there are two SQLite databases in the app's
+`FileSystem.documentDirectory + 'SQLite/'`:
 
-| Profile / command | Library | What happens to the DB |
+| File | Contents | Where it comes from |
 | --- | --- | --- |
-| `eas.json` → `preview` · `npm run apk:sample` | sample | rebuilt from `raw_library/sample` |
-| `eas.json` → `preview-full`, `production` · `npm run apk:full` | full | uses the DB you built with `npm run db:full`; the build **fails** if it is missing or was built from the sample |
+| `core_library.db` | the main (Otzaria) library | downloaded from a GitHub Release, **or** built on the device from an Otzaria folder |
+| `user_library.db` | personal books | imported on the device (`.txt` files or whole folders) |
 
-Settings that make standalone builds work (already configured):
+* **One library in the UI.** `shared/sources.js` routes every per-book query (reader window,
+  TOC, Quick Jump traversal, commentaries) to the database that owns the book, and merges
+  library-wide ones (Quick Jump index, the tree, the search scope picker, full-text search with
+  keyset paging across both databases). Personal books use ids above 1,000,000,000 for
+  categories, books, TOC nodes and paragraphs, so ids never collide, and they all live under a
+  "הספרים שלי" folder in the tree. (`ATTACH` + `UNION ALL` views were measured and rejected:
+  SQLite materializes the whole `paragraphs` table when such a view is joined.)
+* **Same indexer on the PC and the phone.** Parsing, `normalizeHebrew`, aliases, `extractRefKey`,
+  link matching, batched paragraph + FTS inserts and link de-duplication live in
+  `shared/indexer.js`. `scripts/build-db.js` and the on-device indexer
+  (`src/services/localIndexer.ts`) both call it, so a book indexed on the phone behaves exactly
+  like one from a release.
+* **First launch** (no `core_library.db`): the Library screen shows a welcome card with
+  **הורד ספרייה מוכנה מהענן** (download) and **ייבא ספרים מהמכשיר** (import).
+* **ניהול ספרייה ועדכונים** (the **ניהול** button in the Library header):
+  * *Core library*: installed version, build date, source, books / paragraphs / links / size.
+    **בדוק עדכונים** reads the release manifest and shows whether a newer version exists;
+    **הורד והתקן** downloads it with a live progress bar, checks the byte size and SHA-256
+    (computed natively), stream-decompresses `.gz` / `.zip` in 1 MB chunks into
+    `core_library.db.tmp`, opens it to check `meta.db_version` and the schema, then renames it
+    over `core_library.db` (atomic) and reopens. Free space is checked first, the download can
+    be cancelled, and `user_library.db` is never touched. The release URL is editable: a
+    `manifest.json`, or a direct `.gz` / `.zip` / `.db` link (no SHA-256 check then). The
+    default is `expo.extra.libraryManifestUrl` in `app.json`.
+  * **בנה ספרייה מתיקיית אוצריא במכשיר**: pick the Otzaria folder (the one containing `אוצריא/`
+    and `links/`, or just a books folder). The library is indexed into the staging file with live
+    progress (file count + current book) and swapped in only when complete.
+  * *Personal books*: **ייבוא קובץ ספר (.txt)** (one or more files) and **ייבוא תיקיית ספרים**
+    (sub-folders become categories; link CSV/JSON files in the folder, an `aliases.json` and
+    `order.json` are honoured). Re-importing the same file replaces it. Books or whole folders
+    can be deleted (text, TOC, FTS rows and links are removed).
+  * Each book is indexed in its own transaction with a yield to the UI in between, so the app
+    stays usable while importing. Jobs keep running if you leave the screen (a progress banner
+    shows on the Library screen).
+* Tabs and search scopes pointing at books that disappeared (core replaced, book deleted) are
+  closed or reset automatically.
+* Upgrading from a pre-M5 build: the old copied `library.db` is adopted as `core_library.db`.
 
-* `metro.config.js`: `db` in `resolver.assetExts`; `raw_library/` and `raw_links/` are
-  blocked from the bundler.
-* `app.json`: `android.package` `com.kodeshread.app`, `versionCode` (bump it for every
-  release), `expo-sqlite` `enableFTS`, `minSdkVersion` 24, `noCompress: ["db"]`,
-  `expo-updates` for the first-launch RTL reload.
-* `eas.json`: `preview` / `preview-full` produce an **APK** (`android.buildType: "apk"`,
-  internal distribution); `production` produces an AAB for Google Play.
-* `.easignore`: same as `.gitignore` but **uploads** `assets/db/library.db`, so a full DB built
-  on your PC reaches EAS. `raw_library/full` and `raw_links/full` are never uploaded.
-* `eas-build-post-install` (in `package.json`) runs `scripts/eas-build-db.js` on the build
-  machine with the profile's `LIBRARY_SOURCE`.
+## Publishing a library release
 
-### 1. Build the full library DB on your PC
-
-Needs Node ≥ 22.13 and a copy of the Otzaria library (the folder that contains `אוצריא/`
-and `links/`).
+Build the full library on a PC (Node ≥ 22.13) and upload two files to a GitHub Release.
 
 ```bash
-git clone <this repo> && cd kodeshRead
-npm install
-
-# Books: the category folders (תנך, תלמוד בבלי, הלכה, …) go straight into raw_library/full
+# 1. Put the Otzaria sources in place (once)
 #   Windows (PowerShell):  Copy-Item -Recurse "C:\otzaria\אוצריא\*" raw_library\full\
+#                          Copy-Item -Recurse "C:\otzaria\links\*" raw_links\full\
 #   macOS / Linux:         cp -R ~/otzaria/אוצריא/* raw_library/full/
-# Links: Otzaria's *_links.json files go into raw_links/full
-#   Windows (PowerShell):  Copy-Item -Recurse "C:\otzaria\links\*" raw_links\full\
-#   macOS / Linux:         cp -R ~/otzaria/links/* raw_links/full/
+#                          cp -R ~/otzaria/links/* raw_links/full/
 
-npm run db:full        # -> assets/db/library.db (can take several minutes)
+# 2. Build the DB and the release artifact
+npm run db:release      # -> assets/db/library.db, dist/core_library.db.gz, dist/manifest.json
+# (npm run db:release:sample does the same for the sample library)
 ```
 
-Read the build output:
+`dist/manifest.json` looks like this (sample library shown):
 
-* `links: … stored (… duplicate/reverse, … pointing at missing lines …)`: what went into
-  the `links` table.
-* `WARNING: N unmatched book name(s) in links`: link files naming books that are not in
-  `raw_library/full` (or are spelled differently). Add their spelling to
-  `raw_library/aliases.json` (`{ "שם בספרייה": ["שם בקובץ הקישורים"] }`) and rebuild,
-  or ignore them; those links are simply skipped.
-* The final line gives the DB size and `DB_VERSION`. Every new DB version is re-copied on the
-  device on the next launch.
+```json
+{
+  "format": 1,
+  "version": "e9c3bccb1437",
+  "schemaVersion": 2,
+  "builtAt": "2026-11-22T12:07:35.643Z",
+  "source": "sample",
+  "books": 9, "categories": 6, "paragraphs": 9083, "links": 26, "tocNodes": 530,
+  "file": "core_library.db.gz",
+  "compression": "gzip",
+  "size": 2059320,
+  "sha256": "<sha-256 of the .gz>",
+  "dbSize": 7327744,
+  "dbSha256": "<sha-256 of the .db>"
+}
+```
 
-Optional checks: `npm test` (runs against whatever DB is in `assets/db`) and `npm start`
-to try it in a dev build.
+```bash
+# 3. Publish: create a release and attach BOTH files (GitHub CLI shown; the web UI works too)
+gh release create library-$(node -p "require('./dist/manifest.json').version") \
+  dist/core_library.db.gz dist/manifest.json \
+  --title "Library $(node -p "require('./dist/manifest.json').version")" --notes "Otzaria core library"
+```
 
-### 2a. Build the APK on your PC (local Gradle, recommended for the full library)
+The app's default URL is `https://github.com/<owner>/<repo>/releases/latest/download/manifest.json`
+(set in `app.json` → `expo.extra.libraryManifestUrl`). `releases/latest/download/<name>` always
+points at the newest non-prerelease release, so publishing a new release is all it takes; the
+app resolves `file` relative to the manifest URL. To host the `.gz` elsewhere, pass
+`--release-url=<absolute url>` to `build-db.js` (stored as `url` in the manifest).
+
+* Read the build output: `links: … stored (…)` and `WARNING: N unmatched book name(s)` (add
+  spellings to `raw_library/aliases.json`, `{ "שם בספרייה": ["שם בקובץ הקישורים"] }`, and
+  rebuild, or ignore them; those links are skipped).
+* GitHub limits release assets to 2 GB each. A `.zip` containing one `.db` file also works
+  (the app takes the first `*.db` entry).
+* The phone needs free space for the download plus the extracted DB (the downloaded file is
+  deleted after extraction). The manager checks this before starting.
+* To ship a smaller library, build from a subset: `raw_library/full` can hold any subset of
+  Otzaria's folders, with or without their link files.
+
+## Building the Android APK
+
+The APK contains no library, so every profile builds the same lightweight app (no DB step):
+
+| Command | Output |
+| --- | --- |
+| `npm run eas:preview` (EAS `preview` profile) | installable APK (internal distribution), built in the cloud |
+| `npm run apk` | APK built locally with Gradle |
+| `eas.json` → `production` | AAB for Google Play (the library is downloaded after install, so Play's size limit is not a concern) |
+
+Settings (already configured):
+
+* `app.json`: `android.package` `com.kodeshread.app`, `versionCode` (bump it for every
+  release), `expo-sqlite` `enableFTS`, `minSdkVersion` 24, `expo-updates` for the first-launch
+  RTL reload, `extra.libraryManifestUrl` (where **הורד** looks for a library).
+* `metro.config.js`: `db` in `resolver.assetExts` (only the web preview imports the sample DB
+  asset, via `src/db/webSeed.web.ts`; native bundles never reference it), `raw_library/` and
+  `raw_links/` blocked from the bundler.
+
+### Local Gradle build
 
 Needs the Android SDK and JDK 17 (installing Android Studio provides both; set
 `ANDROID_HOME`).
 
 ```bash
-npm run apk:full       # or: npm run apk:sample
+npm install
+npm run apk
 ```
 
-This checks the DB, runs `expo prebuild --platform android --clean` (generates `android/`,
-which is git-ignored, so never edit it by hand) and `./gradlew assembleRelease`. The APK is at
+This runs `expo prebuild --platform android --clean` (generates `android/`, which is
+git-ignored, so never edit it by hand) and `./gradlew assembleRelease`. The APK is at
 `android/app/build/outputs/apk/release/app-release.apk`. Install it with
 `adb install -r android/app/build/outputs/apk/release/app-release.apk` or copy it to the
-phone.
+phone. The generated project signs release builds with the debug keystore, which is fine for
+side-loading; for a store release use EAS, which manages a real keystore.
 
-The generated project signs release builds with the debug keystore, which is fine for
-side-loading. For a store release, use EAS (step 2b), which manages a real keystore,
-or configure your own signing.
-
-### 2b. Build the APK with EAS
+### EAS build
 
 ```bash
 npx eas-cli@latest login
 npx eas-cli@latest build:configure      # first time only: links the project to your Expo account
-
-npm run eas:preview                     # sample library, cloud build -> APK download link
-npm run db:full && npm run eas:preview-full   # full library, built on THIS machine (--local)
+npm run eas:preview                     # cloud build -> APK download link
 ```
 
-* `preview` (sample) builds in the cloud: the build machine regenerates the sample DB itself.
-* `preview-full` runs `eas build --local` (needs the Android SDK, like 2a), because the full
-  DB can be very large to upload. To build it in the cloud instead, run
-  `npx eas-cli@latest build --platform android --profile preview-full` after `npm run db:full`:
-  `.easignore` uploads the pre-built DB, and the build fails early if it is missing.
-* `production` makes an AAB for Google Play with the full library. Play limits the base
-  download size, so a very large library needs Play Asset Delivery; the APK route has no such
-  limit.
-
-### Size notes
-
-The DB is stored uncompressed in the APK (SQLite needs random access), and on first launch
-it is copied once into the app's data folder. So the installed app needs about twice the
-DB size of free space. To shrink it, build from a subset of the library: `raw_library/full`
-can hold any subset of Otzaria's folders, with or without their link files.
-
+After installing, open the app and choose **הורד ספרייה מוכנה מהענן** (after you have
+published a library release) or import books from the device.

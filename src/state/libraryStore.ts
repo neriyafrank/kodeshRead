@@ -32,3 +32,25 @@ export const useLibraryUi = create<LibraryUiState>()(
     { name: 'kodeshread.libraryUi', storage: createJSONStorage(() => AsyncStorage), version: 1 },
   ),
 );
+
+interface LibrarySettingsState {
+  /** Manifest (or direct .gz/.zip/.db) URL of the core library; null = app.json default. */
+  manifestUrl: string | null;
+  /** The first-launch onboarding card was dismissed. */
+  onboardingDismissed: boolean;
+  setManifestUrl: (url: string | null) => void;
+  dismissOnboarding: (dismissed?: boolean) => void;
+}
+
+/** Library & Updates Manager preferences (persisted). */
+export const useLibrarySettings = create<LibrarySettingsState>()(
+  persist(
+    (set) => ({
+      manifestUrl: null,
+      onboardingDismissed: false,
+      setManifestUrl: (url) => set({ manifestUrl: url && url.trim() ? url.trim() : null }),
+      dismissOnboarding: (dismissed = true) => set({ onboardingDismissed: dismissed }),
+    }),
+    { name: 'kodeshread.librarySettings', storage: createJSONStorage(() => AsyncStorage), version: 1 },
+  ),
+);

@@ -5,12 +5,9 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { loadBookIndex } from '../../shared/quickJump';
-import { hasFts5 } from '../../shared/search';
-import { openLibraryDatabase, toAdapter } from '../db/library';
-import { LibraryContext, type Library } from '../db/LibraryContext';
+import { LibraryProvider } from '../db/LibraryContext';
 import { ensureRTL } from '../lib/rtl';
-import { useLibraryUi } from '../state/libraryStore';
+import { useLibrarySettings, useLibraryUi } from '../state/libraryStore';
 import { useSearch } from '../state/searchStore';
 import { fontAssets, setFontsAvailable } from '../fonts';
 import { useSettings } from '../state/settingsStore';
@@ -24,9 +21,9 @@ if (Platform.OS === 'web' && typeof document !== 'undefined') {
   document.documentElement.lang = 'he';
 }
 
-const PERSISTED_STORES = [useSettings, useTabs, useLibraryUi, useSearch];
+const PERSISTED_STORES = [useSettings, useTabs, useLibraryUi, useSearch, useLibrarySettings];
 
-type BootState = { status: 'loading' } | { status: 'reloading' } | { status: 'ready'; library: Library } | { status: 'error'; message: string };
+type BootState = { status: 'loading' } | { status: 'reloading' } | { status: 'ready' };
 
 export default function RootLayout() {
   const [state, setState] = useState<BootState>({ status: 'loading' });
@@ -49,14 +46,10 @@ export default function RootLayout() {
           if (alive) setState({ status: 'reloading' });
           return;
         }
-        const db = await openLibraryDatabase();
-        const adapter = toAdapter(db);
-        const [bookIndex, fts] = await Promise.all([loadBookIndex(adapter), hasFts5(adapter)]);
-        if (!fts) console.warn('SQLite build has no FTS5 (web preview): full-text search uses a slow LIKE fallback');
-        if (alive) setState({ status: 'ready', library: { db, adapter, bookIndex, fts } });
+        if (alive) setState({ status: 'ready' });
       } catch (e) {
         console.error(e);
-        if (alive) setState({ status: 'error', message: e instanceof Error ? e.message : String(e) });
+        if (alive) setState({ status: 'ready' });
       }
     })();
     return () => {
@@ -70,8 +63,8 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <View style={[styles.root, { backgroundColor: theme.background }]}>
         <StatusBar style={theme.statusBar} />
-        {state.status === 'ready' && ready ? (
-          <LibraryContext.Provider value={state.library}>
+        {ready ? (
+          <LibraryProvider fallback={(error) => <BootScreen error={error} />}>
             <Stack
               screenOptions={{
                 headerStyle: { backgroundColor: theme.background },
@@ -80,25 +73,33 @@ export default function RootLayout() {
                 headerShadowVisible: theme.name !== 'dark',
                 contentStyle: { backgroundColor: theme.background },
               }}
-            />
-          </LibraryContext.Provider>
+            >
+              <Stack.Screen name="library-manager" options={{ presentation: 'modal', title: 'ניהול ספרייה ועדכונים' }} />
+            </Stack>
+          </LibraryProvider>
         ) : (
-          <View style={styles.center}>
-            {state.status === 'error' ? (
-              <>
-                <Text style={styles.errorTitle}>שגיאה בטעינת הספרייה</Text>
-                <Text style={styles.errorText}>{state.message}</Text>
-              </>
-            ) : (
-              <>
-                <ActivityIndicator size="large" color={colors.accent} />
-                <Text style={styles.loading}>טוען ספרייה…</Text>
-              </>
-            )}
-          </View>
+          <BootScreen error={null} />
         )}
       </View>
     </SafeAreaProvider>
+  );
+}
+
+function BootScreen({ error }: { error: string | null }) {
+  return (
+    <View style={styles.center}>
+      {error ? (
+        <>
+          <Text style={styles.errorTitle}>שגיאה בטעינת הספרייה</Text>
+          <Text style={styles.errorText}>{error}</Text>
+        </>
+      ) : (
+        <>
+          <ActivityIndicator size="large" color={colors.accent} />
+          <Text style={styles.loading}>טוען ספרייה…</Text>
+        </>
+      )}
+    </View>
   );
 }
 

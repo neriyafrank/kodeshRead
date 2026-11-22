@@ -89,7 +89,7 @@ interface Props {
 }
 
 export function BookReader({ tab, onOpenToc }: Props) {
-  const { adapter, db } = useLibrary();
+  const { adapter } = useLibrary();
   const palette = useAppTheme();
   const fontSize = useSettings((s) => s.fontSize);
   const lineHeight = useSettings((s) => s.lineHeight);
@@ -231,7 +231,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
     let alive = true;
     (async () => {
       try {
-        const book = await db.getFirstAsync<{ total_lines: number }>('SELECT total_lines FROM books WHERE id = ?', [bookId]);
+        const [book] = await adapter.forBook(bookId).all<{ total_lines: number }>('SELECT total_lines FROM books WHERE id = ?', [bookId]);
         if (!alive) return;
         if (!book) throw new Error('הספר לא נמצא');
         setTotalLines(book.total_lines);

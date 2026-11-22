@@ -6,6 +6,8 @@
  */
 'use strict';
 
+const { adapterForBook } = require('./sources');
+
 /** Inline tags the reader renders (everything else is stripped, keeping its text). */
 const SAFE_TAGS = ['b', 'strong', 'i', 'em', 'u', 'small', 'big', 'sup', 'sub'];
 const ANY_TAG_RE = /<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g;
@@ -128,7 +130,7 @@ const WINDOW_COLUMNS = 'line_index, display_text, is_heading, toc_path';
 
 /** Fetch paragraphs [from, to] of a book (never the whole book). */
 function fetchRange(db, bookId, from, to) {
-  return db.all(
+  return adapterForBook(db, bookId).all(
     `SELECT ${WINDOW_COLUMNS} FROM paragraphs WHERE book_id = ? AND line_index BETWEEN ? AND ? ORDER BY line_index`,
     [bookId, from, to],
   );

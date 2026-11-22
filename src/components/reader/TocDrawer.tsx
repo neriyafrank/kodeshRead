@@ -41,19 +41,19 @@ const INDENT = 16;
 
 export function TocDrawer({ visible, bookId, bookTitle, currentLine, onClose, onSelect }: Props) {
   const s = useThemedStyles(createStyles);
-  const { db } = useLibrary();
+  const { adapter } = useLibrary();
   const [nodes, setNodes] = useState<{ bookId: number; list: TocNode[] } | null>(null);
 
   useEffect(() => {
     if (!visible || nodes?.bookId === bookId) return;
     let alive = true;
-    db.getAllAsync<TocNode>('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [bookId]).then(
+    adapter.forBook(bookId).all<TocNode>('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [bookId]).then(
       (list) => alive && setNodes({ bookId, list }),
     );
     return () => {
       alive = false;
     };
-  }, [visible, bookId, db, nodes]);
+  }, [visible, bookId, adapter, nodes]);
 
   const list = nodes?.bookId === bookId ? nodes.list : null;
 

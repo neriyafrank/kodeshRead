@@ -4,8 +4,12 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { JumpResult } from '../../shared/quickJump';
 import { SearchIcon } from '../components/Icons';
+import { JobStatus } from '../components/library/JobStatus';
+import { OnboardingCard } from '../components/library/OnboardingCard';
 import { LibraryTree } from '../components/LibraryTree';
 import { QuickJumpBar } from '../components/QuickJumpBar';
+import { useLibrary } from '../db/LibraryContext';
+import { useLibrarySettings } from '../state/libraryStore';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
 
@@ -14,6 +18,11 @@ export default function LibraryScreen() {
   const router = useRouter();
   const openBookInTab = useTabs((x) => x.openBook);
   const tabCount = useTabs((x) => x.tabs.length);
+  const { core, userBookCount } = useLibrary();
+  const onboardingDismissed = useLibrarySettings((x) => x.onboardingDismissed);
+  // First launch: no core library yet. Stays until a library exists (or, once personal
+  // books were imported, until the user hides it).
+  const showOnboarding = !core && !(userBookCount > 0 && onboardingDismissed);
 
   const openBook = useCallback(
     (bookId: number, bookTitle: string, line?: number, highlight = false) => {
@@ -32,6 +41,16 @@ export default function LibraryScreen() {
           title: 'ספרייה',
           headerRight: () => (
             <View style={s.headerBtns}>
+              <Pressable
+                onPress={() => router.navigate('/library-manager')}
+                hitSlop={8}
+                style={s.searchBtn}
+                accessibilityRole="button"
+                accessibilityLabel="ניהול ספרייה ועדכונים"
+                testID="open-library-manager"
+              >
+                <Text style={s.tabsBtnText}>ניהול</Text>
+              </Pressable>
               <Pressable onPress={() => router.navigate('/search')} hitSlop={8} style={s.searchBtn} accessibilityRole="button" accessibilityLabel="חיפוש בטקסט" testID="open-search">
                 <SearchIcon size={18} />
                 <Text style={s.tabsBtnText}>חיפוש</Text>
@@ -48,10 +67,15 @@ export default function LibraryScreen() {
           ),
         }}
       />
+      <JobStatus compact onPress={() => router.navigate('/library-manager')} />
       <QuickJumpBar onJump={onJump} />
       <View style={s.divider} />
       <View style={s.tree}>
-        <LibraryTree onOpenBook={(id, title) => openBook(id, title)} />
+        <LibraryTree
+          onOpenBook={(id, title) => openBook(id, title)}
+          header={showOnboarding ? <OnboardingCard hasUserBooks={userBookCount > 0} /> : undefined}
+          emptyText={showOnboarding ? '' : undefined}
+        />
       </View>
     </View>
   );

@@ -1,4 +1,4 @@
-import type { QueryAdapter } from './quickJump';
+import type { LibraryDb } from './sources';
 
 export interface LinkedEntry {
   book_id: number;
@@ -20,8 +20,8 @@ export interface CommentaryGroup {
   entries: LinkedEntry[];
 }
 
-export function fetchLinkCounts(db: QueryAdapter, bookId: number, from: number, to: number): Promise<Map<number, number>>;
+export function fetchLinkCounts(db: LibraryDb, bookId: number, from: number, to: number): Promise<Map<number, number>>;
 export function attachLinkCounts<T extends { line_index: number }>(rows: T[], counts: Map<number, number>): (T & { link_count: number })[];
-export function fetchLinkedEntries(db: QueryAdapter, bookId: number, line: number): Promise<LinkedEntry[]>;
+export function fetchLinkedEntries(db: LibraryDb, bookId: number, line: number): Promise<LinkedEntry[]>;
 export function commentatorName(title: string): string;
 export function groupLinkedEntries(entries: LinkedEntry[]): CommentaryGroup[];

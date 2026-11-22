@@ -1,4 +1,4 @@
-import type { QueryAdapter } from './quickJump';
+import type { LibraryDb } from './sources';
 
 export interface ParagraphRow {
   line_index: number;
@@ -37,6 +37,6 @@ export function mergeChunk<T extends { line_index: number }>(
   max?: number,
 ): { rows: T[]; range: LineRange };
 export function indexOfLine(rows: { line_index: number }[], line: number): number;
-export function fetchRange(db: QueryAdapter, bookId: number, from: number, to: number): Promise<ParagraphRow[]>;
+export function fetchRange(db: LibraryDb, bookId: number, from: number, to: number): Promise<ParagraphRow[]>;
 export function tocTrail(nodes: TocNodeLike[], line: number): number[];
 export function estimateItemSize(fontSize: number, lineHeight: number, avgChars?: number): number;

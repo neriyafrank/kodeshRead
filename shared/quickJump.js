@@ -12,16 +12,26 @@
 'use strict';
 
 const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
+const { sourcesOf, adapterForBook } = require('./sources');
 
 const MAX_BOOK_CANDIDATES = 5;
 
-/** Load every book's title + aliases once and index them in memory. */
+/**
+ * Load every book's title + aliases once and index them in memory.
+ * `db` may be a router: the books of every library database are indexed together
+ * (their ids never collide), core books first.
+ */
 async function loadBookIndex(db) {
-  const rows = await db.all(
-    `SELECT b.id, b.title, b.aliases, b.total_lines, c.path AS category_path
-     FROM books b LEFT JOIN categories c ON c.id = b.category_id`,
-    [],
-  );
+  const rows = [];
+  for (const s of sourcesOf(db)) {
+    rows.push(
+      ...(await s.adapter.all(
+        `SELECT b.id, b.title, b.aliases, b.total_lines, c.path AS category_path
+         FROM books b LEFT JOIN categories c ON c.id = b.category_id ORDER BY b.id`,
+        [],
+      )),
+    );
+  }
   const byAlias = new Map();
   const books = new Map();
   for (const r of rows) {
@@ -107,7 +117,8 @@ async function findInlineMarker(db, bookId, token, start, end) {
   return rows[0] ? rows[0].line_index : null;
 }
 
-async function resolveInBook(db, book, tokens) {
+async function resolveInBook(router, book, tokens) {
+  const db = adapterForBook(router, book.id);
   const path = [];
   let node = null;
   let targetLine = 1;
@@ -145,8 +156,8 @@ async function resolveInBook(db, book, tokens) {
   return { path, targetLine, marker, unmatched: tokens.slice(i) };
 }
 
-async function previewText(db, bookId, line) {
-  const rows = await db.all(
+async function previewText(router, bookId, line) {
+  const rows = await adapterForBook(router, bookId).all(
     'SELECT line_index, display_text FROM paragraphs WHERE book_id = ? AND line_index >= ? AND is_heading = 0 ORDER BY line_index LIMIT 1',
     [bookId, line],
   );

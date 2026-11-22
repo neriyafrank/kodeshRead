@@ -7,12 +7,14 @@
  */
 'use strict';
 
+const { adapterForBook } = require('./sources');
+
 /**
  * Number of links per line for lines [from, to] of a book.
  * @returns {Promise<Map<number, number>>} line_index -> count (lines without links are absent)
  */
 async function fetchLinkCounts(db, bookId, from, to) {
-  const rows = await db.all(
+  const rows = await adapterForBook(db, bookId).all(
     `SELECT line, COUNT(*) AS n FROM (
        SELECT line_a AS line FROM links WHERE book_a_id = ? AND line_a BETWEEN ? AND ?
        UNION ALL
@@ -32,7 +34,8 @@ function attachLinkCounts(rows, counts) {
 
 /** All entries linked to one paragraph, with the linked paragraph's text and book. */
 function fetchLinkedEntries(db, bookId, line) {
-  return db.all(
+  // Links never cross databases: a book's commentaries live in the same library DB.
+  return adapterForBook(db, bookId).all(
     `SELECT x.book_id, b.title AS book_title, x.line, x.link_type, p.display_text, p.toc_path,
             c.path AS category_path
      FROM (
