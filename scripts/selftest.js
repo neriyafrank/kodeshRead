@@ -17,6 +17,7 @@ const assert = require('assert');
 const { normalizeHebrew, extractRefKey, generateBookAliases } = require('../shared/hebrew');
 const { loadBookIndex, resolveReference } = require('../shared/quickJump');
 const reader = require('../shared/reader');
+const search = require('../shared/search');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -111,6 +112,39 @@ async function main() {
     assert.deepStrictEqual(reader.tocTrail(nodes, 25), [4]);
   });
 
+  await check('search: parseSearchQuery sanitization', () => {
+    const p = search.parseSearchQuery;
+    assert.strictEqual(p('בְּרֵאשִׁ֖ית בָּרָ֣א').match, '"בראשית" "ברא"', 'niqqud stripped, AND of tokens');
+    assert.strictEqual(p('שלום עולם').match, '"שלומ" "עולמ"', 'finals normalized like the index');
+    assert.strictEqual(p('שו"ע או״ח').match, '"שוע" "אוח"', 'in-word gershayim is not a phrase quote');
+    assert.strictEqual(p('"שני כחות" באדם').match, '"שני כחות" "באדמ"', 'phrase re-wrapped after sanitization');
+    assert.strictEqual(p('“אמר רב” הונא').match, '"אמר רב" "הונא"', 'typographic quotes');
+    assert.strictEqual(p('"אמר רב').match, '"אמר רב"', 'unclosed quote = phrase');
+    assert.strictEqual(p('"שבת"').match, '"שבת"', 'single-word phrase');
+    assert.strictEqual(p('a AND b OR NOT NEAR(c)').match, '"a" "and" "b" "or" "not" "near" "c"', 'FTS keywords are quoted words');
+    assert.strictEqual(p('-*():^\'"').empty, true);
+    assert.strictEqual(p('   ').empty, true);
+    assert.strictEqual(p('ב-ה (ג) *א^ :ד').match, '"ב" "ה" "ג" "א" "ד"');
+    for (const ch of '"\'-*():^') assert.ok(!p(`x${ch}y ${ch}z`).match.replace(/"/g, '').includes(ch), `stripped ${ch}`);
+    assert.deepStrictEqual(p('"שני כחות" באדם').terms, ['שני', 'כחות', 'באדמ']);
+  });
+  await check('search: buildKwic highlights through niqqud/finals and clips', () => {
+    const k = search.buildKwic('<b>וַיֹּ֥אמֶר</b> אֱלֹהִ֖ים יְהִ֣י א֑וֹר', search.parseSearchQuery('אלהים').terms);
+    assert.deepStrictEqual(k.segments.filter((x) => x.hit).map((x) => x.text), ['אֱלֹהִ֖ים']);
+    assert.strictEqual(k.segments.map((x) => x.text).join(''), 'וַיֹּ֥אמֶר אֱלֹהִ֖ים יְהִ֣י א֑וֹר', 'tags stripped, text preserved');
+    const long = Array.from({ length: 60 }, (_, i) => (i === 40 ? 'מטרה' : `מילה${i}`)).join(' ');
+    const k2 = search.buildKwic(long, ['מטרה'], { before: 5, after: 5 });
+    assert.ok(k2.clippedStart && k2.clippedEnd && k2.hitCount === 1);
+    assert.ok(k2.segments.map((x) => x.text).join('').startsWith('מילה35 '), k2.segments.map((x) => x.text).join(''));
+    const k3 = search.buildKwic('כׇּל־עֲדַ֣ת', ['עדת'], { showNiqqud: false });
+    assert.deepStrictEqual(k3.segments, [{ text: 'כל', hit: false }, { text: '־', hit: false }, { text: 'עדת', hit: true }].reduce((a, x) => {
+      const l = a[a.length - 1];
+      if (l && !l.hit && !x.hit) l.text += x.text; else a.push({ ...x });
+      return a;
+    }, []));
+    assert.strictEqual(search.formatTocPath('דף ב. > עמוד א'), 'דף ב. › עמוד א');
+  });
+
   // 2. Synthetic fixture with deep headings -----------------------------------
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-fixture-'));
   try {
@@ -190,6 +224,92 @@ async function main() {
     await check('sample: FTS5 + folder facet', async () => {
       const rows = await db.all("SELECT rowid FROM paragraphs_fts WHERE paragraphs_fts MATCH ? AND category_path LIKE ?", ['ארבעה ראשי', 'תלמוד בבלי/%']);
       assert.ok(rows.length >= 1);
+    });
+    await check('search: punctuation fuzz never throws fts5 syntax errors', async () => {
+      const junk = ['"', "'", '-', '*', '(', ')', ':', '^', '.', ',', '?', '!', '+', '{', '}', '[', ']', '/', '\\', ';', '<', '>', '=', '&', '|', '~', '@', '#', '%', '״', '׳', '־', 'AND', 'OR', 'NOT', 'NEAR', ' '];
+      let seed = 7;
+      const rnd = (n) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+      for (let i = 0; i < 400; i++) {
+        let q = '';
+        for (let j = rnd(8) + 1; j > 0; j--) q += rnd(3) ? junk[rnd(junk.length)] : ['שבת', 'אמר', 'רב', 'בראשית', 'א'][rnd(5)];
+        await search.searchParagraphs(db, q, { limit: 5 });
+        await search.searchParagraphs(db, q, { limit: 5, scope: { kind: 'category', path: 'תלמוד בבלי' } });
+        await search.countMatches(db, q, { scope: { kind: 'book', bookId: 3 } });
+      }
+    });
+    await check('search: multi-word AND vs exact phrase', async () => {
+      const and = await search.countMatches(db, 'שני כחות באדם', { cap: 100000 });
+      const phrase = await search.countMatches(db, '"שני כחות באדם"', { cap: 100000 });
+      const reversed = await search.countMatches(db, '"באדם כחות שני"', { cap: 100000 });
+      assert.ok(and.count >= phrase.count && phrase.count >= 1, `and=${and.count} phrase=${phrase.count}`);
+      assert.strictEqual(reversed.count, 0, 'phrase order matters');
+      const r = await search.searchParagraphs(db, '"שני כחות באדם"', { limit: 500 });
+      for (const row of r.rows) assert.ok(normalizeHebrew(row.display_text).includes('שני כחות באדמ'), row.display_text);
+      const ra = await search.searchParagraphs(db, 'אמר רבא שבת', { limit: 200 });
+      for (const row of ra.rows) {
+        const words = new Set(normalizeHebrew(row.display_text, { keepPunctuation: false }).split(' '));
+        for (const t of ['אמר', 'רבא', 'שבת']) assert.ok(words.has(t), `AND: missing ${t} in ${row.display_text}`);
+      }
+    });
+    await check('search: niqqud/final-letter insensitive', async () => {
+      const a = await search.countMatches(db, 'אֱלֹהִים', { cap: 100000 });
+      const b = await search.countMatches(db, 'אלהים', { cap: 100000 });
+      const c = await search.countMatches(db, 'אלהימ', { cap: 100000 });
+      assert.ok(a.count > 0 && a.count === b.count && b.count === c.count, `${a.count} ${b.count} ${c.count}`);
+    });
+    await check('search: scopes (library / folder / book)', async () => {
+      const all = await search.countMatches(db, 'אמר', { cap: 100000 });
+      const tanach = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תנך', name: 'תנך' } });
+      const torah = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תנך/תורה/', name: 'תורה' } });
+      const shas = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'category', path: 'תלמוד בבלי', name: 'בבלי' } });
+      const shabbat = await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: 3, title: 'שבת' } });
+      const none = await search.countMatches(db, 'אמר', { scope: { kind: 'category', path: 'תנ', name: 'x' } });
+      assert.strictEqual(all.count, tanach.count + shas.count, 'folders partition the library');
+      assert.strictEqual(tanach.count, torah.count, 'sub-folder via LIKE folder/%');
+      assert.ok(shabbat.count > 0 && shabbat.count < shas.count);
+      assert.strictEqual(none.count, 0, 'prefix of a folder name is not that folder');
+      const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: 3, title: 'שבת' }, limit: 30 });
+      assert.ok(page.rows.every((r) => r.book_id === 3 && r.book_title === 'שבת'));
+      const cat = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'category', path: 'תנך', name: 'תנך' }, limit: 30 });
+      assert.ok(cat.rows.every((r) => r.book_id === 1 || r.book_id === 2));
+    });
+    await check('search: keyset paging covers every match exactly once, in book order', async () => {
+      const total = (await search.countMatches(db, 'אמר', { cap: 100000, scope: { kind: 'book', bookId: 3 } })).count;
+      const seen = [];
+      let afterId;
+      for (;;) {
+        const page = await search.searchParagraphs(db, 'אמר', { scope: { kind: 'book', bookId: 3 }, afterId, limit: 50 });
+        seen.push(...page.rows);
+        if (!page.hasMore) break;
+        afterId = page.rows[page.rows.length - 1].id;
+      }
+      assert.strictEqual(seen.length, total);
+      for (let i = 1; i < seen.length; i++) assert.ok(seen[i].line_index > seen[i - 1].line_index);
+    });
+    await check('search: KWIC on real rows shows a hit + toc breadcrumb', async () => {
+      const r = await search.searchParagraphs(db, 'בראשית ברא', { limit: 3 });
+      assert.ok(r.rows.length >= 1 && r.rows[0].book_title === 'בראשית');
+      const k = search.buildKwic(r.rows[0].display_text, r.query.terms);
+      assert.ok(k.hitCount >= 2, JSON.stringify(k));
+      assert.ok(search.formatTocPath(r.rows[0].toc_path).includes('פרק א'), r.rows[0].toc_path);
+    });
+    await check('search: LIKE fallback (no-FTS5 web preview) agrees with FTS5 on exact hits', async () => {
+      assert.strictEqual(await search.hasFts5(db), true);
+      for (const [q, scope] of [['"שני כחות"', undefined], ['ויאמר', { kind: 'category', path: 'תנך' }], ['אמר רבא', { kind: 'book', bookId: 3 }]]) {
+        const f = await search.searchParagraphs(db, q, { scope, limit: 5000 });
+        const l = await search.searchParagraphs(db, q, { scope, limit: 5000, fts: false });
+        const lid = new Set(l.rows.map((r) => r.id));
+        assert.ok(f.rows.length > 0 && f.rows.every((r) => lid.has(r.id)), `${q}: fallback misses FTS hits`);
+        await search.countMatches(db, q, { scope, fts: false });
+      }
+    });
+    await check('search: latency', async () => {
+      const qs = ['אמר רב', '"שני כחות"', 'שבת', 'ויאמר אלהים'];
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 25; i++) for (const q of qs) await search.searchParagraphs(db, q, { limit: 40 });
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / (25 * qs.length);
+      assert.ok(ms < 15, `avg ${ms.toFixed(2)}ms`);
+      console.log(`  search page avg ${ms.toFixed(2)}ms/query`);
     });
     await check('sample: sliding window scrolls a whole book within MAX_WINDOW', async () => {
       const book = (await db.all("SELECT id, total_lines FROM books WHERE title = 'שבת'", []))[0];

@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { SearchIcon } from '../components/Icons';
 import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
 import { TabStrip } from '../components/reader/TabStrip';
@@ -44,6 +45,20 @@ export default function ReaderWorkspace() {
           testID="toc-button"
         >
           <Text style={s.iconText}>☰</Text>
+        </Pressable>
+        <Pressable
+          onPress={() =>
+            activeTab
+              ? router.navigate({ pathname: '/search', params: { bookId: String(activeTab.bookId), title: activeTab.bookTitle } })
+              : router.navigate('/search')
+          }
+          hitSlop={6}
+          style={s.iconBtn}
+          accessibilityRole="button"
+          accessibilityLabel="חיפוש בספר"
+          testID="reader-search"
+        >
+          <SearchIcon size={19} />
         </Pressable>
         <Pressable
           onPress={() => setAppearanceOpen(true)}

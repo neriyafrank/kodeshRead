@@ -3,6 +3,7 @@ import { useCallback } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { JumpResult } from '../../shared/quickJump';
+import { SearchIcon } from '../components/Icons';
 import { LibraryTree } from '../components/LibraryTree';
 import { QuickJumpBar } from '../components/QuickJumpBar';
 import { useTabs } from '../state/tabsStore';
@@ -29,15 +30,22 @@ export default function LibraryScreen() {
       <Stack.Screen
         options={{
           title: 'ספרייה',
-          headerRight: () =>
-            tabCount ? (
-              <Pressable onPress={() => router.navigate('/reader')} hitSlop={8} style={s.tabsBtn} accessibilityRole="button" testID="open-workspace">
-                <Text style={s.tabsBtnText}>לשוניות</Text>
-                <View style={s.badge}>
-                  <Text style={s.badgeText}>{tabCount}</Text>
-                </View>
+          headerRight: () => (
+            <View style={s.headerBtns}>
+              <Pressable onPress={() => router.navigate('/search')} hitSlop={8} style={s.searchBtn} accessibilityRole="button" accessibilityLabel="חיפוש בטקסט" testID="open-search">
+                <SearchIcon size={18} />
+                <Text style={s.tabsBtnText}>חיפוש</Text>
               </Pressable>
-            ) : null,
+              {tabCount ? (
+                <Pressable onPress={() => router.navigate('/reader')} hitSlop={8} style={s.tabsBtn} accessibilityRole="button" testID="open-workspace">
+                  <Text style={s.tabsBtnText}>לשוניות</Text>
+                  <View style={s.badge}>
+                    <Text style={s.badgeText}>{tabCount}</Text>
+                  </View>
+                </Pressable>
+              ) : null}
+            </View>
+          ),
         }}
       />
       <QuickJumpBar onJump={onJump} />
@@ -54,6 +62,8 @@ const createStyles = (c: Palette) =>
     screen: { flex: 1, backgroundColor: c.background },
     divider: { height: 1, backgroundColor: c.border },
     tree: { flex: 1 },
+    headerBtns: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+    searchBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.sm },
     tabsBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.sm },
     tabsBtnText: { color: c.accent, fontSize: 15, fontWeight: '600' },
     badge: { minWidth: 22, height: 22, borderRadius: radius.md, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },

@@ -6,10 +6,12 @@ import { ActivityIndicator, Platform, StyleSheet, Text, View } from 'react-nativ
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { loadBookIndex } from '../../shared/quickJump';
+import { hasFts5 } from '../../shared/search';
 import { openLibraryDatabase, toAdapter } from '../db/library';
 import { LibraryContext, type Library } from '../db/LibraryContext';
 import { ensureRTL } from '../lib/rtl';
 import { useLibraryUi } from '../state/libraryStore';
+import { useSearch } from '../state/searchStore';
 import { fontAssets, setFontsAvailable } from '../fonts';
 import { useSettings } from '../state/settingsStore';
 import { useTabs } from '../state/tabsStore';
@@ -22,7 +24,7 @@ if (Platform.OS === 'web' && typeof document !== 'undefined') {
   document.documentElement.lang = 'he';
 }
 
-const PERSISTED_STORES = [useSettings, useTabs, useLibraryUi];
+const PERSISTED_STORES = [useSettings, useTabs, useLibraryUi, useSearch];
 
 type BootState = { status: 'loading' } | { status: 'reloading' } | { status: 'ready'; library: Library } | { status: 'error'; message: string };
 
@@ -49,8 +51,9 @@ export default function RootLayout() {
         }
         const db = await openLibraryDatabase();
         const adapter = toAdapter(db);
-        const bookIndex = await loadBookIndex(adapter);
-        if (alive) setState({ status: 'ready', library: { db, adapter, bookIndex } });
+        const [bookIndex, fts] = await Promise.all([loadBookIndex(adapter), hasFts5(adapter)]);
+        if (!fts) console.warn('SQLite build has no FTS5 (web preview): full-text search uses a slow LIKE fallback');
+        if (alive) setState({ status: 'ready', library: { db, adapter, bookIndex, fts } });
       } catch (e) {
         console.error(e);
         if (alive) setState({ status: 'error', message: e instanceof Error ? e.message : String(e) });

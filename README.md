@@ -5,9 +5,9 @@ Offline-first Android Torah library (Expo + TypeScript) powered by
 pre-built into one SQLite database (`assets/db/library.db`, FTS5-indexed) that is
 bundled inside the APK. See [`CLAUDE.md`](CLAUDE.md) for the full spec.
 
-**Status:** Milestone 2. Done so far: project setup, the DB build pipeline, the
-Library screen with Quick Source Jump and the RTL tree (M1), and the windowed
-reader workspace (M2):
+**Status:** Milestone 3. Done so far: project setup, the DB build pipeline, the
+Library screen with Quick Source Jump and the RTL tree (M1), the windowed
+reader workspace (M2), and Hebrew full-text search (M3):
 
 * **Sliding-window reader** (`src/components/reader/BookReader.tsx`): ~400 lines around
   the current line, +200-line chunks fetched near either edge, far edge trimmed at 800 rows;
@@ -23,6 +23,22 @@ reader workspace (M2):
   `@expo-google-fonts/*`), font size and line height sliders, Light / Sepia / OLED Dark,
   live Niqqud & cantillation toggle. Settings persist.
 
+* **Full-text search** (`src/app/search.tsx`, logic in `shared/search.js`): opened from the
+  Library header (חיפוש) or the reader toolbar (🔍 = scoped to the open book).
+  * Queries go through the same `normalizeHebrew()` as `clean_text` (niqqud, finals, gershayim
+    don't matter), then every FTS5 syntax character (`" ' - * ( ) : ^` and any other punctuation)
+    is stripped and each token is re-quoted, so no input can raise `fts5: syntax error`.
+  * Words are AND-ed; `"quoted text"` is an exact phrase (a quote inside a word, as in `שו"ע`,
+    is gershayim, not a phrase delimiter).
+  * Scope sheet: Entire Library / a folder (`category_path LIKE 'folder/%'`, sub-folders included)
+    / a single book (`book_id = ?`), with a filter box and a "book open in the reader" shortcut.
+  * KWIC cards: book title + `toc_path` breadcrumb and a snippet around the first hit with the
+    matched words emphasized. Results stream in library order (keyset paging, 40 per page);
+    the total is counted up to 1000+.
+  * Tapping a result opens or re-uses the book's tab, jumps to the line and highlights it for 2 s.
+  * The web preview's SQLite has no FTS5, so there (only) search falls back to a slower
+    substring `LIKE` scan.
+
 ## Quick start
 
 Requires **Node ≥ 22.13** (the DB build script uses the built-in `node:sqlite`).
@@ -30,13 +46,15 @@ Requires **Node ≥ 22.13** (the DB build script uses the built-in `node:sqlite`
 ```bash
 npm install
 npm run db:sample      # raw_library/sample -> assets/db/library.db
-npm test               # pipeline + Quick Jump self-test
+npm test               # pipeline, Quick Jump, reader & FTS5 search self-test
 npm start              # Expo dev server (also auto-builds the DB if missing)
 ```
 
 `npm run android` builds a native dev build (`expo run:android`, needs the Android SDK).
 The app uses `expo-updates` for the first-launch RTL reload, so run it as a dev build
-rather than in Expo Go. `npm run web` gives a quick browser preview of the UI.
+rather than in Expo Go. `npm run web` gives a quick browser preview of the UI;
+with it running, `npm run e2e:search` drives the Search screen end to end with Playwright
+(needs `playwright` + Chromium available).
 
 ## Library sources
 

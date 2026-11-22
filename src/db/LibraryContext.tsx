@@ -8,6 +8,8 @@ export interface Library {
   adapter: QueryAdapter;
   /** In-memory title/alias index for Quick Jump (built once at startup). */
   bookIndex: BookIndex;
+  /** SQLite build has FTS5 (always on Android; the web preview falls back to LIKE). */
+  fts: boolean;
 }
 
 export const LibraryContext = createContext<Library | null>(null);
