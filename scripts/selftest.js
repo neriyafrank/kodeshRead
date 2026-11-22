@@ -6,6 +6,10 @@
  * 2. Builds a tiny synthetic fixture library with deep headings (h2/h3/h4) into a
  *    temp folder and resolves spec examples ("שוע אוח כה ה", "רמבם שבת א א").
  * 3. Resolves real references against assets/db/library.db (sample library).
+ * 4. Milestone 5: the on-device ingestion engine (shared/indexer.js) writing a personal
+ *    library (ids >= USER_ID_BASE), the core+user router (shared/sources.js) across Quick
+ *    Jump / reader / search / commentaries, book deletion, and the release artifact
+ *    (dist/manifest.json + .gz, streaming .gz/.zip decompression from shared/release.js).
  */
 'use strict';
 
@@ -19,7 +23,10 @@ const { loadBookIndex, resolveReference } = require('../shared/quickJump');
 const reader = require('../shared/reader');
 const search = require('../shared/search');
 const commentary = require('../shared/commentary');
-const { makeBookMatcher } = require('./build-db');
+const { makeBookMatcher, writerAdapter, nodeFs } = require('./build-db');
+const indexer = require('../shared/indexer');
+const sources = require('../shared/sources');
+const release = require('../shared/release');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -427,8 +434,248 @@ async function main() {
     db.close();
   }
 
+  // 4. Milestone 5: personal library + core/user router + release artifacts ---------
+  await dualDbTests();
+  await releaseTests();
+
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
+}
+
+/** Writable node:sqlite DB wrapped for shared/indexer.js. */
+function openWritable(file) {
+  const origEmit = process.emitWarning;
+  process.emitWarning = (w, ...r) => (String(w).includes('SQLite') ? undefined : origEmit.call(process, w, ...r));
+  const { DatabaseSync } = require('node:sqlite');
+  process.emitWarning = origEmit;
+  const raw = new DatabaseSync(file);
+  return { raw, w: writerAdapter(raw), read: { all: async (sql, params) => raw.prepare(sql).all(...(params || [])) } };
+}
+
+async function dualDbTests() {
+  const coreFile = path.join(ROOT, 'assets/db/library.db');
+  if (!fs.existsSync(coreFile)) return;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-user-'));
+  // A personal folder "שיעורים" with a sub-folder, plus a commentary + links file.
+  const folder = path.join(tmp, 'שיעורים');
+  fs.mkdirSync(path.join(folder, 'הלכה'), { recursive: true });
+  const book = ['<h1>קיצור הלכות שבת</h1>', '<h2>סימן א</h2>', '<h3>סעיף א</h3>', 'אסור לבשל בשבת קדש.', '<h3>סעיף ב</h3>', 'מותר לטלטל ספר.'].join('\n');
+  fs.writeFileSync(path.join(folder, 'הלכה', 'קיצור הלכות שבת.txt'), '﻿' + book.replace(/\n/g, '\r\n'));
+  fs.writeFileSync(path.join(folder, 'הערות על קיצור הלכות שבת.txt'), ['<h1>הערות על קיצור הלכות שבת</h1>', '<h2>סימן א</h2>', 'הערה ייחודית זלזלת על הבישול.'].join('\n'));
+  fs.writeFileSync(
+    path.join(folder, 'links.csv'),
+    'source_book,source_line,target_book,target_line,link_type\nהערות על קיצור הלכות שבת,3,קיצור הלכות שבת,4,commentary\nספר שלא קיים,1,קיצור הלכות שבת,4,\n',
+  );
+  const single = path.join(tmp, 'מכתב.txt');
+  fs.writeFileSync(single, 'שורה ראשונה בשבת\nשורה שנייה');
+
+  const userFile = path.join(tmp, 'user_library.db');
+  const u = openWritable(userFile);
+  const core = openDb(coreFile);
+  const coreIndex = await loadBookIndex(core);
+  try {
+    await check('user DB: schema bootstrap is idempotent', async () => {
+      assert.strictEqual(await indexer.ensureSchema(u.w, { kind: 'user' }), true);
+      assert.strictEqual(await indexer.ensureSchema(u.w, { kind: 'user' }), false);
+      assert.strictEqual((await indexer.readMeta(u.w)).kind, 'user');
+    });
+
+    let linkStats;
+    await check('user DB: folder import keeps sub-folders as categories, ids namespaced', async () => {
+      const tree = await indexer.scanBooks(nodeFs, folder);
+      const r = await indexer.indexBooks(u.w, nodeFs, { files: tree.files, dirs: tree.dirs, idBase: indexer.USER_ID_BASE, categoryPrefix: [indexer.USER_ROOT_NAME, 'שיעורים'] });
+      assert.strictEqual(r.books, 2);
+      linkStats = await indexer.indexLinks(u.w, nodeFs, await indexer.scanLinkFiles(nodeFs, folder));
+      const cats = (await u.read.all('SELECT path FROM categories ORDER BY id')).map((x) => x.path);
+      assert.deepStrictEqual(cats, ['הספרים שלי', 'הספרים שלי/שיעורים', 'הספרים שלי/שיעורים/הלכה']);
+      for (const t of ['categories', 'books', 'toc_nodes', 'paragraphs']) {
+        const m = (await u.read.all(`SELECT MIN(id) AS m FROM ${t}`))[0].m;
+        assert.ok(m > indexer.USER_ID_BASE, `${t} ids start above USER_ID_BASE (${m})`);
+      }
+      const b = (await u.read.all("SELECT file_path, total_lines FROM books WHERE title = 'קיצור הלכות שבת'"))[0];
+      assert.strictEqual(b.file_path, 'הספרים שלי/שיעורים/הלכה/קיצור הלכות שבת.txt');
+      assert.strictEqual(b.total_lines, 6, 'BOM + CRLF handled');
+    });
+    await check('user DB: links matched by name, unmatched reported', () => {
+      assert.strictEqual(linkStats.kept, 1);
+      assert.strictEqual(linkStats.unmatched.get('ספר שלא קיים'), 1);
+    });
+    await check('user DB: single-file import + re-import replaces instead of duplicating', async () => {
+      const files = [{ handle: single, name: 'מכתב.txt', rel: ['מכתב.txt'], dir: [] }];
+      const opts = { files, idBase: indexer.USER_ID_BASE, categoryPrefix: [indexer.USER_ROOT_NAME] };
+      await indexer.indexBooks(u.w, nodeFs, opts);
+      await indexer.indexBooks(u.w, nodeFs, opts);
+      const rows = await u.read.all("SELECT id FROM books WHERE title = 'מכתב'");
+      assert.strictEqual(rows.length, 1);
+      const fts = await u.read.all(`SELECT COUNT(*) AS n FROM paragraphs_fts WHERE paragraphs_fts MATCH '"ראשונה"'`);
+      assert.strictEqual(fts[0].n, 1, 'old FTS rows were deleted with the old copy');
+      await indexer.finalizeIndex(u.w);
+    });
+
+    const router = sources.createRouter([
+      { name: 'user', adapter: u.read, idBase: indexer.USER_ID_BASE, categoryRoot: indexer.USER_ROOT_NAME },
+      { name: 'core', adapter: core, idBase: 0 },
+    ]);
+    const index = await loadBookIndex(router);
+    const userBookId = [...index.books.values()].find((b) => b.title === 'קיצור הלכות שבת').id;
+
+    await check('router: sources sorted core-first, books routed by id', async () => {
+      assert.deepStrictEqual(router.sources.map((x) => x.name), ['core', 'user']);
+      assert.strictEqual(router.forBook(1), core);
+      assert.strictEqual(router.forBook(userBookId), u.read);
+      assert.strictEqual(index.books.size, coreIndex.books.size + 3);
+    });
+    await check('router: merged catalog (tree) has both libraries', async () => {
+      const cat = await sources.loadCatalog(router);
+      assert.ok(cat.categories.some((c) => c.path === 'תנך'));
+      assert.ok(cat.categories.some((c) => c.path === 'הספרים שלי/שיעורים/הלכה' && c.source === 'user'));
+      assert.strictEqual(new Set(cat.books.map((b) => b.id)).size, cat.books.length, 'unique ids');
+    });
+    await check('router: Quick Jump resolves into personal and core books', async () => {
+      await expectJump(router, index, 'קיצור הלכות שבת א ב', 'קיצור הלכות שבת', 5, 'סעיף ב');
+      await expectJump(router, index, 'שבת ב.', 'שבת', coreIndex.books.size ? (await resolveReference(core, coreIndex, 'שבת ב.'))[0].targetLine : 0);
+    });
+    await check('router: windowed reader + TOC go to the owning DB', async () => {
+      const rows = await reader.fetchRange(router, userBookId, 1, 10);
+      assert.deepStrictEqual(rows.map((r) => r.line_index), [1, 2, 3, 4, 5, 6]);
+      const coreRows = await reader.fetchRange(router, 1, 1, 3);
+      assert.ok(coreRows.length > 0);
+    });
+    await check('router: FTS search merges both DBs, pages across the boundary', async () => {
+      const all = [];
+      let afterId;
+      for (;;) {
+        const page = await search.searchParagraphs(router, 'שבת', { limit: 7, afterId });
+        all.push(...page.rows);
+        if (!page.hasMore) break;
+        afterId = page.rows[page.rows.length - 1].id;
+      }
+      const coreHits = (await search.searchParagraphs(core, 'שבת', { limit: 100000 })).rows.length;
+      const userHits = all.filter((r) => r.id > indexer.USER_ID_BASE);
+      assert.ok(userHits.length >= 2, 'personal books found');
+      assert.strictEqual(all.length, coreHits + userHits.length);
+      for (let i = 1; i < all.length; i++) assert.ok(all[i].id > all[i - 1].id, 'ordered, no duplicates');
+      const cnt = await search.countMatches(router, 'שבת', { cap: 100000 });
+      assert.strictEqual(cnt.count, all.length);
+    });
+    await check('router: search scopes route to one DB', async () => {
+      const mine = await search.searchParagraphs(router, 'שבת', { scope: { kind: 'category', path: indexer.USER_ROOT_NAME, name: 'x' } });
+      assert.ok(mine.rows.length >= 2 && mine.rows.every((r) => r.id > indexer.USER_ID_BASE));
+      const sub = await search.searchParagraphs(router, 'זלזלת', { scope: { kind: 'category', path: 'הספרים שלי/שיעורים', name: 'x' } });
+      assert.strictEqual(sub.rows.length, 1);
+      const bk = await search.searchParagraphs(router, 'שבת', { scope: { kind: 'book', bookId: userBookId, title: 'x' } });
+      assert.ok(bk.rows.length && bk.rows.every((r) => r.book_id === userBookId));
+      const tanach = await search.searchParagraphs(router, 'שבת', { scope: { kind: 'category', path: 'תלמוד בבלי', name: 'x' } });
+      assert.ok(tanach.rows.length && tanach.rows.every((r) => r.id < indexer.USER_ID_BASE));
+      assert.strictEqual(await search.hasFts5(router), true);
+    });
+    await check('router: commentaries in the personal library', async () => {
+      const counts = await commentary.fetchLinkCounts(router, userBookId, 1, 10);
+      assert.strictEqual(counts.get(4), 1);
+      const entries = await commentary.fetchLinkedEntries(router, userBookId, 4);
+      assert.strictEqual(entries[0].book_title, 'הערות על קיצור הלכות שבת');
+      assert.ok(entries[0].display_text.includes('זלזלת'));
+      const coreCounts = await commentary.fetchLinkCounts(router, 1, 1, 100000);
+      const direct = await commentary.fetchLinkCounts(core, 1, 1, 100000);
+      assert.deepStrictEqual([...coreCounts], [...direct]);
+    });
+    await check('user DB: deleting a book removes text, TOC, FTS rows, links and empty folders', async () => {
+      const comm = [...index.books.values()].find((b) => b.title === 'הערות על קיצור הלכות שבת').id;
+      await indexer.deleteBook(u.w, comm);
+      await indexer.deleteBook(u.w, userBookId);
+      await indexer.pruneEmptyCategories(u.w);
+      for (const t of ['paragraphs', 'toc_nodes']) assert.strictEqual((await u.read.all(`SELECT COUNT(*) AS n FROM ${t} WHERE book_id IN (?, ?)`, [comm, userBookId]))[0].n, 0, t);
+      assert.strictEqual((await u.read.all('SELECT COUNT(*) AS n FROM links'))[0].n, 0);
+      const hits = await search.searchParagraphs(u.read, 'זלזלת');
+      assert.strictEqual(hits.rows.length, 0, 'FTS entries deleted');
+      const integ = await u.read.all("INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES('integrity-check', 1) RETURNING 1").catch((e) => e);
+      assert.ok(!(integ instanceof Error), 'FTS integrity-check passes: ' + (integ && integ.message));
+      const cats = (await u.read.all('SELECT path FROM categories')).map((x) => x.path);
+      assert.deepStrictEqual(cats, ['הספרים שלי'], 'emptied folders pruned');
+    });
+  } finally {
+    core.close();
+    u.raw.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+async function releaseTests() {
+  const zlib = require('zlib');
+  const crypto = require('crypto');
+  const { zipSync } = require('fflate');
+  await check('release: manifest validation + URL resolution', () => {
+    const m = release.validateManifest({ version: 'abc', file: 'core_library.db.gz', size: 10, sha256: 'A'.repeat(64) }, 2);
+    assert.strictEqual(m.compression, 'gzip');
+    assert.strictEqual(m.sha256, 'a'.repeat(64));
+    assert.throws(() => release.validateManifest({ version: 'x', file: 'f.gz', schemaVersion: 99 }, 2), /newer app/);
+    assert.throws(() => release.validateManifest({ file: 'f.gz' }, 2), /version/);
+    assert.strictEqual(
+      release.resolveAssetUrl('https://github.com/o/r/releases/latest/download/manifest.json?x=1', { file: 'core_library.db.gz' }),
+      'https://github.com/o/r/releases/latest/download/core_library.db.gz',
+    );
+    assert.strictEqual(release.resolveAssetUrl('https://a/b/manifest.json', { file: 'x.gz', url: 'https://cdn/x.gz' }), 'https://cdn/x.gz');
+    assert.ok(release.isDirectAssetUrl('https://a/b/core_library.db.zip'));
+    assert.ok(!release.isDirectAssetUrl('https://a/b/manifest.json'));
+  });
+  const src = crypto.randomBytes(3 << 20); // incompressible, > 1 chunk
+  const reader = (buf) => {
+    let o = 0;
+    return async (n) => {
+      const c = buf.subarray(o, o + n);
+      o += c.length;
+      return c;
+    };
+  };
+  for (const [name, buf, entry] of [
+    ['gzip', zlib.gzipSync(src), null],
+    ['zip', Buffer.from(zipSync({ 'readme.txt': new Uint8Array([1]), 'lib/core_library.db': src })), 'lib/core_library.db'],
+  ]) {
+    await check(`release: streaming ${name} decompression is byte-exact`, async () => {
+      const out = [];
+      let last = 0;
+      const r = await release.decompressStream({
+        read: reader(buf),
+        write: async (b) => void out.push(Buffer.from(b)),
+        totalIn: buf.length,
+        chunkSize: 256 * 1024,
+        onProgress: (p) => {
+          assert.ok(p.bytesIn >= last);
+          last = p.bytesIn;
+        },
+      });
+      assert.strictEqual(r.format, name);
+      assert.strictEqual(r.entry, entry);
+      assert.ok(Buffer.concat(out).equals(src));
+      assert.strictEqual(last, buf.length);
+    });
+  }
+  await check('release: rejects unknown formats and cancels', async () => {
+    await assert.rejects(release.decompressStream({ read: reader(Buffer.from('hello world')), write: async () => {} }), /not a \.gz/);
+    await assert.rejects(release.decompressStream({ read: reader(zlib.gzipSync(src)), write: async () => {}, chunkSize: 4096, isCancelled: () => true }), /cancelled/);
+  });
+
+  await check('release: build-db --release writes a verifiable .gz + manifest', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-rel-'));
+    try {
+      const out = path.join(tmp, 'core.db');
+      const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), '--source=sample', `--out=${out}`, `--release=${path.join(tmp, 'dist')}`], { encoding: 'utf8' });
+      assert.strictEqual(proc.status, 0, proc.stderr);
+      const manifest = JSON.parse(fs.readFileSync(path.join(tmp, 'dist', 'manifest.json'), 'utf8'));
+      const gz = fs.readFileSync(path.join(tmp, 'dist', manifest.file));
+      assert.strictEqual(gz.length, manifest.size);
+      assert.strictEqual(crypto.createHash('sha256').update(gz).digest('hex'), manifest.sha256);
+      const db = zlib.gunzipSync(gz);
+      assert.strictEqual(db.length, manifest.dbSize);
+      assert.strictEqual(crypto.createHash('sha256').update(db).digest('hex'), manifest.dbSha256);
+      const v = release.validateManifest(manifest, indexer.SCHEMA_VERSION);
+      assert.strictEqual(v.books, 9);
+      const meta = await indexer.readMeta(openDb(out));
+      assert.strictEqual(meta.db_version, manifest.version);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 }
 
 main();

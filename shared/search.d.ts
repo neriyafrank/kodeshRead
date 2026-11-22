@@ -1,4 +1,4 @@
-import type { QueryAdapter } from './quickJump';
+import type { LibraryDb } from './sources';
 
 export type SearchScope =
   | { kind: 'all' }
@@ -42,14 +42,14 @@ export function splitPhrases(input: string): { text: string; phrase: boolean }[]
 export function parseSearchQuery(input: string): ParsedQuery;
 export function scopeClause(scope: SearchScope | null | undefined): { sql: string; params: (string | number)[] };
 /** False on SQLite builds without FTS5 (web preview); the app then uses a LIKE fallback. */
-export function hasFts5(db: QueryAdapter): Promise<boolean>;
+export function hasFts5(db: LibraryDb): Promise<boolean>;
 export function searchParagraphs(
-  db: QueryAdapter,
+  db: LibraryDb,
   query: string | ParsedQuery,
   opts?: { scope?: SearchScope; afterId?: number; limit?: number; fts?: boolean },
 ): Promise<{ rows: SearchRow[]; hasMore: boolean; query: ParsedQuery }>;
 export function countMatches(
-  db: QueryAdapter,
+  db: LibraryDb,
   query: string | ParsedQuery,
   opts?: { scope?: SearchScope; cap?: number; fts?: boolean },
 ): Promise<{ count: number; capped: boolean }>;

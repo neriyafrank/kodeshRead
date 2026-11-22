@@ -9,6 +9,7 @@ import { FlashList } from '@shopify/flash-list';
 import { useEffect, useMemo, useState, type ReactElement } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
 
+import { loadCatalog } from '../../shared/sources';
 import { useLibrary } from '../db/LibraryContext';
 import { useLibraryUi } from '../state/libraryStore';
 import { BookIcon, FolderIcon } from './Icons';
@@ -79,12 +80,14 @@ function flatten(tree: TreeData, expanded: Record<number, true>): VisibleRow[] {
 interface Props {
   onOpenBook: (bookId: number, title: string) => void;
   header?: ReactElement;
+  /** Text when the tree is empty ('' = none). */
+  emptyText?: string;
 }
 
-export function LibraryTree({ onOpenBook, header }: Props) {
+export function LibraryTree({ onOpenBook, header, emptyText }: Props) {
   const colors = useAppTheme();
   const styles = useThemedStyles(createStyles);
-  const { db } = useLibrary();
+  const { adapter, generation } = useLibrary();
   const expanded = useLibraryUi((s) => s.expanded);
   const toggle = useLibraryUi((s) => s.toggle);
   const [tree, setTree] = useState<TreeData | null>(null);
@@ -92,16 +95,14 @@ export function LibraryTree({ onOpenBook, header }: Props) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      const [cats, books] = await Promise.all([
-        db.getAllAsync<CategoryRow>('SELECT id, parent_id, name FROM categories ORDER BY id'),
-        db.getAllAsync<BookRow>('SELECT id, category_id, title FROM books ORDER BY id'),
-      ]);
-      if (alive) setTree(buildTree(cats, books));
-    })();
+      // Core library + personal books ("הספרים שלי"), ids never collide.
+      const { categories, books } = await loadCatalog(adapter);
+      if (alive) setTree(buildTree(categories, books));
+    })().catch((e) => console.warn('library tree failed', e));
     return () => {
       alive = false;
     };
-  }, [db]);
+  }, [adapter, generation]);
 
   const rows = useMemo(() => (tree ? flatten(tree, expanded) : []), [tree, expanded]);
 
@@ -113,7 +114,7 @@ export function LibraryTree({ onOpenBook, header }: Props) {
       ListHeaderComponent={header}
       keyboardShouldPersistTaps="handled"
       ListEmptyComponent={
-        tree ? <Text style={styles.empty}>הספרייה ריקה</Text> : <ActivityIndicator style={{ marginTop: spacing.xl }} color={colors.accent} />
+        tree ? (emptyText === '' ? null : <Text style={styles.empty}>{emptyText ?? 'הספרייה ריקה. הורידו ספרייה או ייבאו ספרים ממסך ״ניהול״.'}</Text>) : <ActivityIndicator style={{ marginTop: spacing.xl }} color={colors.accent} />
       }
       renderItem={({ item }) =>
         item.kind === 'category' ? (

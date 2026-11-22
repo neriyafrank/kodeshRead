@@ -3,6 +3,12 @@
 ## 1. Vision & Core Architecture
 An ultra-fast, offline-first **Android** mobile application built with **Expo (React Native)** and **TypeScript**, inspired by **Bar-Ilan Responsa (פרויקט השו"ת)** and powered by **Otzaria (אוצריא)** structured text files.
 
+> **Milestone 5 supersedes the bundling decision below:** the APK bundles no database. The app keeps
+> `core_library.db` (downloaded from a GitHub Release manifest, or built on-device from an Otzaria folder)
+> and `user_library.db` (personal imports, ids >= 1,000,000,000) in `documentDirectory + 'SQLite/'`, and
+> queries both through `shared/sources.js`. Ingestion logic lives in `shared/indexer.js`, shared by
+> `scripts/build-db.js` and `src/services/localIndexer.ts`. See section 5 and README "Library storage & updates".
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.
@@ -145,6 +151,7 @@ Execute one milestone per clean session:
 2. **Milestone 2:** Sliding-window reader (`FlashList`), BiDi `\u200F` safety, target-line highlight, TOC drawer, Multi-Tab manager, and `Aa` typography bottom sheet.
 3. **Milestone 3:** Hebrew FTS5 search with syntax sanitization, Folder/Book scope modal, and KWIC highlighted results.
 4. **Milestone 4:** Synchronized commentaries drawer (`links` table) and standalone Android APK build configuration.
+5. **Milestone 5:** Lightweight APK (no bundled DB); dual `core_library.db` / `user_library.db` with a unified query router; GitHub Release download (manifest + `.gz`/`.zip`, SHA-256, atomic swap); on-device indexer for personal books and core rebuilds; "ניהול ספרייה ועדכונים" manager + first-launch onboarding; `build-db.js --release` artifacts.
 
 ---
 

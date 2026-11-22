@@ -13,28 +13,12 @@
     "preview": {
       "extends": "base",
       "distribution": "internal",
-      "env": {
-        "LIBRARY_SOURCE": "sample"
-      },
-      "android": {
-        "buildType": "apk"
-      }
-    },
-    "preview-full": {
-      "extends": "base",
-      "distribution": "internal",
-      "env": {
-        "LIBRARY_SOURCE": "full"
-      },
       "android": {
         "buildType": "apk"
       }
     },
     "production": {
       "extends": "base",
-      "env": {
-        "LIBRARY_SOURCE": "full"
-      },
       "android": {
         "buildType": "app-bundle"
       }

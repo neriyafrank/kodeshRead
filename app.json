@@ -26,14 +26,34 @@
     },
     "extra": {
       "supportsRTL": true,
-      "forcesRTL": true
+      "forcesRTL": true,
+      "libraryManifestUrl": "https://github.com/neriyafrank/kodeshRead/releases/latest/download/manifest.json"
     },
     "plugins": [
       "expo-router",
-      ["expo-sqlite", { "enableFTS": true }],
+      [
+        "expo-sqlite",
+        {
+          "enableFTS": true
+        }
+      ],
       "expo-asset",
-      ["expo-build-properties", { "android": { "minSdkVersion": 24 } }],
-      ["./plugins/withAndroidNoCompress", { "noCompress": ["db"] }],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24
+          }
+        }
+      ],
+      [
+        "./plugins/withAndroidNoCompress",
+        {
+          "noCompress": [
+            "db"
+          ]
+        }
+      ],
       "expo-font",
       "expo-status-bar"
     ]

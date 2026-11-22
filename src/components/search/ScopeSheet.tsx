@@ -12,6 +12,7 @@ import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } fro
 
 import { normalizeHebrew } from '../../../shared/hebrew';
 import type { SearchScope } from '../../../shared/search';
+import { loadCatalog } from '../../../shared/sources';
 import { useLibrary } from '../../db/LibraryContext';
 import { selectActiveTab, useTabs } from '../../state/tabsStore';
 import { BookIcon, FolderIcon } from '../Icons';
@@ -49,26 +50,23 @@ export function ScopeSheet({ visible, scope, onSelect, onClose }: Props) {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const { height } = useWindowDimensions();
-  const { db } = useLibrary();
+  const { adapter, generation } = useLibrary();
   const activeTab = useTabs(selectActiveTab);
-  const [data, setData] = useState<{ cats: CatRow[]; books: BookRow[] } | null>(null);
+  const [data, setData] = useState<{ cats: CatRow[]; books: BookRow[]; generation: number } | null>(null);
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [filter, setFilter] = useState('');
 
   useEffect(() => {
-    if (!visible || data) return;
+    if (!visible || data?.generation === generation) return;
     let alive = true;
     (async () => {
-      const [cats, books] = await Promise.all([
-        db.getAllAsync<CatRow>('SELECT id, parent_id, name, path FROM categories ORDER BY id'),
-        db.getAllAsync<BookRow>('SELECT id, category_id, title FROM books ORDER BY id'),
-      ]);
-      if (alive) setData({ cats, books });
-    })();
+      const { categories, books } = await loadCatalog(adapter);
+      if (alive) setData({ cats: categories, books, generation });
+    })().catch((e) => console.warn('scope catalog failed', e));
     return () => {
       alive = false;
     };
-  }, [visible, data, db]);
+  }, [visible, data, adapter, generation]);
 
   // Folders leading to the current scope start open (user toggles override).
   const scopeAncestors = useMemo(() => {

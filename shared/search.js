@@ -19,6 +19,7 @@
 'use strict';
 
 const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
+const { sourcesOf, sourceForId, sourcesForCategory } = require('./sources');
 
 /** Characters FTS5 treats as query syntax (spec list). */
 const FTS_RESERVED_RE = /["'\-*():^]/g;
@@ -129,6 +130,11 @@ const COUNT_CAP = 1000;
  * `enableFTS`); the web preview's wa-sqlite build does not.
  */
 async function hasFts5(db) {
+  for (const s of sourcesOf(db)) if (!(await hasFts5One(s.adapter))) return false;
+  return true;
+}
+
+async function hasFts5One(db) {
   try {
     const mods = await db.all("SELECT name FROM pragma_module_list WHERE name = 'fts5'", []);
     if (!mods.length) return false;
@@ -181,19 +187,40 @@ async function searchParagraphs(db, query, opts) {
   const q = typeof query === 'string' ? parseSearchQuery(query) : query;
   const limit = (opts && opts.limit) || PAGE_SIZE;
   if (q.empty) return { rows: [], hasMore: false, query: q };
+  // Sources are ordered by id namespace (core, then personal books), so keyset paging
+  // by id continues seamlessly from one database into the next.
+  const rows = [];
+  for (const s of scopeSources(db, opts && opts.scope)) {
+    if (rows.length > limit) break;
+    rows.push(...(await searchOne(s.adapter, q, opts, limit + 1 - rows.length)));
+  }
+  const hasMore = rows.length > limit;
+  return { rows: hasMore ? rows.slice(0, limit) : rows, hasMore, query: q };
+}
+
+/** Databases a scope can match in (a book or folder lives in exactly one). */
+function scopeSources(db, scope) {
+  const srcs = sourcesOf(db);
+  if (!scope || scope.kind === 'all') return srcs;
+  if (scope.kind === 'book') {
+    const s = srcs.length > 1 ? sourceForId(srcs, scope.bookId) : srcs[0];
+    return s ? [s] : [];
+  }
+  return srcs.length > 1 ? sourcesForCategory(db, scope.path) : srcs;
+}
+
+async function searchOne(db, q, opts, take) {
   const src = matchSource(q, opts);
   const hasAfter = opts && opts.afterId != null;
-  const rows = await db.all(
+  return db.all(
     `SELECT p.id AS id, p.book_id AS book_id, p.line_index AS line_index, p.toc_path AS toc_path,
             p.display_text AS display_text, p.is_heading AS is_heading,
             (SELECT title FROM books WHERE id = p.book_id) AS book_title
        ${src.sql}${hasAfter ? ` AND ${src.idCol} > ?` : ''}
       ORDER BY ${src.idCol}
       LIMIT ?`,
-    [...src.params, ...(hasAfter ? [opts.afterId] : []), limit + 1],
+    [...src.params, ...(hasAfter ? [opts.afterId] : []), take],
   );
-  const hasMore = rows.length > limit;
-  return { rows: hasMore ? rows.slice(0, limit) : rows, hasMore, query: q };
 }
 
 /** Number of matching paragraphs, capped at COUNT_CAP (returns { count, capped }). */
@@ -202,8 +229,12 @@ async function countMatches(db, query, opts) {
   if (q.empty) return { count: 0, capped: false };
   const cap = (opts && opts.cap) || COUNT_CAP;
   const src = matchSource(q, opts);
-  const r = await db.all(`SELECT COUNT(*) AS n FROM (SELECT 1 ${src.sql} LIMIT ?)`, [...src.params, cap + 1]);
-  const n = r[0] ? Number(r[0].n) : 0;
+  let n = 0;
+  for (const s of scopeSources(db, opts && opts.scope)) {
+    if (n > cap) break;
+    const r = await s.adapter.all(`SELECT COUNT(*) AS n FROM (SELECT 1 ${src.sql} LIMIT ?)`, [...src.params, cap + 1 - n]);
+    n += r[0] ? Number(r[0].n) : 0;
+  }
   return { count: Math.min(n, cap), capped: n > cap };
 }
 

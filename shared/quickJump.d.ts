@@ -1,3 +1,5 @@
+import type { LibraryDb } from './sources';
+
 export interface QueryAdapter {
   all<T = any>(sql: string, params: (string | number | null)[]): Promise<T[]>;
 }
@@ -32,6 +34,6 @@ export interface JumpResult {
   suggestion: boolean;
 }
 
-export function loadBookIndex(db: QueryAdapter): Promise<BookIndex>;
-export function resolveReference(db: QueryAdapter, index: BookIndex, input: string, opts?: { limit?: number }): Promise<JumpResult[]>;
+export function loadBookIndex(db: LibraryDb): Promise<BookIndex>;
+export function resolveReference(db: LibraryDb, index: BookIndex, input: string, opts?: { limit?: number }): Promise<JumpResult[]>;
 export function tokenize(input: string): string[];

@@ -38,6 +38,8 @@ interface TabsState {
   activate: (tabId: string) => void;
   closeTab: (tabId: string) => void;
   closeAll: () => void;
+  /** Closes every tab for which `keep` returns false (e.g. its book no longer exists). */
+  pruneTabs: (keep: (tab: ReaderTab) => boolean) => void;
   requestJump: (tabId: string, line: number, highlight?: boolean) => void;
   consumeJump: (nonce: number) => void;
   updatePosition: (tabId: string, pos: { currentLineIndex: number; tocPath: string | null; lineOffset: number }) => void;
@@ -90,6 +92,15 @@ export const useTabs = create<TabsState>()(
         }),
 
       closeAll: () => set({ tabs: [], activeTabId: null, pendingJump: null }),
+
+      pruneTabs: (keep) =>
+        set((s) => {
+          const tabs = s.tabs.filter(keep);
+          if (tabs.length === s.tabs.length) return s;
+          const activeTabId = tabs.some((t) => t.tabId === s.activeTabId) ? s.activeTabId : (tabs[0]?.tabId ?? null);
+          const pendingJump = s.pendingJump && tabs.some((t) => t.tabId === s.pendingJump?.tabId) ? s.pendingJump : null;
+          return { tabs, activeTabId, pendingJump };
+        }),
 
       requestJump: (tabId, line, highlight = true) => set({ pendingJump: { tabId, line, highlight, nonce: ++nonce } }),
 
