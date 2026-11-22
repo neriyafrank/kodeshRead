@@ -16,6 +16,7 @@ const { execFileSync } = require('child_process');
 const assert = require('assert');
 const { normalizeHebrew, extractRefKey, generateBookAliases } = require('../shared/hebrew');
 const { loadBookIndex, resolveReference } = require('../shared/quickJump');
+const reader = require('../shared/reader');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -69,6 +70,45 @@ async function main() {
     const rm = generateBookAliases(['הלכה', 'משנה תורה', 'ספר זמנים'], 'הלכות שבת');
     assert.ok(rm.includes('רמבמ שבת'), `missing רמבמ שבת: ${rm}`);
     assert.ok(!rm.includes('שבת'), 'Rambam must not claim bare "שבת"');
+  });
+
+  await check('reader: prepareDisplayText (BiDi RLM, safe HTML, niqqud)', () => {
+    const RLM = reader.RLM;
+    assert.strictEqual(reader.prepareDisplayText('(א) בְּרֵאשִׁ֖ית'), RLM + '(א) בְּרֵאשִׁ֖ית');
+    assert.strictEqual(reader.prepareDisplayText('דף 2 ע"א'), RLM + 'דף 2 ע"א');
+    assert.strictEqual(reader.prepareDisplayText('שלום עולם'), 'שלום עולם');
+    assert.strictEqual(reader.prepareDisplayText(RLM + '(ב)'), RLM + '(ב)', 'no double RLM');
+    assert.strictEqual(reader.prepareDisplayText('<b class="x">רש"י</b> <small>הגה</small> <span>ד"ה</span><script>x</script>'), '<b>רש"י</b> <small>הגה</small> ד"הx');
+    assert.strictEqual(reader.prepareDisplayText('כׇּל־עֲדַ֣ת בְּנֵֽי׃', { showNiqqud: false }), 'כל־עדת בני׃', 'keeps maqaf + sof pasuq');
+    assert.strictEqual(reader.prepareDisplayText('<b>בָּרָא</b>', { showNiqqud: false }), '<b>ברא</b>');
+  });
+  await check('reader: window math', () => {
+    const W = reader.WINDOW_SIZE;
+    assert.deepStrictEqual(reader.windowAround(1, 5000), { from: 1, to: W });
+    assert.deepStrictEqual(reader.windowAround(5000, 5000), { from: 5000 - W + 1, to: 5000 });
+    const mid = reader.windowAround(2000, 5000);
+    assert.ok(mid.from < 2000 && mid.to > 2000 && mid.to - mid.from + 1 === W, JSON.stringify(mid));
+    assert.deepStrictEqual(reader.windowAround(50, 120), { from: 1, to: 120 });
+    assert.strictEqual(reader.nextChunk({ from: 1, to: 120 }, 'forward', 120), null);
+    assert.strictEqual(reader.nextChunk({ from: 1, to: 120 }, 'backward', 120), null);
+    assert.deepStrictEqual(reader.nextChunk({ from: 300, to: 700 }, 'backward', 5000), { from: 100, to: 299 });
+    const rows = [{ line_index: 1 }, { line_index: 3 }, { line_index: 4 }, { line_index: 9 }];
+    assert.strictEqual(reader.indexOfLine(rows, 2), 1);
+    assert.strictEqual(reader.indexOfLine(rows, 9), 3);
+    assert.strictEqual(reader.indexOfLine(rows, 10), -1);
+    assert.ok(reader.estimateItemSize(28, 2) > reader.estimateItemSize(16, 1.4), 'estimate grows with font size');
+  });
+  await check('reader: tocTrail', () => {
+    const nodes = [
+      { id: 1, parent_id: null, level: 2, start_line: 2 },
+      { id: 2, parent_id: 1, level: 3, start_line: 3 },
+      { id: 3, parent_id: 1, level: 3, start_line: 10 },
+      { id: 4, parent_id: null, level: 2, start_line: 20 },
+    ];
+    assert.deepStrictEqual(reader.tocTrail(nodes, 1), []);
+    assert.deepStrictEqual(reader.tocTrail(nodes, 2), [1]);
+    assert.deepStrictEqual(reader.tocTrail(nodes, 12), [1, 3]);
+    assert.deepStrictEqual(reader.tocTrail(nodes, 25), [4]);
   });
 
   // 2. Synthetic fixture with deep headings -----------------------------------
@@ -150,6 +190,35 @@ async function main() {
     await check('sample: FTS5 + folder facet', async () => {
       const rows = await db.all("SELECT rowid FROM paragraphs_fts WHERE paragraphs_fts MATCH ? AND category_path LIKE ?", ['ארבעה ראשי', 'תלמוד בבלי/%']);
       assert.ok(rows.length >= 1);
+    });
+    await check('sample: sliding window scrolls a whole book within MAX_WINDOW', async () => {
+      const book = (await db.all("SELECT id, total_lines FROM books WHERE title = 'שבת'", []))[0];
+      const all = (await db.all('SELECT line_index FROM paragraphs WHERE book_id = ? ORDER BY line_index', [book.id])).map((r) => r.line_index);
+      // Open mid-book, scroll to the end, then all the way back to the start.
+      const target = all[Math.floor(all.length / 2)];
+      let range = reader.windowAround(target, book.total_lines);
+      let rows = await reader.fetchRange(db, book.id, range.from, range.to);
+      assert.ok(rows.length > 0 && rows.length <= reader.WINDOW_SIZE);
+      assert.ok(reader.indexOfLine(rows, target) >= 0);
+      const seen = new Set(rows.map((r) => r.line_index));
+      for (const dir of ['forward', 'backward']) {
+        for (let chunk = reader.nextChunk(range, dir, book.total_lines); chunk; chunk = reader.nextChunk(range, dir, book.total_lines)) {
+          const got = await reader.fetchRange(db, book.id, chunk.from, chunk.to);
+          ({ rows, range } = reader.mergeChunk(rows, range, got, chunk, dir));
+          assert.ok(rows.length <= reader.MAX_WINDOW, `window grew to ${rows.length}`);
+          for (let i = 1; i < rows.length; i++) assert.ok(rows[i].line_index > rows[i - 1].line_index, 'rows stay sorted & unique');
+          got.forEach((r) => seen.add(r.line_index));
+        }
+      }
+      assert.strictEqual(rows[0].line_index, all[0]);
+      assert.strictEqual(seen.size, all.length, 'every paragraph was reachable');
+    });
+    await check('sample: window query latency', async () => {
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 50; i++) await reader.fetchRange(db, 3, 1500, 1899);
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / 50;
+      assert.ok(ms < 15, `avg ${ms.toFixed(2)}ms`);
+      console.log(`  400-line window avg ${ms.toFixed(2)}ms/query`);
     });
     await check('sample: resolver latency', async () => {
       const t = process.hrtime.bigint();

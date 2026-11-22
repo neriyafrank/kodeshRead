@@ -1,0 +1,56 @@
+/** Persisted reading appearance (the `Aa` panel). */
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
+
+import type { FontFamilyKey } from '../fonts';
+
+export type ThemeName = 'light' | 'sepia' | 'dark';
+
+export const FONT_SIZE = { min: 14, max: 36, step: 1, default: 20 };
+export const LINE_HEIGHT = { min: 1.2, max: 2.4, step: 0.05, default: 1.7 };
+
+export interface AppearanceSettings {
+  fontFamily: FontFamilyKey;
+  fontSize: number;
+  /** Multiplier of fontSize. */
+  lineHeight: number;
+  theme: ThemeName;
+  showNiqqud: boolean;
+}
+
+interface SettingsState extends AppearanceSettings {
+  set: (patch: Partial<AppearanceSettings>) => void;
+  reset: () => void;
+}
+
+export const DEFAULT_APPEARANCE: AppearanceSettings = {
+  fontFamily: 'frankRuhl',
+  fontSize: FONT_SIZE.default,
+  lineHeight: LINE_HEIGHT.default,
+  theme: 'light',
+  showNiqqud: true,
+};
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+export const useSettings = create<SettingsState>()(
+  persist(
+    (set) => ({
+      ...DEFAULT_APPEARANCE,
+      set: (patch) =>
+        set((s) => ({
+          ...patch,
+          fontSize: clamp(Math.round(patch.fontSize ?? s.fontSize), FONT_SIZE.min, FONT_SIZE.max),
+          lineHeight: clamp(Math.round((patch.lineHeight ?? s.lineHeight) * 100) / 100, LINE_HEIGHT.min, LINE_HEIGHT.max),
+        })),
+      reset: () => set(DEFAULT_APPEARANCE),
+    }),
+    {
+      name: 'kodeshread.appearance',
+      storage: createJSONStorage(() => AsyncStorage),
+      version: 1,
+      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud }) => ({ fontFamily, fontSize, lineHeight, theme, showNiqqud }),
+    },
+  ),
+);

@@ -7,11 +7,12 @@ import { Text, type TextProps, type TextStyle } from 'react-native';
 
 const TAG_RE = /<(\/?)(b|strong|i|em|u|small|big|sup|sub)>/g;
 
-function styleFor(tag: string, baseSize: number): TextStyle {
+function styleFor(tag: string, baseSize: number, boldFamily?: string): TextStyle {
   switch (tag) {
     case 'b':
     case 'strong':
-      return { fontWeight: '700' };
+      // Custom fonts need their bold face selected by family name (Android ignores fontWeight).
+      return boldFamily ? { fontFamily: boldFamily } : { fontWeight: '700' };
     case 'i':
     case 'em':
       return { fontStyle: 'italic' };
@@ -55,15 +56,17 @@ export function parseInline(html: string): Segment[] {
 interface Props extends TextProps {
   html: string;
   fontSize: number;
+  /** Family name of the bold face of the current font (for <b>/<strong>). */
+  boldFamily?: string;
 }
 
-export const RichText = memo(function RichText({ html, fontSize, style, ...rest }: Props) {
+export const RichText = memo(function RichText({ html, fontSize, boldFamily, style, ...rest }: Props) {
   const segments = useMemo(() => parseInline(html), [html]);
   return (
     <Text style={[{ fontSize }, style]} {...rest}>
       {segments.map((s, i) =>
         s.tags.length ? (
-          <Text key={i} style={s.tags.map((t) => styleFor(t, fontSize))}>
+          <Text key={i} style={s.tags.map((t) => styleFor(t, fontSize, boldFamily))}>
             {s.text}
           </Text>
         ) : (

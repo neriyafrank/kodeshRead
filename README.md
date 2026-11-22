@@ -5,8 +5,23 @@ Offline-first Android Torah library (Expo + TypeScript) powered by
 pre-built into one SQLite database (`assets/db/library.db`, FTS5-indexed) that is
 bundled inside the APK. See [`CLAUDE.md`](CLAUDE.md) for the full spec.
 
-**Status:** Milestone 1. Done so far: project setup, the DB build pipeline, and
-the Library screen with Quick Source Jump and the RTL tree.
+**Status:** Milestone 2. Done so far: project setup, the DB build pipeline, the
+Library screen with Quick Source Jump and the RTL tree (M1), and the windowed
+reader workspace (M2):
+
+* **Sliding-window reader** (`src/components/reader/BookReader.tsx`): ~400 lines around
+  the current line, +200-line chunks fetched near either edge, far edge trimmed at 800 rows;
+  rendered with FlashList. Jump targets land just below the breadcrumb and glow for 2 s.
+* **Text safety**: only `<b> <strong> <i> <em> <u> <small> <big> <sup> <sub>` are rendered;
+  lines with parentheses/digits get a leading `\u200F` (see `shared/reader.js`).
+* **Breadcrumb + TOC**: sticky breadcrumb that hides on scroll-down and returns on scroll-up;
+  tap it (or ☰) for the slide-over hierarchical TOC, opened at the current section.
+* **Tabs**: several books open at once; each tab persists `{ tabId, bookId, bookTitle,
+  currentLineIndex, tocPath, lineOffset }` so switching tabs or relaunching restores the
+  exact scroll position.
+* **`Aa` sheet**: Frank Ruhl Libre / David Libre / Assistant / Heebo (bundled via
+  `@expo-google-fonts/*`), font size and line height sliders, Light / Sepia / OLED Dark,
+  live Niqqud & cantillation toggle. Settings persist.
 
 ## Quick start
 
