@@ -19,8 +19,16 @@ export interface AppearanceSettings {
   showNiqqud: boolean;
 }
 
+/** Commentary drawer: share of the reader height it takes. */
+export const COMMENTARY_RATIO = { min: 0.22, max: 0.85, default: 0.42 };
+
 interface SettingsState extends AppearanceSettings {
+  /** Height of the commentary drawer as a fraction of the reader area. */
+  commentaryRatio: number;
+  /** The commentary drawer follows the paragraph at the reading line while scrolling. */
+  commentaryFollow: boolean;
   set: (patch: Partial<AppearanceSettings>) => void;
+  setCommentary: (patch: { ratio?: number; follow?: boolean }) => void;
   reset: () => void;
 }
 
@@ -38,6 +46,13 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       ...DEFAULT_APPEARANCE,
+      commentaryRatio: COMMENTARY_RATIO.default,
+      commentaryFollow: false,
+      setCommentary: ({ ratio, follow }) =>
+        set((s) => ({
+          commentaryRatio: ratio == null ? s.commentaryRatio : clamp(Math.round(ratio * 1000) / 1000, COMMENTARY_RATIO.min, COMMENTARY_RATIO.max),
+          commentaryFollow: follow ?? s.commentaryFollow,
+        })),
       set: (patch) =>
         set((s) => ({
           ...patch,
@@ -50,7 +65,15 @@ export const useSettings = create<SettingsState>()(
       name: 'kodeshread.appearance',
       storage: createJSONStorage(() => AsyncStorage),
       version: 1,
-      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud }) => ({ fontFamily, fontSize, lineHeight, theme, showNiqqud }),
+      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud, commentaryRatio, commentaryFollow }) => ({
+        fontFamily,
+        fontSize,
+        lineHeight,
+        theme,
+        showNiqqud,
+        commentaryRatio,
+        commentaryFollow,
+      }),
     },
   ),
 );

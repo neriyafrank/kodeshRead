@@ -1,0 +1,38 @@
+[
+ {
+  "line_index_1": 3,
+  "line_index_2": 3,
+  "path_2": "שבת.txt",
+  "Conection Type": "commentary"
+ },
+ {
+  "line_index_1": 3,
+  "line_index_2": 3,
+  "path_2": "ברכות.txt",
+  "Conection Type": "reference"
+ },
+ {
+  "line_index_1": 4,
+  "line_index_2": 5,
+  "path_2": "שבת.txt",
+  "Conection Type": "commentary"
+ },
+ {
+  "line_index_1": 6,
+  "line_index_2": 14,
+  "path_2": "שבת.txt",
+  "Conection Type": "commentary"
+ },
+ {
+  "line_index_1": 7,
+  "line_index_2": 22,
+  "path_2": "שבת.txt",
+  "Conection Type": "commentary"
+ },
+ {
+  "line_index_1": 7,
+  "line_index_2": 23,
+  "path_2": "שבת.txt",
+  "Conection Type": "commentary"
+ }
+]

@@ -8,7 +8,8 @@
  *
  * Options:
  *   --out=<path>        output DB (default assets/db/library.db)
- *   --links=<dir>       links folder (default raw_links/)
+ *   --links=<dir>       links folder (default raw_links/<source>/, i.e. raw_links/sample
+ *                       or raw_links/full; none for a custom --source folder)
  *
  * Requires Node >= 22.13 (built-in `node:sqlite`, which ships with FTS5). If
  * `better-sqlite3` is installed it is used as a fallback on older Node versions.
@@ -27,14 +28,14 @@ const {
   stripHtml,
 } = require('../shared/hebrew');
 
-const SCRIPT_VERSION = 1; // bump when the schema or parsing rules change
+const SCRIPT_VERSION = 2; // bump when the schema or parsing rules change
 const ROOT = path.resolve(__dirname, '..');
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { source: 'sample', out: path.join(ROOT, 'assets/db/library.db'), links: path.join(ROOT, 'raw_links'), ifMissing: false };
+  const args = { source: 'sample', out: path.join(ROOT, 'assets/db/library.db'), links: undefined, ifMissing: false };
   for (const a of argv) {
     const m = /^--([^=]+)(?:=(.*))?$/.exec(a);
     if (!m) continue;
@@ -49,7 +50,10 @@ function parseArgs(argv) {
   if (!['sample', 'full'].includes(args.source) && !fs.existsSync(path.resolve(args.source))) {
     throw new Error(`--source must be "sample", "full" or a folder path (got "${args.source}")`);
   }
-  args.sourceDir = ['sample', 'full'].includes(args.source) ? path.join(ROOT, 'raw_library', args.source) : path.resolve(args.source);
+  const named = ['sample', 'full'].includes(args.source);
+  args.sourceDir = named ? path.join(ROOT, 'raw_library', args.source) : path.resolve(args.source);
+  // Links are kept per source so sample line numbers never leak into a full build.
+  if (args.links === undefined) args.links = named ? path.join(ROOT, 'raw_links', args.source) : null;
   return args;
 }
 
@@ -331,31 +335,63 @@ function parseCsv(text) {
   return rows;
 }
 
+/** Words that may precede a book name in link files without changing which book it is. */
+const NOISE_WORDS = new Set(['מסכת', 'ספר', 'תלמוד', 'בבלי', 'ירושלמי', 'תנכ', 'תנך'].map((w) => aliasKey(w)));
+
+/** "path/to/רש''י על שבת_links.json" -> "רשי על שבת" (normalized). */
+function linkBookKey(name) {
+  const base = String(name ?? '').replace(/\\/g, '/').split('/').pop().replace(/\.(txt|json|csv)$/i, '').replace(/_links$/i, '');
+  return aliasKey(base);
+}
+
+/**
+ * Resolves the book names used in link files to book ids:
+ *  1. exact normalized title / file name / alias (niqqud, gershayim, finals ignored)
+ *  2. the same after dropping leading noise words ("מסכת שבת" -> "שבת")
+ *  3. a unique book whose title contains the name as whole words ("אורח חיים" ->
+ *     "שולחן ערוך אורח חיים"), or whose title is contained in the name with only
+ *     noise words around it ("תלמוד בבלי שבת" -> "שבת").
+ * "רש"י על ראש השנה" never resolves to "ראש השנה": extra non-noise words block step 3.
+ */
 function makeBookMatcher(books) {
   const byKey = new Map();
   const put = (k, id) => { if (k && !byKey.has(k)) byKey.set(k, id); };
   for (const b of books) put(aliasKey(b.title), b.id);
   for (const b of books) put(aliasKey(path.basename(b.filePath, '.txt')), b.id);
+  for (const b of books) put(aliasKey(b.filePath.replace(/\.txt$/i, '').replace(/\//g, ' ')), b.id);
   for (const b of books) for (const a of b.aliases) put(a, b.id);
+  const titles = books.map((b) => ({ id: b.id, key: aliasKey(b.title) }));
+  const stripNoise = (k) => {
+    const w = k.split(' ');
+    while (w.length > 1 && NOISE_WORDS.has(w[0])) w.shift();
+    return w.join(' ');
+  };
   const cache = new Map();
   return (name) => {
     if (cache.has(name)) return cache.get(name);
-    let base = String(name).replace(/\\/g, '/').split('/').pop().replace(/\.(txt|json|csv)$/i, '').replace(/_links$/i, '');
-    const k = aliasKey(base);
-    let id = byKey.get(k);
-    if (id === undefined) {
-      // Fuzzy: unique title containing / contained in the key.
-      const cands = books.filter((b) => { const t = aliasKey(b.title); return t.includes(k) || k.includes(t); });
-      id = cands.length === 1 ? cands[0].id : null;
+    const k = linkBookKey(name);
+    let id = k ? byKey.get(k) ?? byKey.get(stripNoise(k)) : undefined;
+    if (id === undefined && k) {
+      const padded = ` ${k} `;
+      let cands = titles.filter((t) => ` ${t.key} `.includes(padded));
+      if (cands.length !== 1) {
+        cands = titles.filter((t) => {
+          if (!padded.includes(` ${t.key} `)) return false;
+          const rest = padded.replace(` ${t.key} `, ' ').trim();
+          return rest.split(' ').every((w) => !w || NOISE_WORDS.has(w));
+        });
+      }
+      id = cands.length === 1 ? cands[0].id : undefined;
     }
-    cache.set(name, id);
-    return id;
+    const res = id === undefined ? null : id;
+    cache.set(name, res);
+    return res;
   };
 }
 
 function loadLinks(linksDir, books) {
-  const result = { links: [], unmatched: new Map() };
-  if (!fs.existsSync(linksDir)) return result;
+  const result = { links: [], unmatched: new Map(), files: 0, invalid: 0 };
+  if (!linksDir || !fs.existsSync(linksDir)) return result;
   const match = makeBookMatcher(books);
   const miss = (n) => result.unmatched.set(n, (result.unmatched.get(n) || 0) + 1);
   const add = (srcName, srcLine, tgtName, tgtLine, type) => {
@@ -365,17 +401,14 @@ function loadLinks(linksDir, books) {
     if (b == null) return miss(tgtName);
     const la = Number(srcLine);
     const lb = Number(tgtLine);
-    if (!Number.isFinite(la) || !Number.isFinite(lb)) return;
-    result.links.push([a, la, b, lb, type || null]);
-  };
-  const files = [];
-  (function rec(d) {
-    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-      const f = path.join(d, e.name);
-      if (e.isDirectory()) rec(f);
-      else if (/\.(csv|json)$/i.test(e.name)) files.push(f);
+    if (!Number.isInteger(la) || !Number.isInteger(lb) || la < 1 || lb < 1) {
+      result.invalid++;
+      return;
     }
-  })(linksDir);
+    result.links.push([a, la, b, lb, type ? String(type).trim().toLowerCase() || null : null]);
+  };
+  const files = linkFiles(linksDir);
+  result.files = files.length;
   for (const f of files) {
     const raw = fs.readFileSync(f, 'utf8');
     if (f.toLowerCase().endsWith('.csv')) {
@@ -397,6 +430,70 @@ function loadLinks(linksDir, books) {
     }
   }
   return result;
+}
+
+/** All .csv / .json files under the links folder, in a stable order. */
+function linkFiles(linksDir) {
+  const files = [];
+  if (!linksDir || !fs.existsSync(linksDir)) return files;
+  (function rec(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const f = path.join(d, e.name);
+      if (e.isDirectory()) rec(f);
+      else if (/\.(csv|json)$/i.test(e.name)) files.push(f);
+    }
+  })(linksDir);
+  return files;
+}
+
+const MAX_LISTED_UNMATCHED = 40;
+
+/**
+ * Writes the parsed links into `links`: each unordered pair of (book, line) is kept
+ * once, links whose line does not exist as a paragraph of its book are dropped, and
+ * a summary plus warnings for unmatched book names are printed.
+ */
+function insertLinks(db, parsed, linksDir) {
+  const { links, unmatched } = parsed;
+  db.exec('CREATE TEMP TABLE links_stage (a INTEGER, la INTEGER, b INTEGER, lb INTEGER, t TEXT)');
+  const ins = db.prepare('INSERT INTO links_stage VALUES (?, ?, ?, ?, ?)');
+  for (const l of links) ins.run(...l);
+  // Canonical orientation for de-duplication: (a, la) <= (b, lb).
+  db.exec(`
+    INSERT INTO links (book_a_id, line_a, book_b_id, line_b, link_type)
+    SELECT a, la, b, lb, MIN(t) FROM (
+      SELECT CASE WHEN a < b OR (a = b AND la <= lb) THEN a ELSE b END AS a,
+             CASE WHEN a < b OR (a = b AND la <= lb) THEN la ELSE lb END AS la,
+             CASE WHEN a < b OR (a = b AND la <= lb) THEN b ELSE a END AS b,
+             CASE WHEN a < b OR (a = b AND la <= lb) THEN lb ELSE la END AS lb,
+             t
+      FROM links_stage
+    ) s
+    WHERE NOT (a = b AND la = lb)
+      AND EXISTS (SELECT 1 FROM paragraphs p WHERE p.book_id = s.a AND p.line_index = s.la)
+      AND EXISTS (SELECT 1 FROM paragraphs p WHERE p.book_id = s.b AND p.line_index = s.lb)
+    GROUP BY a, la, b, lb
+    ORDER BY a, la, b, lb`);
+  const kept = db.prepare('SELECT COUNT(*) AS n FROM links').get().n;
+  const distinct = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT DISTINCT
+      MIN(a * 1e9 + la, b * 1e9 + lb), MAX(a * 1e9 + la, b * 1e9 + lb) FROM links_stage WHERE NOT (a = b AND la = lb))`).get().n;
+  db.exec('DROP TABLE links_stage');
+  const stats = { files: parsed.files, parsed: links.length, kept, duplicates: links.length - distinct, outOfRange: distinct - kept, invalid: parsed.invalid };
+
+  if (!linksDir) console.log('[build-db] links: no links folder for this source');
+  else if (!fs.existsSync(linksDir)) console.log(`[build-db] links: ${path.relative(ROOT, linksDir) || linksDir} not found, building without commentaries`);
+  else {
+    console.log(`[build-db] links: ${stats.files} file(s), ${stats.parsed} parsed, ${stats.kept} stored (${stats.duplicates} duplicate/reverse, ${stats.outOfRange} pointing at missing lines, ${stats.invalid} malformed)`);
+  }
+  if (stats.outOfRange) console.warn(`[build-db] WARNING: ${stats.outOfRange} link(s) point at a line that is not a paragraph of its book (dropped).`);
+  if (unmatched.size) {
+    const total = [...unmatched.values()].reduce((x, y) => x + y, 0);
+    console.warn(`[build-db] WARNING: ${unmatched.size} unmatched book name(s) in links (${total} link(s) skipped):`);
+    const sorted = [...unmatched].sort((x, y) => y[1] - x[1]);
+    for (const [n, c] of sorted.slice(0, MAX_LISTED_UNMATCHED)) console.warn(`   - "${n}" (${c} link${c > 1 ? 's' : ''})`);
+    if (sorted.length > MAX_LISTED_UNMATCHED) console.warn(`   ... and ${sorted.length - MAX_LISTED_UNMATCHED} more`);
+  }
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,14 +571,11 @@ function main() {
     console.log(`[build-db] ${relPath}: ${parsed.paragraphs.length} lines, ${parsed.toc.length} TOC nodes`);
   }
 
-  // Links
-  const { links, unmatched } = loadLinks(args.links, books);
-  const insLink = db.prepare('INSERT INTO links (book_a_id, line_a, book_b_id, line_b, link_type) VALUES (?, ?, ?, ?, ?)');
-  for (const l of links) insLink.run(...l);
-  if (unmatched.size) {
-    console.warn(`[build-db] WARNING: ${unmatched.size} unmatched book name(s) in links:`);
-    for (const [n, c] of unmatched) console.warn(`   - "${n}" (${c} link${c > 1 ? 's' : ''})`);
-  }
+  // Links: staged, then de-duplicated (Otzaria stores both directions, one per book's
+  // file) and validated against real paragraph lines in SQL, so huge link sets never sit
+  // in a JS Set.
+  const linkStats = insertLinks(db, loadLinks(args.links, books), args.links);
+  for (const f of linkFiles(args.links)) hash.update(path.relative(args.links, f)).update(fs.readFileSync(f));
   db.exec('COMMIT');
 
   // Aliases that point to more than one book are ambiguous for Quick Jump; report them.
@@ -499,7 +593,7 @@ function main() {
   const version = hash.digest('hex').slice(0, 12);
   const builtAt = new Date().toISOString();
   const insMeta = db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)');
-  for (const [k, v] of Object.entries({ db_version: version, built_at: builtAt, source: args.source, script_version: String(SCRIPT_VERSION), books: String(books.length), paragraphs: String(paraCount), links: String(links.length) })) insMeta.run(k, v);
+  for (const [k, v] of Object.entries({ db_version: version, built_at: builtAt, source: args.source, script_version: String(SCRIPT_VERSION), books: String(books.length), paragraphs: String(paraCount), links: String(linkStats.kept) })) insMeta.run(k, v);
   db.exec('ANALYZE; PRAGMA optimize; VACUUM;');
   db.close();
 
@@ -508,7 +602,7 @@ function main() {
   fs.writeFileSync(versionFile, JSON.stringify({ version, builtAt, source: args.source, books: books.length, paragraphs: paraCount }, null, 2) + '\n');
 
   const size = (fs.statSync(args.out).size / 1024 / 1024).toFixed(2);
-  console.log(`[build-db] done: ${books.length} books, ${catIds.size} categories, ${paraCount} paragraphs, ${links.length} links, ${tocId} TOC nodes`);
+  console.log(`[build-db] done: ${books.length} books, ${catIds.size} categories, ${paraCount} paragraphs, ${linkStats.kept} links, ${tocId} TOC nodes`);
   console.log(`[build-db] ${path.relative(ROOT, args.out)} (${size} MB), DB_VERSION=${version}, ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 
@@ -521,4 +615,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { parseBook, sanitizeDisplay, loadLinks, makeBookMatcher };
+module.exports = { parseBook, sanitizeDisplay, loadLinks, makeBookMatcher, linkBookKey };

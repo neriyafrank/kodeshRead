@@ -38,6 +38,7 @@
     "db:sample": "node scripts/build-db.js --source=sample",
     "db:full": "node scripts/build-db.js --source=full",
     "db:ensure": "node scripts/build-db.js --source=sample --if-missing",
+    "db:check-profile": "node scripts/eas-build-db.js",
     "prestart": "npm run db:ensure --silent",
     "start": "expo start",
     "preandroid": "npm run db:ensure --silent",
@@ -45,8 +46,15 @@
     "web": "expo start --web",
     "test": "node scripts/selftest.js",
     "e2e:search": "node scripts/e2e-search.js",
+    "e2e:commentary": "node scripts/e2e-commentary.js",
     "typecheck": "tsc --noEmit",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "eas-build-post-install": "node scripts/eas-build-db.js",
+    "prebuild:android": "expo prebuild --platform android --clean",
+    "apk:sample": "node scripts/eas-build-db.js --source=sample && expo prebuild --platform android --clean && cd android && ./gradlew assembleRelease",
+    "apk:full": "node scripts/eas-build-db.js --source=full && expo prebuild --platform android --clean && cd android && ./gradlew assembleRelease",
+    "eas:preview": "npx eas-cli@latest build --platform android --profile preview",
+    "eas:preview-full": "npx eas-cli@latest build --platform android --profile preview-full --local"
   },
   "private": true,
   "engines": {
