@@ -8,7 +8,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { resolveReference, type JumpResult } from '../../shared/quickJump';
 import { useLibrary } from '../db/LibraryContext';
 import { SearchIcon } from './Icons';
-import { colors, radius, spacing } from '../theme';
+import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
 const EXAMPLES = ['שבת ב.', 'ראש השנה טז:', 'בראשית יב א', 'במדבר כז טו'];
 const DEBOUNCE_MS = 90;
@@ -18,6 +18,8 @@ interface Props {
 }
 
 export function QuickJumpBar({ onJump }: Props) {
+  const colors = useAppTheme();
+  const styles = useThemedStyles(createStyles);
   const { adapter, bookIndex } = useLibrary();
   const [query, setQuery] = useState('');
   const [resolved, setResolved] = useState<{ query: string; results: JumpResult[]; elapsed: number } | null>(null);
@@ -123,7 +125,8 @@ export function QuickJumpBar({ onJump }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: Palette) =>
+  StyleSheet.create({
   container: {
     paddingHorizontal: spacing.lg,
     paddingTop: spacing.sm,

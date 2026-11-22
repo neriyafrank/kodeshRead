@@ -1,3 +1,4 @@
+import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
@@ -8,7 +9,12 @@ import { loadBookIndex } from '../../shared/quickJump';
 import { openLibraryDatabase, toAdapter } from '../db/library';
 import { LibraryContext, type Library } from '../db/LibraryContext';
 import { ensureRTL } from '../lib/rtl';
-import { colors } from '../theme';
+import { useLibraryUi } from '../state/libraryStore';
+import { fontAssets, setFontsAvailable } from '../fonts';
+import { useSettings } from '../state/settingsStore';
+import { useTabs } from '../state/tabsStore';
+import { useHydrated } from '../state/useHydrated';
+import { colors, useAppTheme } from '../theme';
 
 // Web preview: no I18nManager.forceRTL, so flip the document direction instead.
 if (Platform.OS === 'web' && typeof document !== 'undefined') {
@@ -16,10 +22,22 @@ if (Platform.OS === 'web' && typeof document !== 'undefined') {
   document.documentElement.lang = 'he';
 }
 
+const PERSISTED_STORES = [useSettings, useTabs, useLibraryUi];
+
 type BootState = { status: 'loading' } | { status: 'reloading' } | { status: 'ready'; library: Library } | { status: 'error'; message: string };
 
 export default function RootLayout() {
   const [state, setState] = useState<BootState>({ status: 'loading' });
+  const [fontsLoaded, fontError] = useFonts(fontAssets);
+  const storesHydrated = useHydrated(PERSISTED_STORES);
+  const theme = useAppTheme();
+
+  useEffect(() => {
+    if (fontError) {
+      console.warn('font loading failed, using system font', fontError);
+      setFontsAvailable(false);
+    }
+  }, [fontError]);
 
   useEffect(() => {
     let alive = true;
@@ -43,18 +61,21 @@ export default function RootLayout() {
     };
   }, []);
 
+  const ready = state.status === 'ready' && storesHydrated && (fontsLoaded || !!fontError);
+
   return (
     <SafeAreaProvider>
-      <View style={styles.root}>
-        <StatusBar style="dark" />
-        {state.status === 'ready' ? (
+      <View style={[styles.root, { backgroundColor: theme.background }]}>
+        <StatusBar style={theme.statusBar} />
+        {state.status === 'ready' && ready ? (
           <LibraryContext.Provider value={state.library}>
             <Stack
               screenOptions={{
-                headerStyle: { backgroundColor: colors.background },
-                headerTintColor: colors.accent,
-                headerTitleStyle: { color: colors.text, fontWeight: '700' },
-                contentStyle: { backgroundColor: colors.background },
+                headerStyle: { backgroundColor: theme.background },
+                headerTintColor: theme.accent,
+                headerTitleStyle: { color: theme.text, fontWeight: '700' },
+                headerShadowVisible: theme.name !== 'dark',
+                contentStyle: { backgroundColor: theme.background },
               }}
             />
           </LibraryContext.Provider>

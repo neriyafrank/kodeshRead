@@ -12,7 +12,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text } from 'react-native';
 import { useLibrary } from '../db/LibraryContext';
 import { useLibraryUi } from '../state/libraryStore';
 import { BookIcon, FolderIcon } from './Icons';
-import { colors, spacing } from '../theme';
+import { spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
 interface CategoryRow {
   id: number;
@@ -82,6 +82,8 @@ interface Props {
 }
 
 export function LibraryTree({ onOpenBook, header }: Props) {
+  const colors = useAppTheme();
+  const styles = useThemedStyles(createStyles);
   const { db } = useLibrary();
   const expanded = useLibraryUi((s) => s.expanded);
   const toggle = useLibraryUi((s) => s.toggle);
@@ -148,7 +150,8 @@ export function LibraryTree({ onOpenBook, header }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: Palette) =>
+  StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,9 +1,11 @@
 /** Tiny dependency-free icons drawn with Views (no icon font needed). */
 import { StyleSheet, View } from 'react-native';
 
-import { colors } from '../theme';
+import { useAppTheme } from '../theme';
 
-export function SearchIcon({ color = colors.accent, size = 20 }: { color?: string; size?: number }) {
+export function SearchIcon({ color: colorProp, size = 20 }: { color?: string; size?: number }) {
+  const colors = useAppTheme();
+  const color = colorProp ?? colors.accent;
   const ring = size * 0.68;
   return (
     <View style={{ width: size, height: size }} accessibilityElementsHidden importantForAccessibility="no">
@@ -25,6 +27,7 @@ export function SearchIcon({ color = colors.accent, size = 20 }: { color?: strin
 }
 
 export function FolderIcon({ open, size = 18 }: { open?: boolean; size?: number }) {
+  const colors = useAppTheme();
   const color = open ? colors.accent : colors.textMuted;
   return (
     <View style={{ width: size, height: size * 0.8, justifyContent: 'flex-end' }}>
@@ -35,6 +38,7 @@ export function FolderIcon({ open, size = 18 }: { open?: boolean; size?: number 
 }
 
 export function BookIcon({ size = 16 }: { size?: number }) {
+  const colors = useAppTheme();
   return (
     <View style={{ width: size * 0.72, height: size, borderWidth: 1.6, borderColor: colors.accent, borderRadius: 2, borderStartWidth: 3.5 }} />
   );

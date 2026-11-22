@@ -1,0 +1,114 @@
+/**
+ * Multi-tab reading workspace. Each tab remembers its book and exact reading
+ * position ({ tabId, bookId, bookTitle, currentLineIndex, tocPath } plus the pixel
+ * offset into that line), persisted to AsyncStorage.
+ *
+ * Jump requests (Quick Jump, TOC taps, re-opening a book) are transient and not
+ * persisted: the active BookReader consumes them.
+ */
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { create } from 'zustand';
+import { createJSONStorage, persist } from 'zustand/middleware';
+
+export interface ReaderTab {
+  tabId: string;
+  bookId: number;
+  bookTitle: string;
+  currentLineIndex: number;
+  tocPath: string | null;
+  /** Pixels the top visible paragraph is scrolled past the viewport top (exact restore). */
+  lineOffset: number;
+}
+
+export interface JumpRequest {
+  tabId: string;
+  line: number;
+  highlight: boolean;
+  nonce: number;
+}
+
+export const MAX_TABS = 12;
+
+interface TabsState {
+  tabs: ReaderTab[];
+  activeTabId: string | null;
+  pendingJump: JumpRequest | null;
+  /** Opens (or re-uses) a tab for the book and jumps to `line`. Returns the tab id. */
+  openBook: (book: { bookId: number; bookTitle: string }, opts?: { line?: number; highlight?: boolean; newTab?: boolean }) => string;
+  activate: (tabId: string) => void;
+  closeTab: (tabId: string) => void;
+  closeAll: () => void;
+  requestJump: (tabId: string, line: number, highlight?: boolean) => void;
+  consumeJump: (nonce: number) => void;
+  updatePosition: (tabId: string, pos: { currentLineIndex: number; tocPath: string | null; lineOffset: number }) => void;
+}
+
+let nonce = 0;
+const newTabId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+export const useTabs = create<TabsState>()(
+  persist(
+    (set, get) => ({
+      tabs: [],
+      activeTabId: null,
+      pendingJump: null,
+
+      openBook: ({ bookId, bookTitle }, opts = {}) => {
+        const { tabs } = get();
+        const line = Math.max(1, opts.line ?? 1);
+        const existing = opts.newTab ? undefined : tabs.find((t) => t.bookId === bookId);
+        // Opening a book from the tree without a target restores where you left off.
+        const keepPosition = existing && opts.line == null;
+        const tabId = existing?.tabId ?? newTabId();
+        let next = tabs;
+        if (!existing) {
+          next = [...tabs, { tabId, bookId, bookTitle, currentLineIndex: line, tocPath: null, lineOffset: 0 }];
+          if (next.length > MAX_TABS) {
+            const active = get().activeTabId;
+            const drop = next.find((t) => t.tabId !== active && t.tabId !== tabId);
+            next = next.filter((t) => t !== drop);
+          }
+        }
+        set({
+          tabs: next,
+          activeTabId: tabId,
+          pendingJump: keepPosition ? null : { tabId, line, highlight: !!opts.highlight, nonce: ++nonce },
+        });
+        return tabId;
+      },
+
+      activate: (tabId) => set({ activeTabId: tabId }),
+
+      closeTab: (tabId) =>
+        set((s) => {
+          const idx = s.tabs.findIndex((t) => t.tabId === tabId);
+          if (idx < 0) return s;
+          const tabs = s.tabs.filter((t) => t.tabId !== tabId);
+          let activeTabId = s.activeTabId;
+          if (activeTabId === tabId) activeTabId = (tabs[idx] ?? tabs[idx - 1] ?? null)?.tabId ?? null;
+          return { tabs, activeTabId, pendingJump: s.pendingJump?.tabId === tabId ? null : s.pendingJump };
+        }),
+
+      closeAll: () => set({ tabs: [], activeTabId: null, pendingJump: null }),
+
+      requestJump: (tabId, line, highlight = true) => set({ pendingJump: { tabId, line, highlight, nonce: ++nonce } }),
+
+      consumeJump: (n) => set((s) => (s.pendingJump?.nonce === n ? { pendingJump: null } : s)),
+
+      updatePosition: (tabId, pos) =>
+        set((s) => {
+          const t = s.tabs.find((x) => x.tabId === tabId);
+          if (!t || (t.currentLineIndex === pos.currentLineIndex && t.tocPath === pos.tocPath && t.lineOffset === pos.lineOffset)) return s;
+          return { tabs: s.tabs.map((x) => (x.tabId === tabId ? { ...x, ...pos } : x)) };
+        }),
+    }),
+    {
+      name: 'kodeshread.tabs',
+      storage: createJSONStorage(() => AsyncStorage),
+      version: 1,
+      partialize: ({ tabs, activeTabId }) => ({ tabs, activeTabId }),
+    },
+  ),
+);
+
+export const selectActiveTab = (s: TabsState) => s.tabs.find((t) => t.tabId === s.activeTabId) ?? null;
