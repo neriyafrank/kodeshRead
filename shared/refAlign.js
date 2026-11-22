@@ -74,6 +74,8 @@ function unitLabels(title) {
   } else {
     type = UNIT_TYPES.get(tokens[0].replace(/[.:]$/, ''));
     key = extractRefKey(head);
+    // Unit words extractRefKey does not know ("כלל א", "מזמור ג"): drop the word itself.
+    if (type && tokens.length > 1 && key.split(' ')[0] === tokens[0]) key = tokens.slice(1).join(' ');
   }
   const amud = /^(.+?)([.:])$/.exec(key);
   if (amud && (type === 'דף' || type === undefined) && NUMERAL_RE.test(key)) {
@@ -273,10 +275,33 @@ function pairCommentaries(books) {
 const VERSE_MARKER_RE = /^\s*[([]\s*([א-ת]{1,4})\s*[)\]]/;
 
 /**
- * Lines of a base unit's verses ("(א) ..." markers, or one verse per content line when the
- * unit has no markers). Returns Map<key, { start, end }>.
+ * Name of the inline units ("(א) ..." lines) inside a heading, as Otzaria books use them:
+ * verses in a Tanach chapter, mishnayot in a Mishnah chapter, seifim in a סימן / כלל of a
+ * halacha book (ערוך השולחן העתיד, חכמת אדם), otherwise plain letters (אות).
  */
-function inlineUnits(contentLines, unit) {
+function inlineUnitWord(parentTitle, categoryPath) {
+  const labels = unitLabels(parentTitle);
+  const type = labels.length ? labels[labels.length - 1].type : '';
+  const cat = String(categoryPath || '');
+  if (type === 'פרק') return /(^|\/)משנה(\/|$)/.test(cat) ? 'משנה' : /תנ"?ך|תנך/.test(cat) || !cat ? 'פסוק' : 'הלכה';
+  if (type === 'סימן' || type === 'כלל' || type === 'הלכה') return 'סעיף';
+  if (type === 'מזמור') return 'פסוק';
+  return 'אות';
+}
+
+/** Marker key of a content line ("(יא) ..." -> "יא"), or null. */
+function markerKey(text) {
+  const m = VERSE_MARKER_RE.exec(String(text || ''));
+  return m ? normalizeHebrew(m[1], { keepPunctuation: false }) : null;
+}
+
+/**
+ * Inline units of a base unit: "(א) ..." markers (verses, mishnayot, seifim). Without markers,
+ * and only for verses (`ordinal`: Otzaria Tanach is one verse per line), the n-th content line
+ * is verse n; a halacha paragraph is never taken for a seif. Returns Map<key, { start, end }>.
+ */
+function inlineUnits(contentLines, unit, opts) {
+  const ordinal = !opts || opts.ordinal !== false;
   const lines = contentLines.filter((l) => l.line > unit.start && l.line <= unit.end);
   const out = new Map();
   const marked = lines.filter((l) => VERSE_MARKER_RE.test(l.text));
@@ -288,6 +313,7 @@ function inlineUnits(contentLines, unit) {
     }
     return out;
   }
+  if (!ordinal) return out;
   // Otzaria Tanach: one verse per line.
   lines.forEach((l, i) => {
     const key = intToHebrew(i + 1);
@@ -315,45 +341,52 @@ function intToHebrew(n) {
  * Aligns one commentary book with its base book.
  * @param {object[]} baseUnits   bookUnits() of the base book
  * @param {object[]} commUnits   bookUnits() of the commentary
- * @param {Set<number>|number[]} commContent  non-heading line numbers of the commentary
+ * @param {number[]|Set<number>|{ line: number, text?: string }[]} commContent  non-heading lines of the
+ *        commentary (with `text`, a unit whose דיבורים carry "(ב)" markers is split per seif / verse)
  * @param {(unit) => Promise<{ line, text }[]>} [baseContent]  content lines of a base unit
- *        (only loaded when a verse has to be resolved inline)
+ *        (only loaded when a verse / seif has to be resolved inline)
  * @returns {Promise<{ refKey, baseStart, baseEnd, commStart, commEnd }[]>}
  */
 async function alignUnits(baseUnits, commUnits, commContent, baseContent) {
   const index = makeBaseIndex(baseUnits);
-  const content = Array.isArray(commContent) ? commContent : [...commContent];
-  content.sort((a, b) => a - b);
-  const hasContent = (from, to) => {
+  const raw = Array.isArray(commContent) ? commContent : [...commContent];
+  const content = raw.map((x) => (typeof x === 'number' ? { line: x, text: null } : x)).sort((a, b) => a.line - b.line);
+  const linesIn = (from, to) => {
     let lo = 0;
-    let hi = content.length - 1;
-    while (lo <= hi) {
+    let hi = content.length;
+    while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (content[mid] < from) lo = mid + 1;
-      else if (content[mid] > to) hi = mid - 1;
-      else return true;
+      if (content[mid].line < from) lo = mid + 1;
+      else hi = mid;
     }
-    return false;
+    const out = [];
+    for (let i = lo; i < content.length && content[i].line <= to; i++) out.push(content[i]);
+    return out;
   };
   const inlineCache = new Map();
+  const inlineOf = async (parent, leafType) => {
+    const k = parent.id + ':' + (leafType === 'פסוק' || leafType === '' ? 'o' : 'm');
+    let v = inlineCache.get(k);
+    if (!v) {
+      v = inlineUnits(baseContent ? await baseContent(parent) : [], parent, { ordinal: leafType === 'פסוק' || leafType === '' });
+      inlineCache.set(k, v);
+    }
+    return v;
+  };
   const out = [];
   for (const u of commUnits) {
     // Only units with their own text (the דיבורים under this heading, before any sub-heading).
-    if (u.ownEnd <= u.start || !hasContent(u.start + 1, u.ownEnd)) continue;
+    const own = u.ownEnd > u.start ? linesIn(u.start + 1, u.ownEnd) : [];
+    if (!own.length) continue;
     const base = index.find(u.labels);
     let range = base ? { start: base.start, end: base.end } : null;
-    // No heading for the leaf in the base book: resolve the verse inside the matching parent
+    // No heading for the leaf in the base book: resolve the verse / seif inside the matching parent
     // ("פרק א|פסוק ג" against a chapter of "(ג) ..." lines, or one verse per line).
     const leaf = u.labels[u.labels.length - 1];
     if (!range && u.labels.length >= 2 && INLINE_TYPES.has(leaf.type) && baseContent) {
       const parent = index.find(u.labels.slice(0, -1));
       if (parent) {
-        let verses = inlineCache.get(parent.id);
-        if (!verses) {
-          verses = inlineUnits(await baseContent(parent), parent);
-          inlineCache.set(parent.id, verses);
-        }
-        const v = verses.get(leaf.key);
+        const v = (await inlineOf(parent, leaf.type)).get(leaf.key);
         if (v) range = v;
       }
     }
@@ -367,6 +400,27 @@ async function alignUnits(baseUnits, commUnits, commContent, baseContent) {
       }
     }
     if (!range) continue;
+
+    // The commentary marks its דיבורים per seif / verse inline, like the base ("(ב) ..." under
+    // "סימן א"): split the unit so each segment links to that seif / verse only.
+    const markers = own.filter((l) => l.text != null && markerKey(l.text));
+    if (base && markers.length >= 1 && baseContent && !(base.labels.length > u.labels.length)) {
+      const word = inlineUnitWord(base.title);
+      // Verses may also be one per line (no markers in the base); seifim always need markers.
+      const inline = await inlineOf(base, word === 'פסוק' ? 'פסוק' : 'סעיף');
+      if (inline.size) {
+        const firstMarked = markers[0].line;
+        if (firstMarked > own[0].line) out.push({ refKey: u.refKey, baseStart: range.start, baseEnd: range.end, commStart: u.start, commEnd: firstMarked - 1 });
+        for (let i = 0; i < markers.length; i++) {
+          const key = markerKey(markers[i].text);
+          const segEnd = i + 1 < markers.length ? markers[i + 1].line - 1 : u.ownEnd;
+          const target = inline.get(key);
+          if (target) out.push({ refKey: `${u.refKey}|${word} ${key}`, baseStart: target.start, baseEnd: target.end, commStart: markers[i].line, commEnd: segEnd });
+          else out.push({ refKey: u.refKey, baseStart: range.start, baseEnd: range.end, commStart: markers[i].line, commEnd: segEnd });
+        }
+        continue;
+      }
+    }
     out.push({ refKey: u.refKey, baseStart: range.start, baseEnd: range.end, commStart: u.start, commEnd: u.ownEnd });
   }
   return out;
@@ -384,6 +438,8 @@ module.exports = {
   linkTypeFor,
   splitCommentaryTitle,
   pairCommentaries,
+  inlineUnitWord,
+  markerKey,
   inlineUnits,
   alignUnits,
 };

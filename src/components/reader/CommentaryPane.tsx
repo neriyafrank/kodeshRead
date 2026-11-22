@@ -208,7 +208,8 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
                 {!isCollapsed && g.block ? (
                   <View style={s.blockBar} testID="commentary-block">
                     <Text style={s.entryPath} numberOfLines={1}>
-                      {g.bookTitle} ‹ {g.block.refKey.split('|').join(' ‹ ')}
+                      {/* The book's own headings (the canonical ref_key is normalized for matching). */}
+                      {g.bookTitle} ‹ {(g.entries[0]?.toc_path ?? g.block.refKey.replace(/\|/g, ' > ')).split(' > ').join(' ‹ ')}
                     </Text>
                     <Pressable
                       onPress={() => onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block!.start, endLine: g.block!.end })}

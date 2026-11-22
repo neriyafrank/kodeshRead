@@ -32,10 +32,15 @@ export function isCommentaryTitle(title: string): boolean;
 export function linkTypeFor(title: string): 'commentary' | 'targum';
 export function splitCommentaryTitle(title: string): { commentator: string; base: string } | null;
 export function pairCommentaries(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[]): { commId: number; baseId: number }[];
-export function inlineUnits(contentLines: { line: number; text: string }[], unit: { start: number; end: number }): Map<string, { start: number; end: number }>;
+/** Name of "(א)" units inside a heading: פסוק (Tanach), משנה, סעיף (סימן / כלל), else אות. */
+export function inlineUnitWord(parentTitle: string, categoryPath?: string | null): string;
+export function markerKey(text: string | null | undefined): string | null;
+/** `ordinal: false`: markers only (never "n-th line = verse n"). */
+export function inlineUnits(contentLines: { line: number; text: string }[], unit: { start: number; end: number }, opts?: { ordinal?: boolean }): Map<string, { start: number; end: number }>;
 export function alignUnits(
   baseUnits: BookUnit[],
   commUnits: BookUnit[],
-  commContent: number[] | Set<number>,
+  /** With `text`, a unit whose דיבורים carry "(ב)" markers is split per seif / verse. */
+  commContent: number[] | Set<number> | { line: number; text?: string | null }[],
   baseContent?: (unit: BookUnit) => Promise<{ line: number; text: string }[]>,
 ): Promise<{ refKey: string; baseStart: number; baseEnd: number; commStart: number; commEnd: number }[]>;

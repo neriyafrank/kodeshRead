@@ -68,7 +68,8 @@ try {
     assert.strictEqual(await entries.count(), 8);
     assert.strictEqual(await tid('commentary-entry-direct').count(), 3);
     assert.strictEqual(await tid('commentary-open-block').count(), 2);
-    assert.ok((await tid('commentary-block').first().innerText()).includes('דף ב ‹ עמוד א'));
+    // The block bar names the unit with the commentary's own heading ("דף ב."), not the normalized key.
+    assert.ok((await tid('commentary-block').first().innerText()).includes('רש"י על שבת ‹ דף ב.'), await tid('commentary-block').first().innerText());
     await shot('2-drawer');
     step('drawer shows each commentator\'s full block for the amud');
 

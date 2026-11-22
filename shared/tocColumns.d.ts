@@ -32,7 +32,7 @@ export function hasChildren(tree: TocTree, id: number): boolean;
 export function tocColumns<N extends TocNodeRow>(tree: TocTree<N>, path: number[]): TocColumn<N>[];
 export function pathForLine(tree: TocTree, line: number): number[];
 export function nodeEnd(tree: TocTree, node: TocNodeRow, totalLines: number): number;
-export function fetchInlineVerses(db: LibraryDb, bookId: number, start: number, end: number): Promise<InlineVerse[]>;
+export function fetchInlineVerses(db: LibraryDb, bookId: number, start: number, end: number, word?: string): Promise<InlineVerse[]>;
 export function verseForLine(verses: InlineVerse[], line: number): InlineVerse | null;
 export function filterToc<N extends TocNodeRow>(tree: TocTree<N>, query: string, limit?: number): N[];
 export function nodeTrail(tree: TocTree, id: number): string[];

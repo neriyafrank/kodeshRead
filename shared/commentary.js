@@ -68,10 +68,10 @@ function clearRefCache(db) {
 }
 
 /**
- * Aligned units containing `line` of `bookId`, on both sides:
+ * Aligned units containing `line` of `bookId`, on both sides (for each partner book the innermost
+ * unit covering the line: a seif's note, or where the seif has none, its siman's note):
  *   [{ role: 'base' | 'comm', otherBookId, refKey, start, end, otherStart, otherEnd, link_type }]
  * role 'base': bookId is the base book, the other side is a commentary block (and vice versa).
- * For each partner book only its innermost unit is returned (the verse, not the chapter).
  */
 async function fetchUnitLinks(db, bookId, line) {
   const a = adapterForBook(db, bookId);
@@ -86,10 +86,13 @@ async function fetchUnitLinks(db, bookId, line) {
        SELECT r.${S.other} AS other_id, r.ref_key, r.${S.start} AS s, r.${S.end} AS e, r.${S.oStart} AS os, r.${S.oEnd} AS oe, r.link_type
          FROM p JOIN ref_links r
            ON r.${S.self} = ? AND r.${S.other} = p.id
-          AND r.${S.start} = (SELECT MAX(${S.start}) FROM ref_links WHERE ${S.self} = ? AND ${S.other} = p.id AND ${S.start} <= ?)
+          AND r.${S.start} = (
+                SELECT ${S.start} FROM ref_links
+                 WHERE ${S.self} = ? AND ${S.other} = p.id AND ${S.start} <= ? AND ${S.end} >= ?
+                 ORDER BY ${S.start} DESC LIMIT 1)
         WHERE r.${S.end} >= ?
         ORDER BY r.${S.other}, r.${S.oStart}`,
-      [...partners, bookId, bookId, line, line],
+      [...partners, bookId, bookId, line, line, line],
     );
     for (const r of rows) {
       out.push({ role: side, otherBookId: r.other_id, refKey: r.ref_key, start: r.s, end: r.e, otherStart: r.os, otherEnd: r.oe, link_type: r.link_type });

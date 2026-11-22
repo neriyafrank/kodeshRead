@@ -24,7 +24,7 @@ const refAlign = require('./refAlign');
  * 3: books.is_complete + ingestion_state / ingestion_errors (resumable imports). Readers never
  *    depend on them, so version-2 libraries stay fully usable.
  */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 /** First id of the personal library's namespace (core ids stay below it). */
 const USER_ID_BASE = 1000000000;
 /** Root folder of the personal library in the merged tree. */
@@ -126,10 +126,11 @@ CREATE TABLE IF NOT EXISTS ref_links (
   ref_key TEXT NOT NULL,
   link_type TEXT
 );
--- (book, partner book, start): "the unit of partner P containing line L" is one index seek
--- (MAX(start) <= L), and a book's partners are enumerated with a skip-scan.
-CREATE INDEX IF NOT EXISTS idx_ref_links_base ON ref_links(base_book_id, comm_book_id, base_start);
-CREATE INDEX IF NOT EXISTS idx_ref_links_comm ON ref_links(comm_book_id, base_book_id, comm_start);
+-- (book, partner book, start, end): "the innermost unit of partner P covering line L" is an
+-- index-only backward walk from L that stops at the first unit whose end >= L (a seif note, else
+-- its siman's note), and a book's partners are enumerated with a skip-scan. (v5; v4 had no end.)
+CREATE INDEX IF NOT EXISTS idx_ref_links_base_v5 ON ref_links(base_book_id, comm_book_id, base_start, base_end);
+CREATE INDEX IF NOT EXISTS idx_ref_links_comm_v5 ON ref_links(comm_book_id, base_book_id, comm_start, comm_end);
 `;
 
 /**
@@ -209,6 +210,8 @@ async function migrateSchema(db) {
   }
   await db.exec(INGESTION_SCHEMA);
   await db.exec(REF_LINKS_SCHEMA);
+  // v4 -> v5: the covering (start, end) indexes replace the start-only ones.
+  await db.exec('DROP INDEX IF EXISTS idx_ref_links_base; DROP INDEX IF EXISTS idx_ref_links_comm;');
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1059,8 @@ async function indexRefLinks(db, opts) {
       const baseUnits = await unitsOf(baseId);
       const commNodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [commId]);
       const commUnits = refAlign.bookUnits(commNodes, byId.get(commId).totalLines);
-      const content = (await db.all('SELECT line_index FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId])).map((r) => r.line_index);
+      // Line numbers + the first characters (inline "(ב)" markers split a unit per seif / verse).
+      const content = (await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId]));
       const aligned = await refAlign.alignUnits(baseUnits, commUnits, content, (unit) =>
         db
           .all('SELECT line_index AS line, clean_text AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end])

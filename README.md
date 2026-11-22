@@ -167,7 +167,19 @@ Base books and their commentaries share parallel heading trees in Otzaria (פר�
   `(א)` markers or one-verse-per-line. Leaves the base lacks (`סעיף קטן`) align at the siman.
   Verses never fall back to the whole chapter.
 
-Lookups use `(book, partner, start)` indexes (one seek per commentator, ~0.5 ms). The reader drawer shows
+Halacha books in the real Otzaria sample (`otzaria_structure_sample.txt`: ערוך השולחן העתיד, חכמת אדם, הלכות
+גדולות) mark seifim inline as `(א)`…`(כ)` under each `סימן` / `כלל`, so:
+
+- a commentary whose דיבורים carry the same markers is split per seif (`סימן א|סעיף ב`), including the unmarked
+  paragraphs that continue a seif; its text before the first marker links to the whole siman;
+- a `סעיף` heading in a commentary is resolved to the base's inline `(ב)` line;
+- unmarked paragraphs (ערוך השולחן) are never guessed to be seifim. Only Tanach verses fall back to
+  one verse per line;
+- TOC columns name inline units by context: סעיף in a סימן / כלל, פסוק in Tanach, משנה in Mishnah.
+
+For each commentator the drawer shows the innermost unit covering the line: the seif's note, or the siman's
+note when the seif has none. Lookups use covering `(book, partner, start, end)` indexes (schema v5;
+`migrateSchema` replaces the v4 indexes), ~0.5 ms per line. The reader drawer shows
 each commentator's **whole block** for the selected verse/amud, plus explicit Otzaria line links. Explicit
 links that fall inside a block are merged into it and marked, never duplicated. **פתח בספר** opens the block
 in the commentary, highlighting all of it. From a commentary, the drawer shows the base text of its unit.

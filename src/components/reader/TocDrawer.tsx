@@ -19,6 +19,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type ScrollViewInstance } from 'react-native';
 
 import { normalizeHebrew } from '../../../shared/hebrew';
+import { inlineUnitWord } from '../../../shared/refAlign';
 import {
   buildTocTree,
   fetchInlineVerses,
@@ -150,7 +151,8 @@ interface ColumnsProps {
 function TocColumnsView({ bookId, tree, total, currentLine, width, onJump }: ColumnsProps) {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
-  const { adapter } = useLibrary();
+  const { adapter, bookIndex } = useLibrary();
+  const categoryPath = bookIndex.books.get(bookId)?.categoryPath;
   const [path, setPath] = useState<number[]>(() => pathForLine(tree, currentLine));
   const [verses, setVerses] = useState<{ nodeId: number; list: InlineVerse[] } | null>(null);
   const [query, setQuery] = useState('');
@@ -161,7 +163,8 @@ function TocColumnsView({ bookId, tree, total, currentLine, width, onJump }: Col
   const deepest = deepestId != null ? tree.byId.get(deepestId) : undefined;
 
   // Inline verses of a selected leaf division (e.g. a Tanach chapter without verse headings).
-  const versesFor = async (node: TocNode) => fetchInlineVerses(adapter, bookId, node.start_line, nodeEnd(tree, node, total));
+  // Named like the book does: פסוק (Tanach), סעיף (a סימן / כלל of a halacha book), משנה...
+  const versesFor = async (node: TocNode) => fetchInlineVerses(adapter, bookId, node.start_line, nodeEnd(tree, node, total), inlineUnitWord(node.title, categoryPath));
   useEffect(() => {
     if (!deepest || hasChildren(tree, deepest.id) || verses?.nodeId === deepest.id) return;
     let alive = true;
@@ -288,7 +291,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, width, onJump }: Col
       const child = kids.length ? filterToc({ ...tree, roots: kids, children: new Map([[null, kids]]) }, second, 5)[0] : undefined;
       if (child) return alive && setDirect({ query, title: nodeTrail(tree, child.id).join(' › '), line: child.start_line });
       const vs = await versesFor(first);
-      const key = normalizeHebrew(second, { keepPunctuation: false }).replace(/^פסוק /, '');
+      const key = normalizeHebrew(second, { keepPunctuation: false }).replace(/^(פסוק|סעיפ|סעיף|משנה|אות) /, '');
       const asNum = /^\d+$/.test(key) ? vs[Number(key) - 1] : vs.find((v) => v.key === key);
       if (alive) setDirect(asNum ? { query, title: `${first.title} › ${asNum.title}`, line: asNum.line } : null);
     })();

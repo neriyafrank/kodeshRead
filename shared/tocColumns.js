@@ -96,8 +96,11 @@ function nodeEnd(tree, node, totalLines) {
 
 const VERSE_RE = /^\s*[([]\s*([א-ת]{1,4})\s*[)\]]/;
 
-/** Verses of a section without verse headings: "(א) ..." lines -> [{ key, title, line }]. */
-async function fetchInlineVerses(db, bookId, start, end) {
+/**
+ * Inline units of a section without sub-headings: "(א) ..." lines -> [{ key, title, line }].
+ * `word` names them (פסוק in Tanach, סעיף in a סימן / כלל — see refAlign.inlineUnitWord).
+ */
+async function fetchInlineVerses(db, bookId, start, end, word) {
   const rows = await adapterForBook(db, bookId).all(
     `SELECT line_index, substr(clean_text, 1, 12) AS head FROM paragraphs
       WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 AND (clean_text LIKE '(%' OR clean_text LIKE '[%')
@@ -107,7 +110,7 @@ async function fetchInlineVerses(db, bookId, start, end) {
   const out = [];
   for (const r of rows) {
     const m = VERSE_RE.exec(r.head);
-    if (m) out.push({ key: m[1], title: `פסוק ${m[1]}`, line: r.line_index });
+    if (m) out.push({ key: m[1], title: `${word || 'פסוק'} ${m[1]}`, line: r.line_index });
   }
   return out;
 }

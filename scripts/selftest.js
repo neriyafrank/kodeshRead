@@ -665,6 +665,7 @@ async function main() {
   await releaseTests();
   await resumableIngestionTests();
   await refAlignTests();
+  await otzariaSampleTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -988,7 +989,11 @@ async function refAlignTests() {
       const v3 = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries({ all: (q, p) => r.all(q, p) }, BR, 4));
       assert.deepStrictEqual(v3.map((g) => [g.name, g.entries.length]), [['רש"י', 1]]);
       await indexer.migrateSchema(db.w);
-      assert.ok((await r.all("SELECT name FROM sqlite_master WHERE name = 'idx_ref_links_base'", [])).length === 1);
+      assert.ok((await r.all("SELECT name FROM sqlite_master WHERE name = 'idx_ref_links_base_v5'", [])).length === 1);
+      // v4 -> v5: the start-only indexes are replaced by the covering (start, end) ones.
+      await db.w.exec('CREATE INDEX idx_ref_links_base ON ref_links(base_book_id, comm_book_id, base_start)');
+      await indexer.migrateSchema(db.w);
+      assert.deepStrictEqual((await r.all("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_ref_links%' ORDER BY name", [])).map((x) => x.name), ['idx_ref_links_base_v5', 'idx_ref_links_comm_v5']);
       const st = await indexer.indexRefLinks(db.w, {});
       assert.strictEqual(st.pairs, 7);
       await db.w.exec('BEGIN');
@@ -998,6 +1003,134 @@ async function refAlignTests() {
       assert.ok(indexer.SCHEMA_VERSION >= 4);
     });
     db.raw.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Reference alignment against the REAL Otzaria excerpts in otzaria_structure_sample.txt (the base
+ * books are taken verbatim from it), with commentaries written in Otzaria's conventions ("X על Y",
+ * <h1>..<h4>, empty <h2></h2> levels, inline "(א)" seifim / verses, links/*.json).
+ */
+async function otzariaSampleTests() {
+  const samplePath = path.join(ROOT, 'otzaria_structure_sample.txt');
+  if (!fs.existsSync(samplePath)) {
+    console.warn('! otzaria_structure_sample.txt missing; skipping the real-structure checks.');
+    return;
+  }
+  const text = fs.readFileSync(samplePath, 'utf8').split('\n');
+  const from = text.indexOf('=== SAMPLE BOOK HEADINGS & LINES ===');
+  const to = text.indexOf('=== SAMPLE LINKS FILES (IF ANY) ===');
+  const sampleBooks = new Map();
+  let cur = null;
+  for (const l of text.slice(from + 1, to)) {
+    const m = /^--- FILE: \.\/(.*) ---$/.exec(l);
+    if (m) sampleBooks.set((cur = m[1]), []);
+    else if (cur) sampleBooks.get(cur).push(l);
+  }
+  const real = (rel) => sampleBooks.get(rel).join('\n').trim() + '\n';
+
+  await check('otzaria sample: real heading structures parse to canonical ref keys', () => {
+    const keys = (rel) => indexer.parseBook(real(rel), 'x').toc.map((t) => t.refPath).filter(Boolean);
+    assert.deepStrictEqual(keys('הלכה/ערוך השולחן העתיד.txt'), ['דיני זרעימ', 'דיני זרעימ|סימן א', 'דיני זרעימ|סימן ב']);
+    assert.deepStrictEqual(keys('הלכה/חכמת אדם.txt'), ['הקדמת המחבר', 'כלל א', 'כלל ב', 'כלל ג'], 'empty <h2></h2> skipped; "כלל א" (not "כלל כלל א")');
+    assert.deepStrictEqual(keys('הלכה/הלכות גדולות.txt'), ['הקדמה', 'סימן א']);
+    assert.deepStrictEqual(keys('הלכה/פסקי רקנאטי.txt').slice(0, 3), ['סימן א', 'סימן ב', 'סימן ג']);
+    assert.strictEqual(refAlign.inlineUnitWord('סימן א'), 'סעיף');
+    assert.strictEqual(refAlign.inlineUnitWord('כלל ב'), 'סעיף');
+    assert.strictEqual(refAlign.inlineUnitWord('פרק ג', 'תנך/תורה'), 'פסוק');
+    assert.strictEqual(refAlign.inlineUnitWord('פרק ג', 'משנה/סדר זרעים'), 'משנה');
+    assert.strictEqual(refAlign.markerKey('(יא) כתב הרמבם'), 'יא');
+    assert.strictEqual(refAlign.markerKey('<b>והנה</b> כבר'), null);
+  });
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-otzaria-'));
+  try {
+    const lib = path.join(tmp, 'אוצריא');
+    const w = (rel, body) => { fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true }); fs.writeFileSync(path.join(lib, rel), Array.isArray(body) ? body.join('\n') : body); };
+    for (const rel of ['הלכה/ערוך השולחן העתיד.txt', 'הלכה/חכמת אדם.txt', 'הלכה/ערוך השולחן.txt', 'הלכה/הלכות גדולות.txt']) w(rel, real(rel));
+    // Commentary with its דיבורים marked per seif inline, exactly like its base: (ב) has two
+    // paragraphs (the second unmarked), then (ה); plus an intro before the first marker.
+    w('הלכה/הערות על ערוך השולחן העתיד.txt', [
+      '<h1>הערות על ערוך השולחן העתיד</h1>', '<h2>דיני זרעים</h2>', '<h3>סימן א</h3>',
+      'הערה כללית לסימן', '(ב) ד"ה נמצא דבכרם - הערה ב1', 'ד"ה ועוללות - הערה ב2', '(ה) ד"ה וטעם רבותינו - הערה ה1',
+      '<h3>סימן ב</h3>', '(יא) ד"ה כתב הרמבם - הערה ב-יא',
+    ].join('\n'));
+    // Commentary with seif headings under the real empty-<h2> + כלל structure of חכמת אדם.
+    w('הלכה/הגהות על חכמת אדם.txt', [
+      '<h1>הגהות על חכמת אדם</h1>', '<h2></h2>', '<h3>כלל א</h3>', '<h4>סעיף ג</h4>', 'ד"ה א"צ שידע - הגהה ג1', 'ד"ה אלא אם - הגהה ג2',
+      '<h4>סעיף ד</h4>', 'ד"ה חרש המדבר - הגהה ד1', '<h3>כלל ב</h3>', '<h4>סעיף א</h4>', 'ד"ה דין שוחט - הגהה ב-א',
+    ].join('\n'));
+    // ערוך השולחן has no seif markers (paragraphs): a "סעיף ב" heading must not be guessed as paragraph 2.
+    w('הלכה/הערות על ערוך השולחן.txt', ['<h1>הערות על ערוך השולחן</h1>', '<h2>אורח חיים</h2>', '<h3>סימן א</h3>', '<h4>סעיף ב</h4>', 'ד"ה ולזה ברא - הערה']);
+    // Otzaria links/*.json for the first commentary (overlaps its seif blocks: no duplicates).
+    const links = path.join(tmp, 'links');
+    fs.mkdirSync(links);
+    fs.writeFileSync(path.join(links, 'הערות על ערוך השולחן העתיד_links.json'), JSON.stringify([
+      { line_index_1: 5, line_index_2: 6, path_2: 'ערוך השולחן העתיד.txt', 'Conection Type': 'commentary' },
+    ], null, 1));
+    const out = path.join(tmp, 'otz.db');
+    const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${links}`], { encoding: 'utf8' });
+    if (proc.status !== 0) throw new Error('otzaria fixture build failed:\n' + proc.stderr);
+    const db = openDb(out);
+    const id = async (title) => (await db.all('SELECT id FROM books WHERE title = ?', [title]))[0].id;
+    const AH = await id('ערוך השולחן העתיד');
+    const HEAROT = await id('הערות על ערוך השולחן העתיד');
+    const CA = await id('חכמת אדם');
+    const texts = async (bookId, line) => {
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, bookId, line));
+      return Object.fromEntries(groups.map((g) => [g.name, g.entries.map((e) => e.display_text.split(' - ')[1] || e.display_text)]));
+    };
+    const rows = async (comm) => (await db.all('SELECT ref_key, base_start, base_end, comm_start, comm_end FROM ref_links WHERE comm_book_id = ? ORDER BY comm_start', [comm])).map((r) => Object.values(r));
+
+    await check('otzaria sample: inline-marked commentary splits per seif (ערוך השולחן העתיד)', async () => {
+      // Base: line 4 "סימן א", seifim (א)..(י) on lines 5..14; "סימן ב" at 15, (יא) on 26.
+      assert.deepStrictEqual(await rows(HEAROT), [
+        ['דיני זרעימ|סימן א', 4, 14, 3, 4], // intro before the first marker: the whole siman
+        ['דיני זרעימ|סימן א|סעיף ב', 6, 6, 5, 6], // (ב) + its unmarked continuation
+        ['דיני זרעימ|סימן א|סעיף ה', 9, 9, 7, 7],
+        ['דיני זרעימ|סימן ב|סעיף יא', 26, 26, 9, 9],
+      ]);
+      assert.deepStrictEqual((await texts(AH, 6))['הערות'], ['הערה ב1', 'הערה ב2'], 'seif ב: both its דיבורים (the marked one and its continuation)');
+      assert.deepStrictEqual((await texts(AH, 9))['הערות'], ['הערה ה1']);
+      assert.deepStrictEqual((await texts(AH, 7))['הערות'], ['הערה כללית לסימן'], 'seif ג has no note: the siman-level note, nothing from ב or ה');
+      assert.deepStrictEqual((await texts(AH, 4))['הערות'], ['הערה כללית לסימן'], 'the siman heading');
+      assert.deepStrictEqual((await texts(AH, 26))['הערות'], ['הערה ב-יא']);
+      assert.ok(!(await texts(AH, 25))['הערות'], 'seif י of סימן ב has no note');
+    });
+    await check('otzaria sample: seif headings align to inline seifim (חכמת אדם, empty <h2>, כלל)', async () => {
+      // Base: "כלל א" at 6, (א)..(טו) on 7..21, "כלל ב" at 22, (א) on 23.
+      assert.deepStrictEqual(await rows(await id('הגהות על חכמת אדם')), [
+        ['כלל א|סעיף ג', 9, 9, 4, 6],
+        ['כלל א|סעיף ד', 10, 10, 7, 8],
+        ['כלל ב|סעיף א', 23, 23, 10, 11],
+      ]);
+      assert.deepStrictEqual((await texts(CA, 9))['הגהות'], ['הגהה ג1', 'הגהה ג2']);
+      assert.deepStrictEqual((await texts(CA, 10))['הגהות'], ['הגהה ד1']);
+      assert.ok(!(await texts(CA, 8))['הגהות'] && !(await texts(CA, 11))['הגהות'], 'zero bleed into neighbouring seifim');
+    });
+    await check('otzaria sample: unmarked paragraphs are never taken for seifim (ערוך השולחן)', async () => {
+      assert.deepStrictEqual(await rows(await id('הערות על ערוך השולחן')), []);
+    });
+    await check('otzaria sample: links/*.json merged into the aligned blocks without duplicates', async () => {
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, AH, 6));
+      const g = groups.find((x) => x.bookId === HEAROT);
+      assert.strictEqual(g.entries.length, 2, 'the JSON link (5 <-> 6) is inside the seif block: no duplicate');
+      assert.deepStrictEqual(g.entries.map((e) => e.line), [5, 6]);
+      assert.ok(g.entries.find((e) => e.line === 5).direct, 'marked as an explicit Otzaria link');
+      // Reverse: the commentary shows its base seif.
+      const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, HEAROT, 6));
+      assert.deepStrictEqual(back.map((x) => [x.bookTitle, x.entries.map((e) => e.line)]), [['ערוך השולחן העתיד', [6]]]);
+      assert.deepStrictEqual(back[0].block, { refKey: 'דיני זרעימ|סימן א|סעיף ב', start: 6, end: 6 });
+    });
+    await check('otzaria sample: TOC names inline units by context (סעיף in a סימן)', async () => {
+      const toc = require('../shared/tocColumns');
+      const vs = await toc.fetchInlineVerses(db, AH, 4, 14, refAlign.inlineUnitWord('סימן א', 'הלכה'));
+      assert.strictEqual(vs.length, 10);
+      assert.deepStrictEqual([vs[0].title, vs[9].title], ['סעיף א', 'סעיף י']);
+    });
+    db.close();
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
