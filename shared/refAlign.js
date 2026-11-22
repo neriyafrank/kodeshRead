@@ -1,0 +1,389 @@
+/**
+ * Otzaria Reference-Alignment: heading-based commentary <-> base-book unit links.
+ *
+ * In Otzaria a base book and its commentaries share parallel heading trees
+ * (Book > פרק / דף / סימן > פסוק / עמוד / סעיף). All commentary paragraphs
+ * (דיבורים המתחילים) under e.g. "פרק א" > "פסוק א" belong to that verse. This module
+ *
+ *  1. turns every heading into canonical unit labels ("סימן שכח", "דף ב" + "עמוד א")
+ *     and every TOC node into a canonical reference path (ref_key "פרק א|פסוק א");
+ *  2. pairs commentary books with their base book (Otzaria naming: "<מפרש> על <ספר>",
+ *     plus well-known standalone commentaries such as משנה ברורה -> אורח חיים);
+ *  3. aligns each commentary unit with the base unit of the same ref_key and stores
+ *     the pair of line ranges in `ref_links` (shared/indexer.js schema v4);
+ *     a base book without verse headings (Tanach: one verse per line, or "(א)" markers)
+ *     gets its verse resolved inside the matching chapter.
+ *
+ * Shared by scripts/build-db.js and the on-device indexer (links phase), so it is
+ * idempotent per commentary book (delete + insert in one transaction) and can stop
+ * between books (pause / resume re-runs the phase).
+ */
+'use strict';
+
+const { normalizeHebrew, extractRefKey, aliasKey, decodeEntities, stripHtml } = require('./hebrew');
+
+const plainHeadingText = (html) => decodeEntities(stripHtml(String(html || ''))).replace(/\s+/g, ' ').trim();
+
+// ---------------------------------------------------------------------------
+// 1. Canonical unit labels and reference paths
+// ---------------------------------------------------------------------------
+
+/** Structural words (normalized: finals folded) -> canonical unit type. */
+const UNIT_TYPES = new Map(
+  Object.entries({
+    פרק: 'פרק', פרקים: 'פרק', פ: 'פרק',
+    פסוק: 'פסוק', פסוקים: 'פסוק',
+    דף: 'דף', דפים: 'דף',
+    עמוד: 'עמוד', עמ: 'עמוד',
+    סימן: 'סימן', סי: 'סימן', סימנים: 'סימן',
+    סעיף: 'סעיף', סע: 'סעיף', סעיפים: 'סעיף',
+    // משנה ברורה / ש"ך numbering is not the Shulchan Aruch's seifim: its own unit kind.
+    'סעיף קטן': 'סעיף קטן', סק: 'סעיף קטן',
+    משנה: 'משנה', משניות: 'משנה',
+    הלכה: 'הלכה', הל: 'הלכה',
+    אות: 'אות', כלל: 'כלל', מאמר: 'מאמר', שער: 'שער', פרשה: 'פרשה', פרשת: 'פרשה', מזמור: 'מזמור',
+  }).map(([k, v]) => [normalizeHebrew(k, { keepPunctuation: false }), v]),
+);
+
+/** Leaf types that may be resolved inside a base unit with no such headings. */
+const INLINE_TYPES = new Set(['פסוק', 'סעיף', 'אות', 'משנה', 'הלכה', '']);
+
+/** Hebrew numeral / amud-marked numeral ("כה", "ב.", "ב:"). */
+const NUMERAL_RE = /^[א-ת]{1,4}[.:]?$/;
+
+/**
+ * Canonical labels of one heading (0, 1 or 2 labels):
+ *   "סימן שכ\"ח"        -> [{ type: 'סימן', key: 'שכח' }]
+ *   "דף ב."  / "דף ב ע\"א" -> [{ type: 'דף', key: 'ב' }, { type: 'עמוד', key: 'א' }]
+ *   "פרק א - בריאת העולם" -> [{ type: 'פרק', key: 'א' }]
+ *   "הקדמה"             -> [{ type: '', key: 'הקדמה' }]
+ *   ""                  -> []
+ */
+function unitLabels(title) {
+  const plain = plainHeadingText(title);
+  if (!plain) return [];
+  const head = plain.split(/\s[-–—]\s|[,;(]/)[0];
+  const tokens = normalizeHebrew(head, { keepAmud: true, keepPunctuation: false }).split(' ').filter(Boolean);
+  if (!tokens.length) return [];
+  let type = undefined;
+  let key;
+  if (tokens.length > 2 && UNIT_TYPES.has(tokens.slice(0, 2).join(' '))) {
+    // Two-word unit names ("סעיף קטן ג").
+    type = UNIT_TYPES.get(tokens.slice(0, 2).join(' '));
+    key = tokens.slice(2).join(' ');
+  } else {
+    type = UNIT_TYPES.get(tokens[0].replace(/[.:]$/, ''));
+    key = extractRefKey(head);
+  }
+  const amud = /^(.+?)([.:])$/.exec(key);
+  if (amud && (type === 'דף' || type === undefined) && NUMERAL_RE.test(key)) {
+    return [{ type: 'דף', key: amud[1] }, { type: 'עמוד', key: amud[2] === '.' ? 'א' : 'ב' }];
+  }
+  if (type) return key ? [{ type, key }] : [];
+  // No structural prefix: a bare numeral ("<h3>כה</h3>") or a named section ("הקדמה").
+  if (tokens.length === 1 && NUMERAL_RE.test(tokens[0])) return [{ type: '', key: tokens[0] }];
+  return [{ type: '', key: tokens.join(' ') }];
+}
+
+const labelText = (l) => (l.type ? `${l.type} ${l.key}` : l.key);
+
+/** "פרק א|פסוק א" from labels. */
+function refKeyOf(labels) {
+  return labels.map(labelText).join('|');
+}
+
+/**
+ * Canonical reference paths of TOC nodes (parents before children, i.e. in start_line order).
+ * @param {{ id, parent_id, title }[]} nodes
+ * @returns {Map<id, { labels: object[], refKey: string }>}
+ */
+function refPaths(nodes) {
+  const out = new Map();
+  for (const n of nodes) {
+    const parent = n.parent_id == null ? null : out.get(n.parent_id);
+    const labels = (parent ? parent.labels : []).concat(unitLabels(n.title));
+    out.set(n.id, { labels, refKey: refKeyOf(labels) });
+  }
+  return out;
+}
+
+/**
+ * Units of a book from its TOC (sorted by start_line):
+ *   subtree: [start_line, line before the next heading of the same or a higher level]
+ *   own:     [start_line, line before the next heading of any level] (the unit's own text)
+ */
+function bookUnits(nodes, totalLines) {
+  const sorted = nodes.slice().sort((a, b) => a.start_line - b.start_line || a.level - b.level);
+  const paths = refPaths(sorted);
+  const units = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const n = sorted[i];
+    let subEnd = totalLines;
+    for (let j = i + 1; j < sorted.length; j++) {
+      if (sorted[j].level <= n.level) {
+        subEnd = sorted[j].start_line - 1;
+        break;
+      }
+    }
+    const ownEnd = i + 1 < sorted.length ? sorted[i + 1].start_line - 1 : totalLines;
+    const p = paths.get(n.id);
+    if (!p.labels.length) continue;
+    units.push({ id: n.id, level: n.level, title: n.title, labels: p.labels, refKey: p.refKey, start: n.start_line, end: Math.max(n.start_line, subEnd), ownEnd: Math.max(n.start_line, ownEnd) });
+  }
+  return units;
+}
+
+// --- base-side lookup ---------------------------------------------------------
+
+const looseKey = (labels) => labels.map((l) => l.key).join('|');
+
+/** Same unit kind: equal types, or one side has no structural word ("<h3>כה</h3>"). */
+const typesCompatible = (a, b) => a.type === b.type || !a.type || !b.type;
+
+/**
+ * Suffix index of a base book's units. A commentary path matches the base unit with the
+ * longest equal path suffix (always including the leaf), as long as that suffix is unique in
+ * the base book. This tolerates extra levels on either side ("פרשת נח > פרק ו > פסוק א" vs
+ * "פרק ו > פסוק א"); labels compare by key with compatible types.
+ */
+function makeBaseIndex(units) {
+  const byKeys = new Map();
+  for (const u of units) {
+    for (let k = 1; k <= u.labels.length; k++) {
+      const key = k + '#' + looseKey(u.labels.slice(-k));
+      const cur = byKeys.get(key);
+      if (!cur) byKeys.set(key, [u]);
+      else cur.push(u);
+    }
+  }
+  return {
+    units,
+    find(labels) {
+      for (let k = labels.length; k >= 1; k--) {
+        const suf = labels.slice(-k);
+        const cands = (byKeys.get(k + '#' + looseKey(suf)) || []).filter((u) => u.labels.slice(-k).every((l, i) => typesCompatible(l, suf[i])));
+        if (!cands.length) continue;
+        // Prefer exact types; duplicate identical paths (repeated headings) take the first.
+        const exact = cands.filter((u) => refKeyOf(u.labels.slice(-k)) === refKeyOf(suf));
+        const pool = exact.length ? exact : cands;
+        if (pool.length === 1 || (k === labels.length && pool.every((u) => u.refKey === pool[0].refKey))) return pool[0];
+      }
+      return null;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 2. Commentary <-> base book pairing
+// ---------------------------------------------------------------------------
+
+/** Standalone commentaries whose title does not name their base book. */
+const KNOWN_BASES = {
+  'משנה ברורה': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'ביאור הלכה': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'שער הציון': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'מגן אברהם': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'באר היטב': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'כף החיים': ['שולחן ערוך אורח חיים', 'אורח חיים'],
+  'אונקלוס': [],
+};
+const KNOWN_BASES_NORM = new Map(Object.entries(KNOWN_BASES).map(([k, v]) => [aliasKey(k), v.map(aliasKey)]));
+
+/** Words that may prefix the base name in a commentary title ("על מסכת ברכות", "על ספר בראשית"). */
+const BASE_PREFIXES = ['מסכת', 'ספר', 'משנה', 'תלמוד בבלי', 'תלמוד ירושלמי', 'בבלי', 'ירושלמי', 'שולחן ערוך', 'שלחן ערוך', 'שו"ע', 'רמב"ם', 'משנה תורה'].map(aliasKey);
+
+const isCommentaryTitle = (title) => / על /.test(String(title || ''));
+
+/** link_type of an aligned book: translations (אונקלוס, תרגום ...) rank after commentaries. */
+function linkTypeFor(title) {
+  return /אונקלוס|תרגום|targum/i.test(String(title || '')) ? 'targum' : 'commentary';
+}
+
+/** "רש\"י על בראשית" -> { commentator: 'רש"י', base: 'בראשית' } (null when not "X על Y"). */
+function splitCommentaryTitle(title) {
+  const t = String(title || '').trim();
+  const i = t.indexOf(' על ');
+  if (i <= 0) return null;
+  return { commentator: t.slice(0, i).trim(), base: t.slice(i + 4).trim() };
+}
+
+/**
+ * Pairs commentary books with base books.
+ * @param {{ id, title, aliases: string[], categoryPath: string }[]} books
+ * @returns {{ commId, baseId }[]}
+ */
+function pairCommentaries(books) {
+  const byKey = new Map();
+  const add = (k, b) => {
+    if (!k) return;
+    const cur = byKey.get(k) || [];
+    if (!cur.includes(b)) cur.push(b);
+    byKey.set(k, cur);
+  };
+  const bases = books.filter((b) => !isCommentaryTitle(b.title));
+  for (const b of bases) {
+    add(aliasKey(b.title), b);
+    for (const a of b.aliases || []) add(a, b);
+    // "שולחן ערוך - אורח חיים" / "שולחן ערוך, אורח חיים" -> also "אורח חיים".
+    const parts = String(b.title).split(/\s*[-–—,]\s*/);
+    if (parts.length > 1) add(aliasKey(parts[parts.length - 1]), b);
+  }
+  const shared = (a, b) => {
+    const x = String(a || '').split('/');
+    const y = String(b || '').split('/');
+    let n = 0;
+    while (n < x.length && n < y.length && x[n] === y[n]) n++;
+    return n;
+  };
+  const pick = (cands, comm, hint) => {
+    if (!cands || !cands.length) return null;
+    const scored = cands
+      .filter((c) => c.id !== comm.id)
+      .map((c) => ({ c, s: shared(c.categoryPath, comm.categoryPath) * 10 + (hint && String(c.categoryPath).includes(hint) ? 5 : 0) }));
+    scored.sort((p, q) => q.s - p.s || p.c.id - q.c.id);
+    return scored.length ? scored[0].c : null;
+  };
+  const out = [];
+  for (const comm of books) {
+    let base = null;
+    const split = splitCommentaryTitle(comm.title);
+    if (split) {
+      let key = aliasKey(split.base);
+      base = pick(byKey.get(key), comm);
+      // "ברטנורא על משנה ברכות", "תוספות על מסכת שבת", "ט\"ז על שולחן ערוך אורח חיים".
+      for (const p of BASE_PREFIXES) {
+        if (base) break;
+        if (key.startsWith(p + ' ')) base = pick(byKey.get(key.slice(p.length + 1)), comm, p.split(' ')[0]);
+      }
+    } else {
+      for (const k of KNOWN_BASES_NORM.get(aliasKey(comm.title)) || []) {
+        base = pick(byKey.get(k), comm);
+        if (base) break;
+      }
+    }
+    if (base && base.id !== comm.id) out.push({ commId: comm.id, baseId: base.id });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 3. Alignment
+// ---------------------------------------------------------------------------
+
+const VERSE_MARKER_RE = /^\s*[([]\s*([א-ת]{1,4})\s*[)\]]/;
+
+/**
+ * Lines of a base unit's verses ("(א) ..." markers, or one verse per content line when the
+ * unit has no markers). Returns Map<key, { start, end }>.
+ */
+function inlineUnits(contentLines, unit) {
+  const lines = contentLines.filter((l) => l.line > unit.start && l.line <= unit.end);
+  const out = new Map();
+  const marked = lines.filter((l) => VERSE_MARKER_RE.test(l.text));
+  if (marked.length) {
+    for (let i = 0; i < marked.length; i++) {
+      const key = normalizeHebrew(VERSE_MARKER_RE.exec(marked[i].text)[1], { keepPunctuation: false });
+      const end = i + 1 < marked.length ? marked[i + 1].line - 1 : unit.end;
+      if (!out.has(key)) out.set(key, { start: marked[i].line, end });
+    }
+    return out;
+  }
+  // Otzaria Tanach: one verse per line.
+  lines.forEach((l, i) => {
+    const key = intToHebrew(i + 1);
+    if (key) out.set(key, { start: l.line, end: l.line });
+  });
+  return out;
+}
+
+const ONES = ['', 'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט'];
+const TENS = ['', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ'];
+function intToHebrew(n) {
+  if (n <= 0 || n >= 500) return null;
+  let v = n;
+  let out = '';
+  if (v >= 400) { out += 'ת'; v -= 400; }
+  if (v >= 300) { out += 'ש'; v -= 300; }
+  if (v >= 200) { out += 'ר'; v -= 200; }
+  if (v >= 100) { out += 'ק'; v -= 100; }
+  if (v === 15) return out + 'טו';
+  if (v === 16) return out + 'טז';
+  return out + TENS[Math.floor(v / 10)] + ONES[v % 10];
+}
+
+/**
+ * Aligns one commentary book with its base book.
+ * @param {object[]} baseUnits   bookUnits() of the base book
+ * @param {object[]} commUnits   bookUnits() of the commentary
+ * @param {Set<number>|number[]} commContent  non-heading line numbers of the commentary
+ * @param {(unit) => Promise<{ line, text }[]>} [baseContent]  content lines of a base unit
+ *        (only loaded when a verse has to be resolved inline)
+ * @returns {Promise<{ refKey, baseStart, baseEnd, commStart, commEnd }[]>}
+ */
+async function alignUnits(baseUnits, commUnits, commContent, baseContent) {
+  const index = makeBaseIndex(baseUnits);
+  const content = Array.isArray(commContent) ? commContent : [...commContent];
+  content.sort((a, b) => a - b);
+  const hasContent = (from, to) => {
+    let lo = 0;
+    let hi = content.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (content[mid] < from) lo = mid + 1;
+      else if (content[mid] > to) hi = mid - 1;
+      else return true;
+    }
+    return false;
+  };
+  const inlineCache = new Map();
+  const out = [];
+  for (const u of commUnits) {
+    // Only units with their own text (the דיבורים under this heading, before any sub-heading).
+    if (u.ownEnd <= u.start || !hasContent(u.start + 1, u.ownEnd)) continue;
+    const base = index.find(u.labels);
+    let range = base ? { start: base.start, end: base.end } : null;
+    // No heading for the leaf in the base book: resolve the verse inside the matching parent
+    // ("פרק א|פסוק ג" against a chapter of "(ג) ..." lines, or one verse per line).
+    const leaf = u.labels[u.labels.length - 1];
+    if (!range && u.labels.length >= 2 && INLINE_TYPES.has(leaf.type) && baseContent) {
+      const parent = index.find(u.labels.slice(0, -1));
+      if (parent) {
+        let verses = inlineCache.get(parent.id);
+        if (!verses) {
+          verses = inlineUnits(await baseContent(parent), parent);
+          inlineCache.set(parent.id, verses);
+        }
+        const v = verses.get(leaf.key);
+        if (v) range = v;
+      }
+    }
+    // A leaf kind the base book does not have (ס"ק of משנה ברורה vs סעיפים of the Shulchan
+    // Aruch, אות, דיבור ...): the unit belongs to the nearest common ancestor (the siman).
+    // Verse-like leaves (INLINE_TYPES) never fall back, so a verse cannot bleed into its chapter.
+    if (!range && !INLINE_TYPES.has(leaf.type)) {
+      for (let k = u.labels.length - 1; k >= 1 && !range; k--) {
+        const anc = index.find(u.labels.slice(0, k));
+        if (anc) range = { start: anc.start, end: anc.end };
+      }
+    }
+    if (!range) continue;
+    out.push({ refKey: u.refKey, baseStart: range.start, baseEnd: range.end, commStart: u.start, commEnd: u.ownEnd });
+  }
+  return out;
+}
+
+module.exports = {
+  UNIT_TYPES,
+  unitLabels,
+  refKeyOf,
+  refPaths,
+  bookUnits,
+  makeBaseIndex,
+  KNOWN_BASES,
+  isCommentaryTitle,
+  linkTypeFor,
+  splitCommentaryTitle,
+  pairCommentaries,
+  inlineUnits,
+  alignUnits,
+};

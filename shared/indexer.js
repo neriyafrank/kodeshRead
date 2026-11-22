@@ -17,13 +17,14 @@
 'use strict';
 
 const { normalizeHebrew, extractRefKey, generateBookAliases, aliasKey, decodeEntities, stripHtml } = require('./hebrew');
+const refAlign = require('./refAlign');
 
 /**
  * Bump when the schema or the parsing rules change (stored in meta.script_version).
  * 3: books.is_complete + ingestion_state / ingestion_errors (resumable imports). Readers never
  *    depend on them, so version-2 libraries stay fully usable.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 /** First id of the personal library's namespace (core ids stay below it). */
 const USER_ID_BASE = 1000000000;
 /** Root folder of the personal library in the merged tree. */
@@ -105,6 +106,30 @@ CREATE TABLE links (
 );
 CREATE INDEX idx_links_a ON links(book_a_id, line_a);
 CREATE INDEX idx_links_b ON links(book_b_id, line_b);
+` + '\n';
+
+/**
+ * Otzaria reference alignment (schema v4): a commentary unit (all lines under e.g.
+ * "פרק א" > "פסוק א") linked to the base book's unit with the same canonical ref_key
+ * ("פרק א|פסוק א"), as two line ranges. Built in the links phase (shared/refAlign.js);
+ * looked up by a line on either side with an index seek (shared/commentary.js).
+ */
+const REF_LINKS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ref_links (
+  id INTEGER PRIMARY KEY,
+  base_book_id INTEGER NOT NULL,
+  base_start INTEGER NOT NULL,
+  base_end INTEGER NOT NULL,
+  comm_book_id INTEGER NOT NULL,
+  comm_start INTEGER NOT NULL,
+  comm_end INTEGER NOT NULL,
+  ref_key TEXT NOT NULL,
+  link_type TEXT
+);
+-- (book, partner book, start): "the unit of partner P containing line L" is one index seek
+-- (MAX(start) <= L), and a book's partners are enumerated with a skip-scan.
+CREATE INDEX IF NOT EXISTS idx_ref_links_base ON ref_links(base_book_id, comm_book_id, base_start);
+CREATE INDEX IF NOT EXISTS idx_ref_links_comm ON ref_links(comm_book_id, base_book_id, comm_start);
 `;
 
 /**
@@ -159,7 +184,7 @@ async function ensureSchema(db, opts) {
     await migrateSchema(db);
     return false;
   }
-  const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + INGESTION_SCHEMA;
+  const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + REF_LINKS_SCHEMA + INGESTION_SCHEMA;
   // DDL is transactional in SQLite: a failure never leaves a half-created schema behind.
   await db.exec('BEGIN');
   try {
@@ -175,7 +200,7 @@ async function ensureSchema(db, opts) {
 
 /**
  * Brings a writable library created by an older version up to the current schema
- * (adds books.is_complete and the ingestion tables). Idempotent and cheap.
+ * (adds books.is_complete, the ingestion tables and ref_links). Idempotent and cheap.
  */
 async function migrateSchema(db) {
   const cols = await db.all('PRAGMA table_info(books)', []);
@@ -183,6 +208,7 @@ async function migrateSchema(db) {
     await db.exec('ALTER TABLE books ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 1');
   }
   await db.exec(INGESTION_SCHEMA);
+  await db.exec(REF_LINKS_SCHEMA);
 }
 
 // ---------------------------------------------------------------------------
@@ -306,8 +332,10 @@ function parseBook(raw, fallbackTitle) {
       }
       while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
       const parent = stack[stack.length - 1];
-      toc.push({ parentIdx: parent ? parent.tocIdx : null, level, title: headingTitle, refKey: extractRefKey(headingTitle), startLine: lineIndex });
-      stack.push({ level, tocIdx: toc.length - 1, title: headingTitle });
+      // refPath: canonical reference of the unit ("פרק א|פסוק א", "דף ב|עמוד א"), used to align commentaries.
+      const labels = (parent ? parent.labels : []).concat(refAlign.unitLabels(headingTitle));
+      toc.push({ parentIdx: parent ? parent.tocIdx : null, level, title: headingTitle, refKey: extractRefKey(headingTitle), refPath: refAlign.refKeyOf(labels), startLine: lineIndex });
+      stack.push({ level, tocIdx: toc.length - 1, title: headingTitle, labels });
       paragraphs.push({ lineIndex, tocPath: stack.map((s) => s.title).join(' > '), display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: level });
       // Rare: text after a closing heading tag on the same line.
       if (h[3] && h[3].trim()) {
@@ -591,6 +619,10 @@ async function maxId(db, table, base) {
   return Math.max(m, base);
 }
 
+async function hasTable(db, name) {
+  return (await db.all("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?", [name])).length > 0;
+}
+
 /** Removes one book (its FTS entries, paragraphs, TOC and links) from a database. */
 async function deleteBook(db, bookId) {
   await db.run(
@@ -601,6 +633,7 @@ async function deleteBook(db, bookId) {
   await db.run('DELETE FROM paragraphs WHERE book_id = ?', [bookId]);
   await db.run('DELETE FROM toc_nodes WHERE book_id = ?', [bookId]);
   await db.run('DELETE FROM links WHERE book_a_id = ? OR book_b_id = ?', [bookId, bookId]);
+  if (await hasTable(db, 'ref_links')) await db.run('DELETE FROM ref_links WHERE base_book_id = ? OR comm_book_id = ?', [bookId, bookId]);
   await db.run('DELETE FROM books WHERE id = ?', [bookId]);
 }
 
@@ -957,6 +990,104 @@ async function indexLinks(db, fsa, linkFiles, opts) {
 }
 
 /**
+ * Heading-based reference alignment (Otzaria): pairs every commentary book with its base
+ * book (shared/refAlign.js pairCommentaries) and stores, for each commentary unit with its
+ * own text, the base unit with the same canonical ref_key as a `ref_links` row of two line
+ * ranges. Runs in the links phase, after all books are indexed.
+ *
+ * Idempotent and resumable: each commentary book's rows are replaced (DELETE + INSERT) in the
+ * transaction that writes them, transactions are committed every `booksPerTransaction`
+ * commentaries, and `shouldStop()` (polled between books) ends the run early with
+ * `stopped` set; re-running the phase simply redoes the remaining books.
+ *
+ * @param {object} db  writer adapter
+ * @param {{ bookIds?: number[], booksPerTransaction?: number, shouldStop?: () => any,
+ *           onBook?: (p: { index, total, title }) => void, onCommit?: () => Promise<void> }} [opts]
+ *   bookIds: only (re)align pairs that involve these books (a personal import).
+ * @returns {Promise<{ pairs, aligned, units, stopped }>}
+ */
+async function indexRefLinks(db, opts) {
+  const o = opts || {};
+  const stats = { pairs: 0, aligned: 0, units: 0, stopped: null };
+  if (!(await hasTable(db, 'ref_links'))) return stats;
+  const rows = await db.all(
+    `SELECT b.id, b.title, b.aliases, b.total_lines, COALESCE(c.path, '') AS category_path
+       FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE b.is_complete = 1 ORDER BY b.id`,
+    [],
+  );
+  const books = rows.map((r) => ({ id: r.id, title: r.title, aliases: String(r.aliases).split('|').filter(Boolean), categoryPath: r.category_path, totalLines: r.total_lines }));
+  const byId = new Map(books.map((b) => [b.id, b]));
+  let pairs = refAlign.pairCommentaries(books);
+  if (o.bookIds) {
+    const only = new Set(o.bookIds);
+    pairs = pairs.filter((p) => only.has(p.commId) || only.has(p.baseId));
+  }
+  stats.pairs = pairs.length;
+  // Base books are reused by many commentaries (רש"י, רמב"ן, ... על בראשית): keep a few cached.
+  const unitCache = new Map();
+  const unitsOf = async (id) => {
+    let u = unitCache.get(id);
+    if (!u) {
+      const nodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [id]);
+      u = refAlign.bookUnits(nodes, byId.get(id).totalLines);
+      if (unitCache.size > 16) unitCache.delete(unitCache.keys().next().value);
+      unitCache.set(id, u);
+    }
+    return u;
+  };
+  const perTx = Math.max(1, o.booksPerTransaction || 20);
+  let inTx = false;
+  let pending = 0;
+  const commit = async () => {
+    if (!inTx) return;
+    await db.exec('COMMIT');
+    inTx = false;
+    pending = 0;
+    if (o.onCommit) await o.onCommit();
+  };
+  try {
+    for (let i = 0; i < pairs.length; i++) {
+      const stop = o.shouldStop ? o.shouldStop() : null;
+      if (stop) {
+        stats.stopped = stop;
+        break;
+      }
+      const { commId, baseId } = pairs[i];
+      const baseUnits = await unitsOf(baseId);
+      const commNodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [commId]);
+      const commUnits = refAlign.bookUnits(commNodes, byId.get(commId).totalLines);
+      const content = (await db.all('SELECT line_index FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId])).map((r) => r.line_index);
+      const aligned = await refAlign.alignUnits(baseUnits, commUnits, content, (unit) =>
+        db
+          .all('SELECT line_index AS line, clean_text AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end])
+          .then((r) => r.map((x) => ({ line: x.line, text: String(x.text).slice(0, 12) }))),
+      );
+      if (!inTx) {
+        await db.exec('BEGIN');
+        inTx = true;
+      }
+      await db.run('DELETE FROM ref_links WHERE comm_book_id = ? AND base_book_id = ?', [commId, baseId]);
+      await insertMany(
+        db,
+        'INSERT INTO ref_links (base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type)',
+        8,
+        aligned.map((a) => [baseId, a.baseStart, a.baseEnd, commId, a.commStart, a.commEnd, a.refKey, refAlign.linkTypeFor(byId.get(commId).title)]),
+      );
+      stats.aligned++;
+      stats.units += aligned.length;
+      pending++;
+      if (o.onBook) o.onBook({ index: i + 1, total: pairs.length, title: byId.get(commId).title });
+      if (pending >= perTx) await commit();
+    }
+    await commit();
+  } catch (e) {
+    if (inTx) await db.exec('ROLLBACK').catch(() => undefined);
+    throw e;
+  }
+  return stats;
+}
+
+/**
  * Merges FTS segments and refreshes planner statistics after indexing.
  *
  * Default ('optimize'): one statement that rewrites the whole FTS index (fine on the PC).
@@ -1001,6 +1132,7 @@ async function libraryCounts(db) {
     categories: await one('SELECT COUNT(*) AS n FROM categories'),
     paragraphs: await one('SELECT COUNT(*) AS n FROM paragraphs'),
     links: await one('SELECT COUNT(*) AS n FROM links'),
+    refLinks: (await hasTable(db, 'ref_links')) ? await one('SELECT COUNT(*) AS n FROM ref_links') : 0,
     tocNodes: await one('SELECT COUNT(*) AS n FROM toc_nodes'),
   };
 }
@@ -1008,6 +1140,7 @@ async function libraryCounts(db) {
 module.exports = {
   SCHEMA,
   INGESTION_SCHEMA,
+  REF_LINKS_SCHEMA,
   IngestionStopped,
   migrateSchema,
   readIngestionState,
@@ -1039,6 +1172,7 @@ module.exports = {
   pruneEmptyCategories,
   indexBooks,
   indexLinks,
+  indexRefLinks,
   finalizeIndex,
   libraryCounts,
 };

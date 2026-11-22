@@ -14,6 +14,11 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > pause on `AppState` background + auto-resume; `expo-keep-awake` during jobs; on-device core builds in
 > `core_library.build.db` until complete. APKs target `arm64-v8a` only (`plugins/withAndroidAbiFilters.js`).
 
+> **Commentary reference alignment (schema v4):** `ref_links` (base/commentary line ranges + canonical
+> `ref_key` like `פרק א|פסוק א`) is built in the links phase by `shared/refAlign.js` (`indexer.indexRefLinks`,
+> idempotent per commentary book, pause-safe). `shared/commentary.js` merges it with `links`; the drawer shows
+> whole commentary blocks per unit. Query-time Hebrew abbreviation/morphology engine: `shared/hebrewTorahDict.js`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

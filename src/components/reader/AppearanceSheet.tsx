@@ -8,6 +8,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-nat
 import { READER_FONTS, readerFont } from '../../fonts';
 import { FONT_SIZE, LINE_HEIGHT, useSettings, type ThemeName } from '../../state/settingsStore';
 import { palettes, radius, spacing, useThemedStyles, type Palette } from '../../theme';
+import { prepareDisplayText } from '../../../shared/reader';
 import { BottomSheet } from '../Overlay';
 import { Slider } from '../Slider';
 
@@ -29,6 +30,7 @@ export function AppearanceSheet({ visible, onClose }: Props) {
   const lineHeight = useSettings((x) => x.lineHeight);
   const theme = useSettings((x) => x.theme);
   const showNiqqud = useSettings((x) => x.showNiqqud);
+  const showCantillation = useSettings((x) => x.showCantillation);
   const set = useSettings((x) => x.set);
   const reset = useSettings((x) => x.reset);
   const font = readerFont(fontFamily);
@@ -47,7 +49,7 @@ export function AppearanceSheet({ visible, onClose }: Props) {
           style={[s.preview, { fontFamily: font.regular, fontSize, lineHeight: fontSize * lineHeight }]}
           numberOfLines={2}
         >
-          {showNiqqud ? 'בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם וְאֵת הָאָרֶץ' : 'בראשית ברא אלהים את השמים ואת הארץ'}
+          {prepareDisplayText('בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים אֵ֥ת הַשָּׁמַ֖יִם וְאֵ֥ת הָאָֽרֶץ', { showNiqqud, showCantillation })}
         </Text>
 
         <Text style={s.label}>גופן</Text>
@@ -145,6 +147,21 @@ export function AppearanceSheet({ visible, onClose }: Props) {
             onValueChange={(v) => set({ showNiqqud: v })}
             accessibilityLabel="ניקוד וטעמים"
             testID="niqqud-switch"
+            {...switchColors(s.palette)}
+          />
+        </View>
+
+        <View style={[s.switchRow, !showNiqqud && { opacity: 0.45 }]}>
+          <View style={{ flex: 1 }}>
+            <Text style={s.label}>טעמי המקרא</Text>
+            <Text style={s.hint}>הסתרת הטעמים בלבד (הניקוד נשאר) — גם בחלונית המפרשים</Text>
+          </View>
+          <Switch
+            value={showNiqqud && showCantillation}
+            disabled={!showNiqqud}
+            onValueChange={(v) => set({ showCantillation: v })}
+            accessibilityLabel="טעמי המקרא"
+            testID="cantillation-switch"
             {...switchColors(s.palette)}
           />
         </View>

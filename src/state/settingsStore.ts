@@ -17,6 +17,8 @@ export interface AppearanceSettings {
   lineHeight: number;
   theme: ThemeName;
   showNiqqud: boolean;
+  /** Cantillation marks (טעמי המקרא); hidden whenever niqqud is hidden. */
+  showCantillation: boolean;
 }
 
 /** Commentary drawer: share of the reader height it takes. */
@@ -38,6 +40,7 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   lineHeight: LINE_HEIGHT.default,
   theme: 'light',
   showNiqqud: true,
+  showCantillation: true,
 };
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -65,12 +68,13 @@ export const useSettings = create<SettingsState>()(
       name: 'kodeshread.appearance',
       storage: createJSONStorage(() => AsyncStorage),
       version: 1,
-      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud, commentaryRatio, commentaryFollow }) => ({
+      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud, showCantillation, commentaryRatio, commentaryFollow }) => ({
         fontFamily,
         fontSize,
         lineHeight,
         theme,
         showNiqqud,
+        showCantillation,
         commentaryRatio,
         commentaryFollow,
       }),

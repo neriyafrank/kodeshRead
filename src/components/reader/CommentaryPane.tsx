@@ -2,9 +2,16 @@
  * Parallel commentaries drawer (Otzaria-style split view).
  *
  * A non-modal panel docked under the text: the reader stays scrollable above it.
- * It shows every entry linked to the selected paragraph (both directions of the
- * `links` table), grouped by commentator book (רש"י, תוספות, ...), rendered with the
- * active theme and typography. Each entry opens its book at that line in a tab.
+ * It shows everything linked to the selected paragraph, grouped by commentator book
+ * (רש"י, רמב"ן, אונקלוס, ...), rendered with the active theme, typography, niqqud and
+ * cantillation settings:
+ *  - heading-aligned units (Otzaria reference alignment, `ref_links`): the WHOLE block of
+ *    each commentator for the selected verse / amud / seif — every דיבור המתחיל, untruncated.
+ *    "פתח בספר" opens the commentary at the block and highlights all of it. From a
+ *    commentary, the same drawer shows the base text of its unit;
+ *  - explicit Otzaria line links (`links`); paragraphs a link file points at exactly are
+ *    marked inside their block.
+ * Each entry also opens its book at that line in a tab.
  *
  * - Drag the grabber to resize (persisted as a share of the reader height); tap it
  *   to toggle between a short and a tall drawer.
@@ -44,7 +51,8 @@ interface Props {
   onPrev: () => void;
   onNext: () => void;
   onClose: () => void;
-  onOpenEntry: (entry: { bookId: number; bookTitle: string; line: number }) => void;
+  /** `endLine`: highlight the whole unit up to this line (a commentary block). */
+  onOpenEntry: (entry: { bookId: number; bookTitle: string; line: number; endLine?: number }) => void;
   /** Resize drag started/ended (the web preview disables text selection meanwhile). */
   onDragging?: (dragging: boolean) => void;
 }
@@ -60,6 +68,7 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
   const lineHeight = useSettings((x) => x.lineHeight);
   const fontFamily = useSettings((x) => x.fontFamily);
   const showNiqqud = useSettings((x) => x.showNiqqud);
+  const showCantillation = useSettings((x) => x.showCantillation);
   const font = readerFont(fontFamily);
 
   // --- data --------------------------------------------------------------------
@@ -196,14 +205,35 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
                   {g.linkType && TYPE_LABEL[g.linkType] ? <Text style={s.typeTag}>{TYPE_LABEL[g.linkType]}</Text> : null}
                   <Text style={s.groupCount}>{g.entries.length}</Text>
                 </Pressable>
+                {!isCollapsed && g.block ? (
+                  <View style={s.blockBar} testID="commentary-block">
+                    <Text style={s.entryPath} numberOfLines={1}>
+                      {g.bookTitle} ‹ {g.block.refKey.split('|').join(' ‹ ')}
+                    </Text>
+                    <Pressable
+                      onPress={() => onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block!.start, endLine: g.block!.end })}
+                      hitSlop={8}
+                      style={s.openBtn}
+                      accessibilityRole="button"
+                      accessibilityLabel={`פתח את ${g.bookTitle} ב${g.block.refKey.split('|').join(' ')}`}
+                      testID="commentary-open-block"
+                    >
+                      <Text style={s.openText}>פתח בספר ↗</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
                 {isCollapsed
                   ? null
                   : g.entries.map((e) => (
-                      <View key={`${e.book_id}:${e.line}`} style={s.entry} testID="commentary-entry">
+                      <View
+                        key={`${e.book_id}:${e.line}`}
+                        style={[s.entry, g.block && e.direct ? { borderStartWidth: 3, borderStartColor: c.accent } : null]}
+                        testID={e.direct && g.block ? 'commentary-entry-direct' : 'commentary-entry'}
+                      >
                         <View style={s.entryMeta}>
                           <Text style={s.entryPath} numberOfLines={1}>
-                            {g.bookTitle}
-                            {e.toc_path ? ` ‹ ${e.toc_path.split(' > ').join(' ‹ ')}` : ''}
+                            {g.block ? '' : g.bookTitle}
+                            {e.toc_path && !g.block ? ` ‹ ${e.toc_path.split(' > ').join(' ‹ ')}` : ''}
                           </Text>
                           <Pressable
                             onPress={() => onOpenEntry({ bookId: e.book_id, bookTitle: e.book_title, line: e.line })}
@@ -217,7 +247,7 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
                           </Pressable>
                         </View>
                         <RichText
-                          html={prepareDisplayText(e.display_text ?? '—', { showNiqqud })}
+                          html={prepareDisplayText(e.display_text ?? '—', { showNiqqud, showCantillation })}
                           fontSize={entrySize}
                           boldFamily={font.bold}
                           style={[s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: Math.round(entrySize * lineHeight) }]}
@@ -314,6 +344,7 @@ const createStyles = (c: Palette) =>
     message: { textAlign: 'center', marginTop: spacing.lg, fontSize: 15, color: c.textMuted },
     scroll: { paddingBottom: spacing.xl },
     group: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+    blockBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingTop: spacing.sm },
     groupHeader: {
       flexDirection: 'row',
       alignItems: 'center',

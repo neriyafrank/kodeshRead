@@ -31,7 +31,8 @@ export interface ScannedLinkFile<H = unknown> {
 export interface ParsedBook {
   title: string;
   paragraphs: { lineIndex: number; tocPath: string | null; display: string; clean: string; isHeading: number }[];
-  toc: { parentIdx: number | null; level: number; title: string; refKey: string; startLine: number }[];
+  /** refPath: canonical unit reference ("פרק א|פסוק א", "דף ב|עמוד א") used for commentary alignment. */
+  toc: { parentIdx: number | null; level: number; title: string; refKey: string; refPath: string; startLine: number }[];
   totalLines: number;
 }
 
@@ -132,11 +133,24 @@ export interface LibraryCounts {
   categories: number;
   paragraphs: number;
   links: number;
+  /** Heading-aligned commentary units (schema v4 ref_links). */
+  refLinks: number;
   tocNodes: number;
+}
+
+export interface RefLinkStats {
+  /** Commentary / base book pairs found. */
+  pairs: number;
+  /** Pairs aligned in this run. */
+  aligned: number;
+  /** ref_links rows written. */
+  units: number;
+  stopped: 'pause' | 'cancel' | null;
 }
 
 export const SCHEMA: string;
 export const INGESTION_SCHEMA: string;
+export const REF_LINKS_SCHEMA: string;
 export class IngestionStopped extends Error {
   constructor(reason?: StopReason);
   reason: StopReason;
@@ -174,6 +188,17 @@ export function indexBooks<H>(
   fsa: FsAdapter<H>,
   opts: IndexBooksOptions<H>,
 ): Promise<IndexBooksStats>;
+/** Heading-based (Otzaria reference-alignment) commentary links; idempotent per commentary book. */
+export function indexRefLinks(
+  db: WriterDb,
+  opts?: {
+    bookIds?: number[];
+    booksPerTransaction?: number;
+    shouldStop?: () => 'pause' | 'cancel' | null | undefined;
+    onBook?: (p: { index: number; total: number; title: string }) => void;
+    onCommit?: () => Promise<void>;
+  },
+): Promise<RefLinkStats>;
 export function indexLinks<H>(
   db: WriterDb,
   fsa: FsAdapter<H>,

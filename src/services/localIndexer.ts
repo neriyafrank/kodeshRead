@@ -241,6 +241,15 @@ async function runPhasesInner(
 
   if (phase !== 'finalize') {
     try {
+      // Heading-based commentary alignment first (idempotent per commentary book, so a resumed
+      // links phase simply redoes it), then the explicit Otzaria link files.
+      const ref = await indexer.indexRefLinks(w, {
+        booksPerTransaction: 20,
+        shouldStop: stopRequest,
+        onBook: (b) => progress('מיישר פרשנים לפי כותרות…', b.index / b.total, `${b.index} / ${b.total} · ${b.title}`),
+        onCommit,
+      });
+      if (ref.stopped) throw new indexer.IngestionStopped(ref.stopped);
       out.links = await indexLinksWithProgress(db, p.linkFiles);
     } catch (e) {
       if (e instanceof indexer.IngestionStopped) {

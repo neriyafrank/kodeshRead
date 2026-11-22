@@ -32,6 +32,7 @@ const sources = require('../shared/sources');
 const release = require('../shared/release');
 const dict = require('../shared/hebrewTorahDict');
 const quickJump = require('../shared/quickJump');
+const refAlign = require('../shared/refAlign');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -462,14 +463,17 @@ async function main() {
       assert.ok(n >= 20, `links=${n}`);
       const shabbat = (await db.all("SELECT id FROM books WHERE title='שבת'", []))[0].id;
       const counts = await commentary.fetchLinkCounts(db, shabbat, 1, 30);
-      assert.strictEqual(counts.get(3), 3, `line 3: ${counts.get(3)}`); // 2x רש"י + תוספות
+      assert.strictEqual(counts.get(3), 3, `line 3: ${counts.get(3)}`); // 2x רש"י + תוספות (line links)
+      assert.strictEqual(counts.get(2), 2, 'amud heading: רש"י + תוספות aligned units');
       assert.ok(!counts.has(4));
       const rows = commentary.attachLinkCounts(await reader.fetchRange(db, shabbat, 1, 10), counts);
       assert.strictEqual(rows.find((r) => r.line_index === 3).link_count, 3);
       assert.strictEqual(rows.find((r) => r.line_index === 4).link_count, 0);
+      // The whole aligned amud block of each commentator; the explicitly linked dibburim are `direct`.
       const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, shabbat, 3));
-      assert.deepStrictEqual(groups.map((g) => [g.name, g.entries.length]), [['רש"י', 2], ['תוספות', 1]]);
+      assert.deepStrictEqual(groups.map((g) => [g.name, g.entries.length, g.entries.filter((e) => e.direct).length]), [['רש"י', 6, 2], ['תוספות', 2, 1]]);
       assert.ok(groups[0].entries.every((e) => e.display_text && e.toc_path === 'דף ב.'), JSON.stringify(groups[0].entries));
+      assert.deepStrictEqual(groups[0].block, { refKey: 'דף ב|עמוד א', start: 2, end: 8 });
       // Reverse direction: from the commentary back to the Gemara line.
       const rashi = groups[0].bookId;
       const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, rashi, groups[0].entries[0].line));
@@ -660,9 +664,218 @@ async function main() {
   await dualDbTests();
   await releaseTests();
   await resumableIngestionTests();
+  await refAlignTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
+}
+
+/** Otzaria reference alignment: heading-based commentary units (ref_links, schema v4). */
+async function refAlignTests() {
+  await check('refAlign: canonical unit labels / ref keys', () => {
+    const k = (t) => refAlign.refKeyOf(refAlign.unitLabels(t));
+    assert.strictEqual(k('פרק א'), 'פרק א');
+    assert.strictEqual(k('פֶּרֶק א׳'), 'פרק א');
+    assert.strictEqual(k('פסוק א'), 'פסוק א');
+    assert.strictEqual(k('סימן שכ"ח'), 'סימן שכח');
+    assert.strictEqual(k('סעיף ד'), 'סעיף ד');
+    assert.strictEqual(k('סעיף קטן ג'), 'סעיף קטן ג');
+    assert.strictEqual(k('דף ב.'), 'דף ב|עמוד א');
+    assert.strictEqual(k('דף ב ע"ב'), 'דף ב|עמוד ב');
+    assert.strictEqual(k('ב:'), 'דף ב|עמוד ב');
+    assert.strictEqual(k('עמוד א'), 'עמוד א');
+    assert.strictEqual(k('משנה ג'), 'משנה ג');
+    assert.strictEqual(k('הלכה ב'), 'הלכה ב');
+    assert.strictEqual(k('פרק א - בריאת העולם'), 'פרק א');
+    assert.strictEqual(k(''), '');
+    // parseBook exposes the full path of every heading.
+    const pb = indexer.parseBook('<h1>ס</h1>\n<h2>פרק א</h2>\n<h3>פסוק ב</h3>\nטקסט\n<h2>דף ג</h2>\n<h3>עמוד ב</h3>\nא', 'ס');
+    assert.deepStrictEqual(pb.toc.map((t) => t.refPath), ['פרק א', 'פרק א|פסוק ב', 'דף ג', 'דף ג|עמוד ב']);
+  });
+  await check('reader: cantillation toggle strips only te\'amim (also in the commentary drawer)', () => {
+    const v = 'בְּרֵאשִׁ֖ית בָּרָ֣א';
+    const noTeamim = reader.prepareDisplayText(v, { showNiqqud: true, showCantillation: false });
+    assert.ok(!/[\u0591-\u05AF]/.test(noTeamim), 'no te\'amim');
+    assert.ok(/[\u05B0-\u05BC]/.test(noTeamim), 'niqqud kept');
+    assert.strictEqual(reader.prepareDisplayText(v, { showNiqqud: false, showCantillation: true }), 'בראשית ברא');
+    assert.strictEqual(reader.prepareDisplayText(v), v);
+  });
+  await check('refAlign: commentary <-> base pairing (Otzaria naming + known bases)', () => {
+    const b = (id, title, categoryPath, aliases) => ({ id, title, categoryPath, aliases: aliases || [] });
+    const books = [
+      b(1, 'בראשית', 'תנך/תורה'), b(2, 'רש"י על בראשית', 'תנך/מפרשים'), b(3, 'רמב"ן על שמות', 'תנך/מפרשים'), b(4, 'שמות', 'תנך/תורה'),
+      b(5, 'ברכות', 'משנה/סדר זרעים'), b(6, 'ברכות', 'תלמוד בבלי/סדר זרעים'), b(7, 'ברטנורא על משנה ברכות', 'משנה/מפרשים'),
+      b(8, 'רש"י על ברכות', 'תלמוד בבלי/מפרשים'), b(9, 'שולחן ערוך - אורח חיים', 'הלכה/שולחן ערוך'), b(10, 'משנה ברורה', 'הלכה'),
+      b(11, 'תוספות על מסכת בבא קמא', 'תלמוד בבלי/מפרשים'), b(12, 'בבא קמא', 'תלמוד בבלי/סדר נזיקין'), b(13, 'אבן עזרא על תהילים', 'תנך/מפרשים'),
+      b(14, 'מגילת אסתר', 'תנך'), b(15, 'פירוש על ספר שלא קיים', 'תנך/מפרשים'),
+    ];
+    const pairs = Object.fromEntries(refAlign.pairCommentaries(books).map((p) => [p.commId, p.baseId]));
+    assert.deepStrictEqual(pairs, { 2: 1, 3: 4, 7: 5, 8: 6, 10: 9, 11: 12 });
+  });
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-refalign-'));
+  try {
+    const lib = path.join(tmp, 'lib');
+    const w = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true }); fs.writeFileSync(path.join(lib, rel), lines.join('\n')); };
+    // Base with verse headings + two commentaries, each verse with several דיבורים המתחילים.
+    w('תנך/תורה/בראשית.txt', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית ברא אלהים', '<h3>פסוק ב</h3>', 'והארץ היתה תהו ובהו', '<h2>פרק ב</h2>', '<h3>פסוק א</h3>', 'ויכלו השמים']);
+    w('תנך/מפרשים/רש"י על בראשית.txt', ['<h1>רש"י על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'ד"ה בראשית - רשי א1', 'ד"ה ברא - רשי א2', 'ד"ה אלהים - רשי א3', '<h3>פסוק ב</h3>', 'ד"ה תהו - רשי ב1', 'ד"ה ובהו - רשי ב2', '<h2>פרק ב</h2>', '<h3>פסוק א</h3>', 'ד"ה ויכלו - רשי ב-א']);
+    w('תנך/מפרשים/רמב"ן על בראשית.txt', ['<h1>רמב"ן על בראשית</h1>', '<h2>פרק א</h2>', 'הקדמת רמבן לפרק', '<h3>פסוק א</h3>', 'ד"ה בראשית - רמבן א1', 'ד"ה ברא - רמבן א2', '<h3>פסוק ב</h3>', 'ד"ה והארץ - רמבן ב1']);
+    // Base without verse headings: "(א)" markers / one verse per line.
+    w('תנך/נביאים/יונה.txt', ['<h1>יונה</h1>', '<h2>פרק א</h2>', '(א) ויהי דבר', '(ב) קום לך', '(ג) ויקם יונה']);
+    w('תנך/מפרשים/רש"י על יונה.txt', ['<h1>רש"י על יונה</h1>', '<h2>פרק א</h2>', '<h3>פסוק ב</h3>', 'ד"ה קום - רשי יונה']);
+    w('תנך/כתובים/רות.txt', ['<h1>רות</h1>', '<h2>פרק א</h2>', 'ויהי בימי שפט השפטים', 'ושם האיש אלימלך', 'וימת אלימלך']);
+    w('תנך/מפרשים/מצודת דוד על רות.txt', ['<h1>מצודת דוד על רות</h1>', '<h2>פרק א</h2>', '<h3>פסוק ג</h3>', 'ד"ה וימת - מצודה']);
+    // Talmud: nested "דף ב" > "עמוד א" in the base, "דף ב." / "דף ב:" in the commentary.
+    w('תלמוד בבלי/סדר זרעים/ברכות.txt', ['<h1>ברכות</h1>', '<h2>דף ב</h2>', '<h3>עמוד א</h3>', 'מאימתי קורין', '<h3>עמוד ב</h3>', 'גמרא עמוד ב']);
+    w('תלמוד בבלי/מפרשים/תוספות על ברכות.txt', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב.</h2>', 'ד"ה מאימתי - תוס', '<h2>דף ב:</h2>', 'ד"ה גמרא - תוס ב']);
+    // Mishnah of the same name must not be confused with the Talmud tractate.
+    w('משנה/סדר זרעים/ברכות.txt', ['<h1>ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'מאימתי קורין את שמע']);
+    w('משנה/מפרשים/ברטנורא על משנה ברכות.txt', ['<h1>ברטנורא על משנה ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'ד"ה מאימתי - ברטנורא']);
+    // Shulchan Aruch + משנה ברורה (known base, seif katan -> siman).
+    w('הלכה/שולחן ערוך/שולחן ערוך - אורח חיים.txt', ['<h1>שולחן ערוך - אורח חיים</h1>', '<h2>סימן א</h2>', '<h3>סעיף א</h3>', 'יתגבר כארי', '<h3>סעיף ב</h3>', 'המשכים', '<h2>סימן ב</h2>', '<h3>סעיף א</h3>', 'לא ילבש']);
+    w('הלכה/משנה ברורה.txt', ['<h1>משנה ברורה</h1>', '<h2>סימן א</h2>', '<h3>סעיף קטן א</h3>', 'מב סימן א סק א', '<h3>סעיף קטן ב</h3>', 'מב סימן א סק ב']);
+    // Explicit Otzaria link file for רש"י: overlaps the heading alignment (must not duplicate).
+    const links = path.join(tmp, 'links');
+    fs.mkdirSync(links);
+    fs.writeFileSync(path.join(links, 'רש"י על בראשית_links.json'), JSON.stringify([{ line_index_1: 4, line_index_2: 4, path_2: 'בראשית.txt', 'Conection Type': 'commentary' }, { line_index_1: 8, line_index_2: 6, path_2: 'בראשית.txt', 'Conection Type': 'commentary' }]));
+    const out = path.join(tmp, 'ref.db');
+    const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${links}`], { encoding: 'utf8' });
+    if (proc.status !== 0) throw new Error('ref fixture build failed:\n' + proc.stderr);
+    await check('refAlign: build reports aligned units', () => assert.ok(/ref links: 7 commentary\/base pair\(s\)/.test(proc.stdout), proc.stdout));
+
+    const db = openWritable(out);
+    const r = db.read;
+    const id = async (title, cat) => (await r.all('SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE b.title = ? AND c.path LIKE ?', [title, (cat || '') + '%']))[0].id;
+    const BR = await id('בראשית');
+    const RASHI = await id('רש"י על בראשית');
+    const RAMBAN = await id('רמב"ן על בראשית');
+    const texts = async (bookId, line) => {
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, bookId, line));
+      return Object.fromEntries(groups.map((g) => [g.name, g.entries.map((e) => e.display_text.split(' - ')[1] || e.display_text)]));
+    };
+
+    await check('refAlign: פסוק א links to ALL its dibburim in both commentaries, never פסוק ב', async () => {
+      const rows = await r.all('SELECT comm_book_id, ref_key, base_start, base_end, comm_start, comm_end FROM ref_links WHERE base_book_id = ? ORDER BY comm_book_id, comm_start', [BR]);
+      const rk = rows.map((x) => [x.comm_book_id === RASHI ? 'רשי' : 'רמבן', x.ref_key, x.base_start, x.base_end, x.comm_start, x.comm_end]);
+      const expected = [
+        ['רשי', 'פרק א|פסוק א', 3, 4, 3, 6],
+        ['רשי', 'פרק א|פסוק ב', 5, 6, 7, 9],
+        ['רשי', 'פרק ב|פסוק א', 8, 9, 11, 12],
+        ['רמבן', 'פרק א', 2, 6, 2, 3],
+        ['רמבן', 'פרק א|פסוק א', 3, 4, 4, 6],
+        ['רמבן', 'פרק א|פסוק ב', 5, 6, 7, 8],
+      ];
+      const order = (x) => (x[0] === 'רשי' ? RASHI : RAMBAN) * 1000 + x[4];
+      assert.deepStrictEqual(rk, expected.sort((a, b) => order(a) - order(b)));
+      // Selecting the verse text (or its heading) shows every dibbur of that verse only.
+      for (const line of [3, 4]) {
+        const t = await texts(BR, line);
+        assert.deepStrictEqual(t['רש"י'], ['רשי א1', 'רשי א2', 'רשי א3'], `line ${line}`);
+        assert.deepStrictEqual(t['רמב"ן'], ['רמבן א1', 'רמבן א2'], `line ${line}`);
+      }
+      const t2 = await texts(BR, 6);
+      assert.deepStrictEqual(t2['רש"י'], ['רשי ב1', 'רשי ב2']);
+      assert.deepStrictEqual(t2['רמב"ן'], ['רמבן ב1']);
+      assert.ok(!JSON.stringify(t2).includes('א1'), 'no bleed from פסוק א');
+      const t3 = await texts(BR, 9);
+      assert.deepStrictEqual(t3['רש"י'], ['רשי ב-א']);
+      assert.ok(!t3['רמב"ן'], 'רמב"ן has nothing on פרק ב');
+      // The chapter intro of רמב"ן is shown at the chapter heading.
+      assert.deepStrictEqual((await texts(BR, 2))['רמב"ן'], ['הקדמת רמבן לפרק']);
+    });
+    await check('refAlign: block metadata, explicit links merged without duplicates', async () => {
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, BR, 4));
+      const rashi = groups.find((g) => g.bookId === RASHI);
+      assert.deepStrictEqual(rashi.block, { refKey: 'פרק א|פסוק א', start: 3, end: 6 });
+      assert.strictEqual(rashi.entries.length, 3, 'line link (rashi 4 <-> בראשית 4) is inside the block: no duplicate');
+      assert.deepStrictEqual(rashi.entries.map((e) => !!e.direct), [true, false, false]);
+      // An explicit link outside the selected unit still shows (rashi 8 <-> בראשית 6).
+      const g6 = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, BR, 6)).find((g) => g.bookId === RASHI);
+      assert.strictEqual(g6.entries.length, 2);
+      assert.ok(g6.entries.find((e) => e.line === 8).direct);
+    });
+    await check('refAlign: bidirectional lookup (commentary -> base unit text)', async () => {
+      for (const line of [4, 5, 6]) {
+        const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, RASHI, line));
+        assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries.map((e) => e.line)]), [['בראשית', [4]]], `rashi line ${line}`);
+        assert.deepStrictEqual(back[0].block, { refKey: 'פרק א|פסוק א', start: 3, end: 4 });
+      }
+      const units = await commentary.fetchUnitLinks(r, RAMBAN, 8);
+      assert.deepStrictEqual(units.map((u) => [u.role, u.refKey, u.otherStart, u.otherEnd]), [['comm', 'פרק א|פסוק ב', 5, 6]]);
+      const fromBase = await commentary.fetchUnitLinks(r, BR, 5);
+      assert.deepStrictEqual(fromBase.map((u) => [u.otherBookId, u.otherStart, u.otherEnd]).sort((a, b) => a[0] - b[0]), [[RASHI, 7, 9], [RAMBAN, 7, 8]].sort((a, b) => a[0] - b[0]));
+    });
+    await check('refAlign: link-count badges on unit starts', async () => {
+      const counts = await commentary.fetchLinkCounts(r, BR, 1, 9);
+      assert.strictEqual(counts.get(3), 2, 'פסוק א: רש"י + רמב"ן');
+      assert.strictEqual(counts.get(2), 1, 'פרק א: רמב"ן intro');
+      assert.strictEqual(counts.get(4), 1, 'explicit line link');
+      assert.ok(!counts.has(7), 'no unit starts on a content line');
+      const back = await commentary.fetchLinkCounts(r, RASHI, 1, 12);
+      assert.strictEqual(back.get(3), 1);
+    });
+    await check('refAlign: inline verses, Talmud amud notation, Mishnah vs Talmud, Shulchan Aruch', async () => {
+      const yona = await id('יונה');
+      assert.deepStrictEqual((await texts(yona, 4))['רש"י'], ['רשי יונה'], '"(ב)" marker');
+      assert.ok(!(await texts(yona, 3))['רש"י'], 'verse א has no commentary');
+      const ruth = await id('רות');
+      assert.deepStrictEqual((await texts(ruth, 5))['מצודת דוד'], ['מצודה'], 'one verse per line');
+      assert.ok(!(await texts(ruth, 4))['מצודת דוד']);
+      const brachot = await id('ברכות', 'תלמוד בבלי');
+      assert.deepStrictEqual((await texts(brachot, 4))['תוספות'], ['תוס'], 'דף ב. == דף ב > עמוד א');
+      assert.deepStrictEqual((await texts(brachot, 6))['תוספות'], ['תוס ב']);
+      const mishna = await id('ברכות', 'משנה');
+      assert.deepStrictEqual((await texts(mishna, 4))['ברטנורא'], ['ברטנורא']);
+      assert.ok(!(await texts(brachot, 4))['ברטנורא'], 'ברטנורא is not paired with the Talmud');
+      const oc = await id('שולחן ערוך - אורח חיים');
+      const mb = (await texts(oc, 4))['משנה ברורה'];
+      assert.deepStrictEqual(mb, ['מב סימן א סק א', 'מב סימן א סק ב'], 'ס"ק aligned at the siman');
+      assert.ok(!(await texts(oc, 9))['משנה ברורה'], 'not on סימן ב');
+    });
+    await check('refAlign: lookup latency < 5ms', async () => {
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 200; i++) {
+        await commentary.fetchUnitLinks(r, BR, 4);
+        await commentary.fetchLinkedEntries(r, BR, 6);
+      }
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / 200;
+      assert.ok(ms < 5, `avg ${ms.toFixed(2)}ms`);
+      console.log(`  commentary unit lookup avg ${ms.toFixed(3)}ms`);
+    });
+    await check('refAlign: resumable + idempotent (pause mid-phase, re-run, same rows)', async () => {
+      const snapshot = async () => (await r.all('SELECT base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key FROM ref_links ORDER BY comm_book_id, comm_start', [])).map((x) => Object.values(x).join(','));
+      const full = await snapshot();
+      await db.w.exec('DELETE FROM ref_links');
+      let calls = 0;
+      const paused = await indexer.indexRefLinks(db.w, { booksPerTransaction: 1, shouldStop: () => (++calls > 3 ? 'pause' : null) });
+      assert.strictEqual(paused.stopped, 'pause');
+      assert.ok(paused.aligned === 3 && (await snapshot()).length < full.length);
+      const resumed = await indexer.indexRefLinks(db.w, {});
+      assert.strictEqual(resumed.stopped, null);
+      assert.deepStrictEqual(await snapshot(), full, 're-run converges to the same rows');
+      await indexer.indexRefLinks(db.w, {});
+      assert.deepStrictEqual(await snapshot(), full, 'idempotent');
+    });
+    await check('refAlign: schema v3 -> v4 migration and book deletion', async () => {
+      await db.w.exec('DROP TABLE ref_links');
+      // A v3 database (no ref_links) still answers commentary lookups from `links`.
+      const v3 = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries({ all: (q, p) => r.all(q, p) }, BR, 4));
+      assert.deepStrictEqual(v3.map((g) => [g.name, g.entries.length]), [['רש"י', 1]]);
+      await indexer.migrateSchema(db.w);
+      assert.ok((await r.all("SELECT name FROM sqlite_master WHERE name = 'idx_ref_links_base'", [])).length === 1);
+      const st = await indexer.indexRefLinks(db.w, {});
+      assert.strictEqual(st.pairs, 7);
+      await db.w.exec('BEGIN');
+      await indexer.deleteBook(db.w, RASHI);
+      await db.w.exec('COMMIT');
+      assert.strictEqual((await r.all('SELECT COUNT(*) n FROM ref_links WHERE comm_book_id = ?', [RASHI]))[0].n, 0);
+      assert.ok(indexer.SCHEMA_VERSION >= 4);
+    });
+    db.raw.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 /** Synthetic library for the resumable-ingestion tests: `n` books in two folders + junk files. */

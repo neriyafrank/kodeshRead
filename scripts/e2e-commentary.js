@@ -46,9 +46,11 @@ try {
     await tid('quick-jump-result').first().click();
     await tid('para-3').waitFor({ timeout: 20000 });
 
-    // Badges: line 3 (מתני' יציאות השבת) has 2x רש"י + תוספות; line 4 has none.
+    // Badges: line 3 (מתני' יציאות השבת) has 2x רש"י + תוספות line links; line 4 has none;
+    // the amud heading (line 2) carries the heading-aligned units of רש"י and תוספות.
     assert.strictEqual((await tid('links-badge-3').innerText()).trim(), '3');
     assert.strictEqual(await tid('links-badge-4').count(), 0);
+    assert.strictEqual((await tid('links-badge-2').innerText()).trim(), '2');
     await shot('1-badges');
     step('link-count badges');
 
@@ -61,22 +63,31 @@ try {
     await tid('commentary-group').first().waitFor({ timeout: 10000 });
     const names = await tid('commentary-group-name').allInnerTexts();
     assert.deepStrictEqual(names, ['רש"י', 'תוספות']);
-    assert.strictEqual(await tid('commentary-entry').count(), 3);
+    // Whole aligned amud block per commentator (6 רש"י + 2 תוספות); the 3 explicitly linked are marked.
+    const entries = page.locator('[data-testid^="commentary-entry"]');
+    assert.strictEqual(await entries.count(), 8);
+    assert.strictEqual(await tid('commentary-entry-direct').count(), 3);
+    assert.strictEqual(await tid('commentary-open-block').count(), 2);
+    assert.ok((await tid('commentary-block').first().innerText()).includes('דף ב ‹ עמוד א'));
     await shot('2-drawer');
-    step('drawer groups by commentator');
+    step('drawer shows each commentator\'s full block for the amud');
 
-    // Switching paragraph while open re-syncs the drawer (line 4: no commentaries).
+    // Switching paragraph while open re-syncs the drawer (line 4: same amud block, no direct links).
     await tid('para-4').click();
-    await page.getByText('אין מפרשים לפסקה זו').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-entry-direct"]').length === 0);
+    assert.strictEqual(await page.locator('[data-testid^="commentary-entry"]').count(), 8);
     await tid('para-5').click();
     await tid('commentary-group').first().waitFor();
     assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י', 'תוספות']);
     step('drawer follows the tapped paragraph');
 
-    // Next paragraph with commentaries (line 7: רש"י only); the text scrolls with it.
+    // Next paragraph with commentaries (line 7: one רש"י line link); the text scrolls with it.
     await tid('commentary-next').click();
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-entry"]').length === 1);
-    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י']);
+    await page.waitForFunction(() => {
+      const d = [...document.querySelectorAll('[data-testid="commentary-entry-direct"]')];
+      return d.length === 1;
+    });
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י', 'תוספות']);
     await page.waitForTimeout(300);
     await shot('2b-next');
     const row = await tid('para-7').boundingBox();
@@ -138,6 +149,27 @@ try {
     const tabs = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.map((t) => t.bookTitle));
     assert.deepStrictEqual(tabs, ['שבת', 'רש"י על שבת']);
     step('commentary opens at its line in a new tab');
+
+    // Bidirectional: from a רש"י paragraph the drawer shows the base amud; "פתח בספר" opens the
+    // base book at the unit and highlights the whole block.
+    await tid('para-7').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].some((e) => e.innerText === 'שבת'));
+    await tid('commentary-open-block').first().click();
+    await page.waitForFunction(() => /^שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''));
+    // Rows whose highlight glow (an absolutely positioned, coloured layer) is visible; the
+    // existing שבת tab shows its breadcrumb before the jump lands, so poll.
+    const litRows = () =>
+      [...document.querySelectorAll('[data-testid^="para-"]')].filter((p) =>
+        [...p.querySelectorAll('div')].some((ch) => {
+          const cs = getComputedStyle(ch);
+          return cs.position === 'absolute' && parseFloat(cs.opacity) > 0.5 && !/rgba\(0, 0, 0, 0\)|transparent/.test(cs.backgroundColor) && ch.getBoundingClientRect().height > 20;
+        }),
+      ).length;
+    await page.waitForFunction(`(${litRows.toString()})() >= 3`, null, { timeout: 5000 }).catch(() => undefined);
+    const lit = await page.evaluate(`(${litRows.toString()})()`);
+    assert.ok(lit >= 3, `whole unit highlighted (${lit} rows)`);
+    await shot('5-block-open');
+    step(`"פתח בספר" opens the base unit and highlights the block (${lit} rows)`);
 
     const real = errors.filter((e) => !/favicon|DevTools|Download the React DevTools/.test(e));
     assert.deepStrictEqual(real, [], 'console errors');

@@ -125,6 +125,27 @@ Abbreviations, other spellings and structural words are understood (`shared/hebr
 `מ"ב` · `שלחן ערוך אורח חיים כה`. A fully resolved reference shows a **פתח: ספר — מיקום** card on top.
 The search scope picker's book filter is abbreviation-aware too.
 
+## Commentaries: Otzaria reference alignment
+
+Base books and their commentaries share parallel heading trees in Otzaria (פרק › פסוק, דף › עמוד,
+סימן › סעיף). In the links phase (`shared/refAlign.js`, called from `shared/indexer.js indexRefLinks`):
+
+- every heading becomes canonical unit labels, so each TOC node gets a reference path
+  (`פרק א|פסוק א`, `דף ב|עמוד א` — `דף ב.` and `דף ב` › `עמוד א` are the same unit, `סימן שכח|סעיף ד`);
+- commentaries are paired with their base book by Otzaria naming (`רש"י על בראשית`,
+  `ברטנורא על משנה ברכות` → the Mishnah, not the Talmud) and known bases (`משנה ברורה` → `אורח חיים`);
+- every commentary unit with its own text (all its דיבורים המתחילים) is stored in `ref_links` with the
+  base unit of the same path, as two line ranges. A base without verse headings gets the verse from
+  `(א)` markers or one-verse-per-line. Leaves the base lacks (`סעיף קטן`) align at the siman.
+  Verses never fall back to the whole chapter.
+
+Lookups use `(book, partner, start)` indexes (one seek per commentator, ~0.5 ms). The reader drawer shows
+each commentator's **whole block** for the selected verse/amud, plus explicit Otzaria line links. Explicit
+links that fall inside a block are merged into it and marked, never duplicated. **פתח בספר** opens the block
+in the commentary, highlighting all of it. From a commentary, the drawer shows the base text of its unit.
+Schema v4; older read-only libraries keep working with line links only. Re-running the phase is idempotent,
+so pause/resume just redoes the remaining books.
+
 ## Hebrew Torah linguistic engine (search)
 
 `shared/hebrewTorahDict.js` is a zero-dependency module shared by search and Quick Jump. It works

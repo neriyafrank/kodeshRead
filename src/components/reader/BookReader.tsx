@@ -81,6 +81,7 @@ interface Typography {
   regular: string | undefined;
   bold: string | undefined;
   showNiqqud: boolean;
+  showCantillation: boolean;
   palette: Palette;
 }
 
@@ -96,6 +97,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const lineHeight = useSettings((s) => s.lineHeight);
   const fontFamily = useSettings((s) => s.fontFamily);
   const showNiqqud = useSettings((s) => s.showNiqqud);
+  const showCantillation = useSettings((s) => s.showCantillation);
   const updatePosition = useTabs((s) => s.updatePosition);
   const openBook = useTabs((s) => s.openBook);
   const commentaryFollow = useSettings((s) => s.commentaryFollow);
@@ -107,7 +109,8 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const { height: windowHeight } = useWindowDimensions();
   const [totalLines, setTotalLines] = useState<number | null>(null);
   const [win, setWin] = useState<WindowState | null>(null);
-  const [highlight, setHighlight] = useState<{ line: number; nonce: number; terms?: string[] } | null>(null);
+  // `end`: last highlighted line when a whole unit (commentary block / verse) is the target.
+  const [highlight, setHighlight] = useState<{ line: number; end?: number; nonce: number; terms?: string[] } | null>(null);
   const [topRow, setTopRow] = useState<{ line: number; tocPath: string | null }>({ line: tab.currentLineIndex, tocPath: tab.tocPath });
   const [error, setError] = useState<string | null>(null);
   /** Paragraph the commentary drawer is showing (null = drawer closed). */
@@ -128,8 +131,8 @@ export function BookReader({ tab, onOpenToc }: Props) {
   // --- typography -----------------------------------------------------------
   const font = readerFont(fontFamily);
   const typo = useMemo<Typography>(
-    () => ({ fontSize, lineHeight, regular: font.regular, bold: font.bold, showNiqqud, palette }),
-    [fontSize, lineHeight, font.regular, font.bold, showNiqqud, palette],
+    () => ({ fontSize, lineHeight, regular: font.regular, bold: font.bold, showNiqqud, showCantillation, palette }),
+    [fontSize, lineHeight, font.regular, font.bold, showNiqqud, showCantillation, palette],
   );
   const estimatedItemSize = estimateItemSize(fontSize, lineHeight);
 
@@ -201,7 +204,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   );
 
   const jumpTo = useCallback(
-    async (line: number, withHighlight: boolean, terms?: string[]) => {
+    async (line: number, withHighlight: boolean, terms?: string[], end?: number) => {
       const total = totalLines;
       if (total == null) return;
       const target = Math.min(Math.max(1, line), total);
@@ -222,7 +225,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         landed = await loadAround(target, total, 0);
       }
       showHeader(true);
-      if (withHighlight) setHighlight({ line: landed, nonce: Date.now(), terms });
+      if (withHighlight) setHighlight({ line: landed, end: end != null && end > landed ? end : undefined, nonce: Date.now(), terms });
     },
     [totalLines, loadAround, showHeader, scheduleSave],
   );
@@ -240,7 +243,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         if (pj && pj.tabId === tabId) {
           consumeJump(pj.nonce);
           const landed = await loadAround(pj.line, book.total_lines, 0);
-          if (alive && pj.highlight) setHighlight({ line: landed, nonce: pj.nonce, terms: pj.terms });
+          if (alive && pj.highlight) setHighlight({ line: landed, end: pj.highlightEnd != null && pj.highlightEnd > landed ? pj.highlightEnd : undefined, nonce: pj.nonce, terms: pj.terms });
         } else {
           const saved = useTabs.getState().tabs.find((t) => t.tabId === tabId);
           await loadAround(saved?.currentLineIndex ?? 1, book.total_lines, saved?.lineOffset ?? 0);
@@ -261,7 +264,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   useEffect(() => {
     if (!pendingJump || totalLines == null || !winRef.current) return;
     consumeJump(pendingJump.nonce);
-    jumpTo(pendingJump.line, pendingJump.highlight, pendingJump.terms);
+    jumpTo(pendingJump.line, pendingJump.highlight, pendingJump.terms, pendingJump.highlightEnd);
   }, [pendingJump, totalLines, consumeJump, jumpTo]);
 
   // Highlight lasts 2 seconds.
@@ -401,7 +404,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
         typo={typo}
         selected={item.line_index === selectedLine}
         onPress={onPressRow}
-        highlightNonce={highlight && highlight.line === item.line_index ? highlight.nonce : 0}
+        highlightNonce={highlight && item.line_index >= highlight.line && item.line_index <= (highlight.end ?? highlight.line) ? highlight.nonce : 0}
         highlightTerms={highlight && highlight.line === item.line_index ? highlight.terms : undefined}
       />
     ),
@@ -494,7 +497,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
           onDragging={setResizing}
           onOpenEntry={(e) => {
             flush();
-            openBook({ bookId: e.bookId, bookTitle: e.bookTitle }, { line: e.line, highlight: true });
+            openBook({ bookId: e.bookId, bookTitle: e.bookTitle }, { line: e.line, highlight: true, highlightEnd: e.endLine });
           }}
         />
       ) : null}
@@ -516,10 +519,10 @@ interface RowProps {
 
 const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms }: RowProps) {
   const html = useMemo(() => {
-    const prepared = prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud });
+    const prepared = prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud, showCantillation: typo.showCantillation });
     // The search hit stays marked for the highlight's lifetime (2 s), then the row re-renders plain.
     return highlightNonce && highlightTerms?.length ? markTerms(prepared, highlightTerms) : prepared;
-  }, [row.display_text, typo.showNiqqud, highlightNonce, highlightTerms]);
+  }, [row.display_text, typo.showNiqqud, typo.showCantillation, highlightNonce, highlightTerms]);
   // Accent at ~35% alpha: stays visible on top of the (highlight-coloured) row glow.
   const markStyle = useMemo(() => ({ backgroundColor: `${typo.palette.accent}59`, borderRadius: 3 }), [typo.palette.accent]);
   const [glow] = useState(() => new Animated.Value(0));

@@ -31,6 +31,13 @@ function sanitizeInlineHtml(html) {
  */
 const NIQQUD_RE = /[֑-ֽֿ-ׂׄ-ׇ]/g;
 
+/** Cantillation only (te'amim U+0591–U+05AF): the vowel points stay. */
+const CANTILLATION_RE = /[\u0591-\u05AF]/g;
+
+function stripCantillation(text) {
+  return text ? String(text).replace(CANTILLATION_RE, '') : '';
+}
+
 function stripNiqqudForDisplay(text) {
   return text ? String(text).replace(NIQQUD_RE, '') : '';
 }
@@ -44,8 +51,10 @@ function needsRtlMark(text) {
 /** display_text from the DB -> string ready for <RichText>. */
 function prepareDisplayText(html, opts) {
   const showNiqqud = !opts || opts.showNiqqud !== false;
+  const showCantillation = !opts || opts.showCantillation !== false;
   let out = sanitizeInlineHtml(html);
   if (!showNiqqud) out = stripNiqqudForDisplay(out);
+  else if (!showCantillation) out = stripCantillation(out);
   if (needsRtlMark(out) && out[0] !== RLM) out = RLM + out;
   return out;
 }
@@ -171,6 +180,7 @@ module.exports = {
   MAX_WINDOW,
   sanitizeInlineHtml,
   stripNiqqudForDisplay,
+  stripCantillation,
   needsRtlMark,
   prepareDisplayText,
   windowAround,

@@ -258,6 +258,9 @@ async function main() {
     onError: (f, e) => console.warn(`[build-db] WARNING: could not parse ${f.rel.join('/')}: ${e.message}`),
   });
   reportLinks(linkStats, args.links);
+  // Otzaria reference alignment: commentary units <-> base units by canonical heading path.
+  const refStats = await indexer.indexRefLinks(db, { booksPerTransaction: Number.MAX_SAFE_INTEGER });
+  console.log(`[build-db] ref links: ${refStats.pairs} commentary/base pair(s), ${refStats.units} aligned unit(s)`);
   reportAmbiguousAliases(raw);
 
   await indexer.finalizeIndex(db, { analyze: true });
