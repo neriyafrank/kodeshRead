@@ -18,6 +18,8 @@ export interface ReaderTab {
   tocPath: string | null;
   /** Pixels the top visible paragraph is scrolled past the viewport top (exact restore). */
   lineOffset: number;
+  /** Last time the tab was opened or activated (ms), for "recent first" ordering. */
+  lastUsed?: number;
 }
 
 export interface JumpRequest {
@@ -31,7 +33,8 @@ export interface JumpRequest {
   nonce: number;
 }
 
-export const MAX_TABS = 12;
+/** Studying with many sources open is normal: the oldest inactive tab is dropped beyond this. */
+export const MAX_TABS = 40;
 
 interface TabsState {
   tabs: ReaderTab[];
@@ -41,6 +44,10 @@ interface TabsState {
   openBook: (book: { bookId: number; bookTitle: string }, opts?: { line?: number; highlight?: boolean; highlightEnd?: number; terms?: string[]; newTab?: boolean }) => string;
   activate: (tabId: string) => void;
   closeTab: (tabId: string) => void;
+  /** Keeps only `tabId` (and activates it). */
+  closeOthers: (tabId: string) => void;
+  /** Closes the tabs visually to the LEFT of `tabId` in the RTL strip (the ones after it). */
+  closeToLeft: (tabId: string) => void;
   closeAll: () => void;
   /** Closes every tab for which `keep` returns false (e.g. its book no longer exists). */
   pruneTabs: (keep: (tab: ReaderTab) => boolean) => void;
@@ -66,12 +73,15 @@ export const useTabs = create<TabsState>()(
         // Opening a book from the tree without a target restores where you left off.
         const keepPosition = existing && opts.line == null;
         const tabId = existing?.tabId ?? newTabId();
-        let next = tabs;
+        const now = Date.now();
+        let next = existing ? tabs.map((t) => (t.tabId === tabId ? { ...t, lastUsed: now } : t)) : tabs;
         if (!existing) {
-          next = [...tabs, { tabId, bookId, bookTitle, currentLineIndex: line, tocPath: null, lineOffset: 0 }];
+          next = [...tabs, { tabId, bookId, bookTitle, currentLineIndex: line, tocPath: null, lineOffset: 0, lastUsed: now }];
           if (next.length > MAX_TABS) {
+            // Drop the least recently used inactive tab.
             const active = get().activeTabId;
-            const drop = next.find((t) => t.tabId !== active && t.tabId !== tabId);
+            const candidates = next.filter((t) => t.tabId !== active && t.tabId !== tabId);
+            const drop = candidates.reduce<ReaderTab | undefined>((a, t) => (!a || (t.lastUsed ?? 0) < (a.lastUsed ?? 0) ? t : a), undefined);
             next = next.filter((t) => t !== drop);
           }
         }
@@ -85,7 +95,23 @@ export const useTabs = create<TabsState>()(
         return tabId;
       },
 
-      activate: (tabId) => set({ activeTabId: tabId }),
+      activate: (tabId) => set((s) => ({ activeTabId: tabId, tabs: s.tabs.map((t) => (t.tabId === tabId ? { ...t, lastUsed: Date.now() } : t)) })),
+
+      closeOthers: (tabId) =>
+        set((s) => {
+          const keep = s.tabs.filter((t) => t.tabId === tabId);
+          if (!keep.length) return s;
+          return { tabs: keep, activeTabId: tabId, pendingJump: s.pendingJump?.tabId === tabId ? s.pendingJump : null };
+        }),
+
+      closeToLeft: (tabId) =>
+        set((s) => {
+          const idx = s.tabs.findIndex((t) => t.tabId === tabId);
+          if (idx < 0) return s;
+          const tabs = s.tabs.slice(0, idx + 1);
+          const activeTabId = tabs.some((t) => t.tabId === s.activeTabId) ? s.activeTabId : tabId;
+          return { tabs, activeTabId, pendingJump: s.pendingJump && tabs.some((t) => t.tabId === s.pendingJump?.tabId) ? s.pendingJump : null };
+        }),
 
       closeTab: (tabId) =>
         set((s) => {

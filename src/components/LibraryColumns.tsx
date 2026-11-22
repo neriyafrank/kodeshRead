@@ -15,10 +15,11 @@
  * the column contents are RTL. The selected path is persisted (useLibraryUi.columnPath).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { ActivityIndicator, FlatList, Platform, Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent, type ScrollViewInstance } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent, type ScrollViewInstance } from 'react-native';
 
 import { loadCatalog } from '../../shared/sources';
 import { useLibrary } from '../db/LibraryContext';
+import { LEFT_CHEVRON, nativeDir, setWebDir } from '../lib/direction';
 import { useLibraryUi } from '../state/libraryStore';
 import { BookIcon, FolderIcon } from './Icons';
 import { spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
@@ -82,22 +83,6 @@ function validPath(cat: Catalog, path: number[]): number[] {
   }
   return out;
 }
-
-/**
- * Writing direction of a subtree: Yoga's `direction` style on native. react-native-web neither
- * supports that style nor forwards a `dir` prop, so there the attribute is set on the DOM node.
- */
-const nativeDir = (direction: 'ltr' | 'rtl') => (Platform.OS === 'web' ? null : { direction });
-function setWebDir(node: unknown, dir: 'ltr' | 'rtl') {
-  if (Platform.OS !== 'web' || !node) return;
-  const el = (typeof (node as { getScrollableNode?: () => unknown }).getScrollableNode === 'function'
-    ? (node as { getScrollableNode: () => unknown }).getScrollableNode()
-    : node) as { setAttribute?: (k: string, v: string) => void } | null;
-  el?.setAttribute?.('dir', dir);
-}
-
-/** "‹" is bidi-mirrored (it would render as "›" in RTL text): LRM marks keep it pointing left. */
-const LEFT_CHEVRON = '\u200E‹\u200E';
 
 /** Columns that fit side by side: 2 on phones, 3 on small tablets, 4 on large screens. */
 export function visibleColumnCount(width: number): number {

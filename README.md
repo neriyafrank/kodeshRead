@@ -137,6 +137,22 @@ The search scope picker's book filter is abbreviation-aware too.
   active path is highlighted in every column and shown as a tappable breadcrumb. Shows ~2 columns on
   phones and 3–4 on tablets, with independent vertical scrolling. The selected path is saved.
 
+## Tabs & table of contents
+
+- **Tab bar:** two compact rows. Row 1 holds back, the RTL tab strip (title + current section, `×`) and
+  the open-tabs counter. Row 2 holds תוכן, search, טעמים / ניקוד and `Aa`. The active tab is always scrolled
+  into view. Long-press a tab to close it, close the others, or close the tabs to its left. Up to 40 tabs
+  stay open; beyond that the least recently used one is dropped.
+- **Tab switcher:** the counter opens a list of all tabs, most recently used first, with an instant filter
+  that understands abbreviations and other spellings (`shared/tabs.js` → `hebrewTorahDict`). Each card shows
+  the exact location and a folder badge. Header actions: close the other tabs, and close all (asks for a
+  second tap to confirm).
+- **TOC:** RTL cascading columns (`shared/tocColumns.js`). Top-level divisions are on the right; the
+  selected one's sub-items open in a column to its left, and deeper levels add further columns. Tanach
+  chapters without verse headings get a verse column built from their `(א)` lines. It opens synced to the
+  reading position. A filter jumps by name, gematria, digits or chapter + verse (`כז טו`). On phones it is
+  a slide-over drawer that closes after a jump; on screens ≥ 900 px it is docked beside the text.
+
 ## Commentaries: Otzaria reference alignment
 
 Base books and their commentaries share parallel heading trees in Otzaria (פרק › פסוק, דף › עמוד,

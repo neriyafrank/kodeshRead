@@ -1,17 +1,21 @@
 /**
- * Reading workspace: tab strip + the active tab's windowed reader, the TOC
- * drawer and the `Aa` appearance sheet. Only the active tab's reader is mounted;
- * the others are restored from their saved positions when re-activated.
+ * Reading workspace: two compact bars over the active tab's windowed reader.
+ *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher)
+ *   row 2: תוכן עניינים · search · טעמים / ניקוד · Aa
+ * The TOC (RTL cascading columns) is a slide-over drawer on phones and a docked panel beside the
+ * text on wide screens. Only the active tab's reader is mounted; the others are restored from
+ * their saved positions when re-activated.
  */
 import { Stack, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SearchIcon } from '../components/Icons';
 import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
 import { TabStrip } from '../components/reader/TabStrip';
+import { TabSwitcher } from '../components/reader/TabSwitcher';
 import { TocDrawer } from '../components/reader/TocDrawer';
 import { VocalizationToggles } from '../components/reader/VocalizationToggles';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
@@ -25,6 +29,10 @@ export default function ReaderWorkspace() {
   const requestJump = useTabs((x) => x.requestJump);
   const [tocOpen, setTocOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const { width } = useWindowDimensions();
+  // Tablets / desktop: the TOC docks beside the text and stays open after a jump.
+  const docked = width >= 900;
 
   const goLibrary = () => (router.canGoBack() ? router.back() : router.replace('/'));
 
@@ -35,9 +43,11 @@ export default function ReaderWorkspace() {
         <Pressable onPress={goLibrary} hitSlop={8} style={s.iconBtn} accessibilityRole="button" accessibilityLabel="חזרה לספרייה" testID="reader-back">
           <Text style={s.iconText}>→</Text>
         </Pressable>
-        <TabStrip />
+        <TabStrip onOpenSwitcher={() => setSwitcherOpen(true)} />
+      </View>
+      <View style={s.displayBar}>
         <Pressable
-          onPress={() => setTocOpen(true)}
+          onPress={() => setTocOpen((v) => !v)}
           disabled={!activeTab}
           hitSlop={6}
           style={s.iconBtn}
@@ -46,6 +56,7 @@ export default function ReaderWorkspace() {
           testID="toc-button"
         >
           <Text style={s.iconText}>☰</Text>
+          <Text style={s.barLabel}>תוכן</Text>
         </Pressable>
         <Pressable
           onPress={() =>
@@ -61,6 +72,7 @@ export default function ReaderWorkspace() {
         >
           <SearchIcon size={19} />
         </Pressable>
+        <View style={s.flex} />
         <VocalizationToggles />
         <Pressable
           onPress={() => setAppearanceOpen(true)}
@@ -75,7 +87,22 @@ export default function ReaderWorkspace() {
       </View>
 
       {activeTab ? (
-        <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} />
+        <View style={s.body}>
+          {docked ? (
+            <TocDrawer
+              docked
+              visible={tocOpen}
+              bookId={activeTab.bookId}
+              bookTitle={activeTab.bookTitle}
+              currentLine={activeTab.currentLineIndex}
+              onClose={() => setTocOpen(false)}
+              onSelect={(line) => requestJump(activeTab.tabId, line, true)}
+            />
+          ) : null}
+          <View style={s.flex}>
+            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} />
+          </View>
+        </View>
       ) : (
         <View style={s.empty}>
           <Text style={s.emptyText}>אין ספרים פתוחים</Text>
@@ -85,7 +112,7 @@ export default function ReaderWorkspace() {
         </View>
       )}
 
-      {activeTab ? (
+      {activeTab && !docked ? (
         <TocDrawer
           visible={tocOpen}
           bookId={activeTab.bookId}
@@ -99,6 +126,7 @@ export default function ReaderWorkspace() {
         />
       ) : null}
       <AppearanceSheet visible={appearanceOpen} onClose={() => setAppearanceOpen(false)} />
+      <TabSwitcher visible={switcherOpen} onClose={() => setSwitcherOpen(false)} />
     </View>
   );
 }
@@ -117,7 +145,21 @@ const createStyles = (c: Palette) =>
       borderBottomColor: c.border,
       zIndex: 2,
     },
-    iconBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
+    displayBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 3,
+      gap: spacing.xs,
+      backgroundColor: c.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.border,
+      zIndex: 2,
+    },
+    body: { flex: 1, flexDirection: 'row' },
+    flex: { flex: 1 },
+    barLabel: { fontSize: 13, fontWeight: '600', color: c.accent },
+    iconBtn: { minWidth: 40, height: 36, paddingHorizontal: 4, flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
     iconText: { fontSize: 20, color: c.accent },
     aaBtn: { backgroundColor: c.accentSoft },
     aaText: { fontSize: 17, fontWeight: '700', color: c.accent },

@@ -35,6 +35,9 @@ interface OverlayProps {
   onClose: () => void;
   children: ReactNode;
   testID?: string;
+  /** SideDrawer: widest size in dp (default 380) and share of the screen (default 0.86). */
+  maxWidth?: number;
+  widthRatio?: number;
 }
 
 export function BottomSheet({ visible, onClose, children, testID }: OverlayProps) {
@@ -63,13 +66,13 @@ export function BottomSheet({ visible, onClose, children, testID }: OverlayProps
   );
 }
 
-export function SideDrawer({ visible, onClose, children, testID }: OverlayProps) {
+export function SideDrawer({ visible, onClose, children, testID, maxWidth = 380, widthRatio = 0.86 }: OverlayProps) {
   const c = useAppTheme();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const { progress, mounted } = useAnimatedVisibility(visible);
   if (!mounted) return null;
-  const drawerWidth = Math.min(380, width * 0.86);
+  const drawerWidth = Math.min(maxWidth, width * widthRatio);
   // The drawer is anchored at `start` (right edge in RTL); hidden = pushed past that edge.
   const rtl = I18nManager.isRTL;
   const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [rtl ? drawerWidth : -drawerWidth, 0] });

@@ -50,6 +50,7 @@
     "e2e:search": "node scripts/e2e-search.js",
     "e2e:commentary": "node scripts/e2e-commentary.js",
     "e2e:library": "node scripts/e2e-library.js",
+    "e2e:reader": "node scripts/e2e-reader.js",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
     "prebuild:android": "expo prebuild --platform android --clean",

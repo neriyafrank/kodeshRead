@@ -692,6 +692,92 @@ async function refAlignTests() {
     const pb = indexer.parseBook('<h1>ס</h1>\n<h2>פרק א</h2>\n<h3>פסוק ב</h3>\nטקסט\n<h2>דף ג</h2>\n<h3>עמוד ב</h3>\nא', 'ס');
     assert.deepStrictEqual(pb.toc.map((t) => t.refPath), ['פרק א', 'פרק א|פסוק ב', 'דף ג', 'דף ג|עמוד ב']);
   });
+  await check('TOC columns: deep 3-level book (columns cascade, path follows the reading line)', () => {
+    const toc = require('../shared/tocColumns');
+    const n = (id, parent_id, level, title, start_line, ref_key) => ({ id, parent_id, level, title, start_line, ref_key });
+    // ספר > חלק > סימן > סעיף  (h2 > h3 > h4)
+    const nodes = [
+      n(1, null, 2, 'חלק א', 2, 'א'), n(2, 1, 3, 'סימן א', 3, 'א'), n(3, 2, 4, 'סעיף א', 4, 'א'), n(4, 2, 4, 'סעיף ב', 6, 'ב'),
+      n(5, 1, 3, 'סימן ב', 8, 'ב'), n(6, 5, 4, 'סעיף א', 9, 'א'), n(7, null, 2, 'חלק ב', 11, 'ב'), n(8, 7, 3, 'סימן כה', 12, 'כה'),
+    ];
+    const tree = toc.buildTocTree(nodes.slice().reverse()); // any input order
+    assert.strictEqual(tree.depth, 3);
+    assert.deepStrictEqual(tree.roots.map((x) => x.title), ['חלק א', 'חלק ב']);
+    assert.deepStrictEqual(toc.pathForLine(tree, 7), [1, 2, 4], 'line 7 is in חלק א > סימן א > סעיף ב');
+    assert.deepStrictEqual(toc.pathForLine(tree, 1), [], 'before the first heading');
+    const cols = toc.tocColumns(tree, [1, 2, 4]);
+    assert.deepStrictEqual(cols.map((c) => [c.depth, c.items.map((x) => x.id), c.selectedId]), [
+      [0, [1, 7], 1],
+      [1, [2, 5], 2],
+      [2, [3, 4], 4],
+    ]);
+    // Switching the top-level selection replaces the deeper columns (no stale column 2).
+    assert.deepStrictEqual(toc.tocColumns(tree, [7]).map((c) => c.items.map((x) => x.title)), [['חלק א', 'חלק ב'], ['סימן כה']]);
+    assert.deepStrictEqual(toc.tocColumns(tree, [1, 999]).length, 2, 'an invalid id stops the path');
+    assert.strictEqual(toc.nodeEnd(tree, tree.byId.get(2), 20), 7, 'סימן א ends before סימן ב');
+    assert.strictEqual(toc.nodeEnd(tree, tree.byId.get(7), 20), 20);
+    assert.deepStrictEqual(toc.nodeTrail(tree, 6), ['חלק א', 'סימן ב', 'סעיף א']);
+    assert.ok(toc.hasChildren(tree, 2) && !toc.hasChildren(tree, 3));
+  });
+  await check('TOC columns: single-level book, inline verses, filter by name / gematria / digits', () => {
+    const toc = require('../shared/tocColumns');
+    const chapters = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, parent_id: null, level: 2, title: `פרק ${require('../shared/hebrewTorahDict').intToHebrewNumeral(i + 1)}`, start_line: 2 + i * 10 }));
+    const tree = toc.buildTocTree(chapters);
+    assert.strictEqual(tree.depth, 1);
+    assert.deepStrictEqual(toc.tocColumns(tree, [25]).length, 1, 'no second column without sub-headings');
+    assert.deepStrictEqual(toc.pathForLine(tree, 245), [25]);
+    const titles = (q) => toc.filterToc(tree, q).map((x) => x.title);
+    assert.strictEqual(titles('כה')[0], 'פרק כה');
+    assert.strictEqual(titles('כ"ה')[0], 'פרק כה');
+    assert.strictEqual(titles('25')[0], 'פרק כה');
+    assert.strictEqual(titles('פרק טו')[0], 'פרק טו', '15 = טו');
+    assert.deepStrictEqual(titles('סימן כה'), [], 'the unit type must match for an exact reference');
+    assert.deepStrictEqual(toc.filterToc(tree, ''), []);
+    const verses = [{ key: 'א', title: 'פסוק א', line: 3 }, { key: 'ב', title: 'פסוק ב', line: 4 }, { key: 'ג', title: 'פסוק ג', line: 7 }];
+    assert.strictEqual(toc.verseForLine(verses, 6).key, 'ב');
+    assert.strictEqual(toc.verseForLine(verses, 2), null);
+  });
+  await check('TOC columns: inline verses from the sample DB (Tanach chapters have no verse headings)', async () => {
+    const toc = require('../shared/tocColumns');
+    const dbFile = path.join(ROOT, 'assets/db/library.db');
+    if (!fs.existsSync(dbFile)) return;
+    const db = openDb(dbFile);
+    const book = (await db.all("SELECT id, total_lines FROM books WHERE title = 'בראשית'", []))[0];
+    const tree = toc.buildTocTree(await db.all('SELECT id, parent_id, level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ?', [book.id]));
+    const ch1 = tree.roots[0];
+    const vs = await toc.fetchInlineVerses(db, book.id, ch1.start_line, toc.nodeEnd(tree, ch1, book.total_lines));
+    assert.strictEqual(vs.length, 31, 'Genesis 1 has 31 verses');
+    assert.deepStrictEqual([vs[0].title, vs[30].title], ['פסוק א', 'פסוק לא']);
+    db.close();
+  });
+  await check('tabs: filter open tabs by name, abbreviation, folder and location', () => {
+    const { filterTabs, tabLocation, tabSubtitle } = require('../shared/tabs');
+    const tabs = [
+      { bookTitle: 'שבת', tocPath: 'דף ב.', cat: 'תלמוד בבלי/סדר מועד' },
+      { bookTitle: 'ראש השנה', tocPath: 'דף טז:', cat: 'תלמוד בבלי/סדר מועד' },
+      { bookTitle: 'במדבר', tocPath: 'פרק כז', cat: 'תנך/תורה' },
+      { bookTitle: 'הלכות שבת', tocPath: 'פרק א > הלכה ב', cat: 'הלכה/משנה תורה/ספר זמנים' },
+      { bookTitle: 'רמב"ן על בראשית', tocPath: 'פרק א', cat: 'תנך/מפרשים' },
+      { bookTitle: 'שולחן ערוך - אורח חיים', tocPath: 'סימן שכח', cat: 'הלכה/שולחן ערוך' },
+      { bookTitle: 'בבא קמא', tocPath: 'דף ב:', cat: 'תלמוד בבלי/סדר נזיקין' },
+    ];
+    const f = (q) => filterTabs(tabs, q, (t) => t.cat).map((t) => t.bookTitle);
+    assert.deepStrictEqual(f('שבת'), ['שבת', 'הלכות שבת'], 'prefix match ranks first');
+    assert.deepStrictEqual(f('רמב'), ['רמב"ן על בראשית']);
+    assert.deepStrictEqual(f('רמב"ם שבת'), ['הלכות שבת'], 'Rambam abbreviation + folder');
+    assert.deepStrictEqual(f('ר"ה'), ['ראש השנה'], 'abbreviation; "רה" inside "תורה" does not count');
+    assert.deepStrictEqual(f('שו"ע או"ח'), ['שולחן ערוך - אורח חיים']);
+    assert.deepStrictEqual(f('ב"ק'), ['בבא קמא']);
+    assert.deepStrictEqual(f('שלחן'), ['שולחן ערוך - אורח חיים'], 'ktiv chaser');
+    assert.deepStrictEqual(f('תנך'), ['במדבר', 'רמב"ן על בראשית'], 'folder');
+    assert.deepStrictEqual(f('סימן שכח'), ['שולחן ערוך - אורח חיים'], 'location');
+    assert.strictEqual(f('').length, tabs.length);
+    assert.deepStrictEqual(f('לא קיים'), []);
+    assert.strictEqual(tabLocation('חלק א > פרק ב > הלכה ג'), 'פרק ב › הלכה ג');
+    assert.strictEqual(tabLocation('חלק א > פרק ב > הלכה ג', 3), 'חלק א › פרק ב › הלכה ג');
+    assert.strictEqual(tabSubtitle('פרק א > פסוק ד'), 'פסוק ד');
+    assert.strictEqual(tabSubtitle(null), '');
+  });
   await check('vocalization: hiding cantillation keeps nikkud, dagesh, shin dots, maqaf, sof pasuq', () => {
     const { applyVocalization, stripCantillationMarks, stripNikkudMarks } = require('../shared/hebrew');
     const verse = 'בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים אֵ֥ת הַשָּׁמַ֖יִם וְאֵ֥ת הָאָֽרֶץ׃';
