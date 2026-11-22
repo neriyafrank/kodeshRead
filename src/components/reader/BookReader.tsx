@@ -80,7 +80,7 @@ interface Typography {
   lineHeight: number;
   regular: string | undefined;
   bold: string | undefined;
-  showNiqqud: boolean;
+  showNikkud: boolean;
   showCantillation: boolean;
   palette: Palette;
 }
@@ -96,7 +96,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const fontSize = useSettings((s) => s.fontSize);
   const lineHeight = useSettings((s) => s.lineHeight);
   const fontFamily = useSettings((s) => s.fontFamily);
-  const showNiqqud = useSettings((s) => s.showNiqqud);
+  const showNikkud = useSettings((s) => s.showNikkud);
   const showCantillation = useSettings((s) => s.showCantillation);
   const updatePosition = useTabs((s) => s.updatePosition);
   const openBook = useTabs((s) => s.openBook);
@@ -131,8 +131,8 @@ export function BookReader({ tab, onOpenToc }: Props) {
   // --- typography -----------------------------------------------------------
   const font = readerFont(fontFamily);
   const typo = useMemo<Typography>(
-    () => ({ fontSize, lineHeight, regular: font.regular, bold: font.bold, showNiqqud, showCantillation, palette }),
-    [fontSize, lineHeight, font.regular, font.bold, showNiqqud, showCantillation, palette],
+    () => ({ fontSize, lineHeight, regular: font.regular, bold: font.bold, showNikkud, showCantillation, palette }),
+    [fontSize, lineHeight, font.regular, font.bold, showNikkud, showCantillation, palette],
   );
   const estimatedItemSize = estimateItemSize(fontSize, lineHeight);
 
@@ -519,10 +519,10 @@ interface RowProps {
 
 const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms }: RowProps) {
   const html = useMemo(() => {
-    const prepared = prepareDisplayText(row.display_text, { showNiqqud: typo.showNiqqud, showCantillation: typo.showCantillation });
+    const prepared = prepareDisplayText(row.display_text, { showNikkud: typo.showNikkud, showCantillation: typo.showCantillation });
     // The search hit stays marked for the highlight's lifetime (2 s), then the row re-renders plain.
     return highlightNonce && highlightTerms?.length ? markTerms(prepared, highlightTerms) : prepared;
-  }, [row.display_text, typo.showNiqqud, typo.showCantillation, highlightNonce, highlightTerms]);
+  }, [row.display_text, typo.showNikkud, typo.showCantillation, highlightNonce, highlightTerms]);
   // Accent at ~35% alpha: stays visible on top of the (highlight-coloured) row glow.
   const markStyle = useMemo(() => ({ backgroundColor: `${typo.palette.accent}59`, borderRadius: 3 }), [typo.palette.accent]);
   const [glow] = useState(() => new Animated.Value(0));

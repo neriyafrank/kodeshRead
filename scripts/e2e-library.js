@@ -43,6 +43,7 @@ try {
     assert.strictEqual(await tid('onboarding-card').count(), 0, 'no onboarding while a core library exists');
     step('library screen has the manager button, no onboarding');
 
+
     await tid('open-library-manager').click();
     await tid('core-info').waitFor();
     const stats = await tid('core-info').innerText();
@@ -76,6 +77,81 @@ try {
     await tid('tree-cat-1').waitFor({ timeout: 180000 });
     assert.strictEqual(await tid('onboarding-card').count(), 0);
     step('web preview restores the sample library on reload');
+
+    // --- RTL cascading columns -------------------------------------------------------------
+    // (Runs after the manager flow: no saved column path yet.)
+    await tid('tree-cat-1').waitFor({ timeout: 180000 });
+    const box = async (id) => tid(id).boundingBox();
+    assert.strictEqual(await tid('library-column-1').count(), 0, 'only the root column at first');
+    const root0 = await box('library-column-0');
+    assert.ok(root0.x + root0.width > 380, 'root column hugs the right edge');
+    await tid('tree-cat-1').click(); // תנך
+    await tid('library-column-1').waitFor();
+    assert.strictEqual(await tid('tree-cat-1').getAttribute('aria-selected'), 'true', 'active folder highlighted');
+    const sub = page.locator('[data-testid="library-column-1"] [data-testid^="tree-cat-"]').first();
+    const subName = (await sub.innerText()).split('\n')[0];
+    await sub.click();
+    await tid('library-column-2').waitFor();
+    await page.waitForTimeout(500); // auto-scroll to the new column
+    const [c0, c1, c2] = [await box('library-column-0'), await box('library-column-1'), await box('library-column-2')];
+    assert.ok(c2.x < c1.x && c1.x < c0.x, `columns flow right-to-left (${c0.x}, ${c1.x}, ${c2.x})`);
+    assert.ok(c2.x >= -1 && c1.x + c1.width <= 401, 'new column revealed with its parent beside it');
+    assert.ok(c1.width >= 400 * 0.42 && c1.width <= 400 * 0.52, `phone: ~2 columns (${c1.width}px)`);
+    const crumbs = await tid('library-breadcrumb').innerText();
+    assert.ok(crumbs.includes('תנך') && crumbs.includes(subName), `breadcrumb: ${crumbs}`);
+    await shot('columns');
+    step(`columns open right-to-left: תנך ‹ ${subName} (${Math.round(c1.width)}px each)`);
+
+    // A sibling at the root is one tap away (no "back"); the deeper columns are replaced.
+    await page.mouse.move(200, 400);
+    await page.mouse.wheel(400, 0); // reveal the root column again (it scrolled off to the right)
+    const root = page.locator('[data-testid="library-column-0"] [data-testid^="tree-cat-"]');
+    await root.nth(1).click(); // תלמוד בבלי
+    await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-2"]'));
+    assert.ok((await tid('library-column-1').innerText()).includes('תלמוד בבלי'));
+    await tid('library-crumb-root').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-1"]'));
+    step('switch siblings with one tap; breadcrumb jumps back');
+
+    // Persisted path + open a book from a column.
+    await tid('tree-cat-1').click();
+    await page.locator('[data-testid="library-column-1"] [data-testid^="tree-cat-"]').first().click();
+    await page.reload();
+    // After a reload expo-router (web) may keep a hidden copy of the screen under the visible
+    // one: always act on the top-most (last) instance.
+    await tid('library-column-2').last().waitFor({ timeout: 180000 });
+    await page.locator('[data-testid="library-column-2"] [data-testid^="tree-book-"]', { hasText: 'בראשית' }).last().click();
+    await page.waitForURL(/\/reader/);
+    step('column path persists; a book opens from its column');
+
+    // --- טעמים / ניקוד toggles ---------------------------------------------------------------
+    const para = page.locator('[data-testid^="para-"]', { hasText: /\(א\)/ }).last();
+    await para.waitFor({ timeout: 20000 });
+    const text = () => para.innerText();
+    const TROPE = /[\u0591-\u05AF]/;
+    const NIKKUD = /[\u05B0-\u05BC\u05C1\u05C2]/;
+    assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()), 'both shown by default');
+    await tid('toggle-cantillation').last().click();
+    await page.waitForTimeout(300);
+    assert.ok(!TROPE.test(await text()) && NIKKUD.test(await text()), 'טעמים off: clean vocalized text');
+    assert.strictEqual(await tid('toggle-cantillation').last().getAttribute('aria-checked'), 'false');
+    await shot('no-trope');
+    await tid('toggle-cantillation').last().click();
+    await tid('toggle-nikkud').last().click();
+    await page.waitForTimeout(300);
+    assert.ok(!TROPE.test(await text()) && !NIKKUD.test(await text()), 'ניקוד off hides both');
+    assert.strictEqual(await tid('toggle-cantillation').last().getAttribute('aria-checked'), 'false', 'טעמים shown off with ניקוד');
+    assert.strictEqual(await tid('toggle-nikkud').last().getAttribute('aria-checked'), 'false');
+    await page.reload();
+    await para.waitFor({ timeout: 60000 });
+    await page.waitForTimeout(500);
+    assert.ok(!NIKKUD.test(await text()), 'persisted across sessions');
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.appearance')).state);
+    assert.ok(saved.showNikkud === false && saved.showCantillation === true, JSON.stringify(saved));
+    await tid('toggle-cantillation').last().click(); // brings both back
+    await page.waitForTimeout(300);
+    assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()));
+    step('טעמים / ניקוד toggles: independent, linked, persisted');
 
     assert.deepStrictEqual(errors, [], 'no page errors');
     console.log('\ne2e library manager: all passed');

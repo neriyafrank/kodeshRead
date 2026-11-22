@@ -7,6 +7,7 @@
 'use strict';
 
 const { adapterForBook } = require('./sources');
+const { applyVocalization, stripCantillationMarks } = require('./hebrew');
 
 /** Inline tags the reader renders (everything else is stripped, keeping its text). */
 const SAFE_TAGS = ['b', 'strong', 'i', 'em', 'u', 'small', 'big', 'sup', 'sub'];
@@ -24,22 +25,14 @@ function sanitizeInlineHtml(html) {
     });
 }
 
-/**
- * Niqqud & cantillation (U+0591–U+05C7), except the punctuation that lives in the
- * same block and must stay visible in unpointed text: maqaf (U+05BE ־) and
- * sof pasuq (U+05C3 ׃).
- */
-const NIQQUD_RE = /[֑-ֽֿ-ׂׄ-ׇ]/g;
-
-/** Cantillation only (te'amim U+0591–U+05AF): the vowel points stay. */
-const CANTILLATION_RE = /[\u0591-\u05AF]/g;
-
-function stripCantillation(text) {
-  return text ? String(text).replace(CANTILLATION_RE, '') : '';
+/** Hides vowel points and cantillation (punctuation such as maqaf and sof pasuq stays). */
+function stripNiqqudForDisplay(text) {
+  return applyVocalization(text, { showNikkud: false });
 }
 
-function stripNiqqudForDisplay(text) {
-  return text ? String(text).replace(NIQQUD_RE, '') : '';
+/** Cantillation only (te'amim U+0591–U+05AF): the vowel points stay. */
+function stripCantillation(text) {
+  return stripCantillationMarks(text);
 }
 
 const RLM = '‏';
@@ -50,11 +43,8 @@ function needsRtlMark(text) {
 
 /** display_text from the DB -> string ready for <RichText>. */
 function prepareDisplayText(html, opts) {
-  const showNiqqud = !opts || opts.showNiqqud !== false;
-  const showCantillation = !opts || opts.showCantillation !== false;
-  let out = sanitizeInlineHtml(html);
-  if (!showNiqqud) out = stripNiqqudForDisplay(out);
-  else if (!showCantillation) out = stripCantillation(out);
+  // Tags carry no Hebrew marks, so stripping the whole sanitized HTML is safe.
+  let out = applyVocalization(sanitizeInlineHtml(html), opts);
   if (needsRtlMark(out) && out[0] !== RLM) out = RLM + out;
   return out;
 }

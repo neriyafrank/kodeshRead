@@ -278,6 +278,42 @@ function generateBookAliases(categoryPath, bookTitle, extra) {
   return [...out];
 }
 
+// ---------------------------------------------------------------------------
+// Display vocalization: cantillation (טעמים) and vowel points (ניקוד) separately
+// ---------------------------------------------------------------------------
+
+/** Cantillation marks (te'amim) U+0591–U+05AF. Vowels, dagesh, shin/sin dots and maqaf are kept. */
+const CANTILLATION_MARKS_RE = /[\u0591-\u05AF]/g;
+/**
+ * Vowel points & diacritics: shva..meteg (U+05B0–U+05BD), rafe (U+05BF), shin/sin dots
+ * (U+05C1–U+05C2), upper/lower dots (U+05C4–U+05C5), qamats qatan (U+05C7). Maqaf (U+05BE),
+ * paseq (U+05C0), sof pasuq (U+05C3) and nun hafukha (U+05C6) are punctuation and stay.
+ */
+const NIKKUD_MARKS_RE = /[\u05B0-\u05BD\u05BF\u05C1-\u05C2\u05C4-\u05C5\u05C7]/g;
+
+function stripCantillationMarks(text) {
+  return text ? String(text).replace(CANTILLATION_MARKS_RE, '') : '';
+}
+
+/** Vowel points only (cantillation untouched). */
+function stripNikkudMarks(text) {
+  return text ? String(text).replace(NIKKUD_MARKS_RE, '') : '';
+}
+
+/**
+ * Applies the reader's display toggles. Hiding nikkud also hides cantillation (trope
+ * without vowels is unreadable); hiding cantillation alone keeps clean vocalized text.
+ * Accepts `showNikkud` (or the older `showNiqqud`) and `showCantillation`; both default true.
+ */
+function applyVocalization(text, opts) {
+  const o = opts || {};
+  const nikkud = o.showNikkud !== undefined ? o.showNikkud !== false : o.showNiqqud !== false;
+  const cantillation = o.showCantillation !== false;
+  if (!nikkud) return stripNikkudMarks(stripCantillationMarks(text));
+  if (!cantillation) return stripCantillationMarks(text);
+  return text == null ? '' : String(text);
+}
+
 /** Hebrew numerals (gematria) <-> integers, used for numeric fallbacks. */
 const GEMATRIA = { א: 1, ב: 2, ג: 3, ד: 4, ה: 5, ו: 6, ז: 7, ח: 8, ט: 9, י: 10, כ: 20, ל: 30, מ: 40, נ: 50, ס: 60, ע: 70, פ: 80, צ: 90, ק: 100, ר: 200, ש: 300, ת: 400 };
 
@@ -300,4 +336,9 @@ module.exports = {
   acronyms,
   aliasKey,
   hebrewNumeralToInt,
+  CANTILLATION_MARKS_RE,
+  NIKKUD_MARKS_RE,
+  stripCantillationMarks,
+  stripNikkudMarks,
+  applyVocalization,
 };

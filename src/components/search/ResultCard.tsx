@@ -19,10 +19,11 @@ interface Props {
 
 export const ResultCard = memo(function ResultCard({ row, terms, onPress }: Props) {
   const s = useThemedStyles(createStyles);
-  const showNiqqud = useSettings((x) => x.showNiqqud);
+  const showNikkud = useSettings((x) => x.showNikkud);
   const fontKey = useSettings((x) => x.fontFamily);
   const font = readerFont(fontKey);
-  const kwic = useMemo(() => buildKwic(row.display_text, terms, { showNiqqud }), [row.display_text, terms, showNiqqud]);
+  const showCantillation = useSettings((x) => x.showCantillation);
+  const kwic = useMemo(() => buildKwic(row.display_text, terms, { showNikkud, showCantillation }), [row.display_text, terms, showNikkud, showCantillation]);
   const crumb = formatTocPath(row.toc_path);
   const plain = kwic.segments.map((x) => x.text).join('');
   const rlm = needsRtlMark(plain) ? RLM : '';

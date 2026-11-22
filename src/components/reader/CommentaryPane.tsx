@@ -67,7 +67,7 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
   const fontSize = useSettings((x) => x.fontSize);
   const lineHeight = useSettings((x) => x.lineHeight);
   const fontFamily = useSettings((x) => x.fontFamily);
-  const showNiqqud = useSettings((x) => x.showNiqqud);
+  const showNikkud = useSettings((x) => x.showNikkud);
   const showCantillation = useSettings((x) => x.showCantillation);
   const font = readerFont(fontFamily);
 
@@ -247,7 +247,7 @@ export function CommentaryPane({ bookId, line, tocPath, areaHeight, hasPrev, has
                           </Pressable>
                         </View>
                         <RichText
-                          html={prepareDisplayText(e.display_text ?? '—', { showNiqqud, showCantillation })}
+                          html={prepareDisplayText(e.display_text ?? '—', { showNikkud, showCantillation })}
                           fontSize={entrySize}
                           boldFamily={font.bold}
                           style={[s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: Math.round(entrySize * lineHeight) }]}

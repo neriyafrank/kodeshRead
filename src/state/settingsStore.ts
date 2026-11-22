@@ -16,8 +16,9 @@ export interface AppearanceSettings {
   /** Multiplier of fontSize. */
   lineHeight: number;
   theme: ThemeName;
-  showNiqqud: boolean;
-  /** Cantillation marks (טעמי המקרא); hidden whenever niqqud is hidden. */
+  /** Vowel points (ניקוד). Hiding them hides cantillation too. */
+  showNikkud: boolean;
+  /** Cantillation marks (טעמי המקרא); hidden whenever nikkud is hidden. */
   showCantillation: boolean;
 }
 
@@ -39,7 +40,7 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   fontSize: FONT_SIZE.default,
   lineHeight: LINE_HEIGHT.default,
   theme: 'light',
-  showNiqqud: true,
+  showNikkud: true,
   showCantillation: true,
 };
 
@@ -67,13 +68,22 @@ export const useSettings = create<SettingsState>()(
     {
       name: 'kodeshread.appearance',
       storage: createJSONStorage(() => AsyncStorage),
-      version: 1,
-      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNiqqud, showCantillation, commentaryRatio, commentaryFollow }) => ({
+      // v2: showNiqqud -> showNikkud (+ showCantillation). Older saved settings keep their choice.
+      version: 2,
+      migrate: (persisted, version) => {
+        const p = (persisted ?? {}) as Record<string, unknown>;
+        if (version < 2 && typeof p.showNiqqud === 'boolean' && p.showNikkud === undefined) {
+          p.showNikkud = p.showNiqqud;
+          delete p.showNiqqud;
+        }
+        return p as unknown as SettingsState;
+      },
+      partialize: ({ fontFamily, fontSize, lineHeight, theme, showNikkud, showCantillation, commentaryRatio, commentaryFollow }) => ({
         fontFamily,
         fontSize,
         lineHeight,
         theme,
-        showNiqqud,
+        showNikkud,
         showCantillation,
         commentaryRatio,
         commentaryFollow,

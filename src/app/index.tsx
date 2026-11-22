@@ -7,7 +7,7 @@ import { SearchIcon } from '../components/Icons';
 import { JobStatus } from '../components/library/JobStatus';
 import { OnboardingCard } from '../components/library/OnboardingCard';
 import { ResumeCards } from '../components/library/ResumeCard';
-import { LibraryTree } from '../components/LibraryTree';
+import { LibraryColumns } from '../components/LibraryColumns';
 import { QuickJumpBar } from '../components/QuickJumpBar';
 import { useLibrary } from '../db/LibraryContext';
 import { useLibrarySettings } from '../state/libraryStore';
@@ -73,7 +73,7 @@ export default function LibraryScreen() {
       <QuickJumpBar onJump={onJump} />
       <View style={s.divider} />
       <View style={s.tree}>
-        <LibraryTree
+        <LibraryColumns
           onOpenBook={(id, title) => openBook(id, title)}
           header={showOnboarding ? <OnboardingCard hasUserBooks={userBookCount > 0} /> : undefined}
           emptyText={showOnboarding ? '' : undefined}

@@ -13,6 +13,7 @@ import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
 import { TabStrip } from '../components/reader/TabStrip';
 import { TocDrawer } from '../components/reader/TocDrawer';
+import { VocalizationToggles } from '../components/reader/VocalizationToggles';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
 
@@ -60,6 +61,7 @@ export default function ReaderWorkspace() {
         >
           <SearchIcon size={19} />
         </Pressable>
+        <VocalizationToggles />
         <Pressable
           onPress={() => setAppearanceOpen(true)}
           hitSlop={6}

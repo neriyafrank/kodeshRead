@@ -25,7 +25,7 @@
  */
 'use strict';
 
-const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
+const { normalizeHebrew, stripHtml, decodeEntities, applyVocalization } = require('./hebrew');
 const { sourcesOf, sourceForId, sourcesForCategory } = require('./sources');
 const dict = require('./hebrewTorahDict');
 
@@ -460,8 +460,6 @@ async function countMatches(db, query, opts) {
 // KWIC snippets
 // ---------------------------------------------------------------------------
 
-const NIQQUD_DISPLAY_RE = /[֑-ֽֿ-ׂׄ-ׇ]/g;
-
 /**
  * Build a Key-Word-In-Context snippet from a paragraph's display_text.
  * Words are matched by normalizing each displayed word exactly like the index,
@@ -472,9 +470,9 @@ const NIQQUD_DISPLAY_RE = /[֑-ֽֿ-ׂׄ-ׇ]/g;
 function buildKwic(displayText, terms, opts) {
   const before = (opts && opts.before) || 7;
   const after = (opts && opts.after) || 16;
-  const showNiqqud = !opts || opts.showNiqqud !== false;
-  let text = decodeEntities(stripHtml(String(displayText || ''))).replace(/\s+/g, ' ').trim();
-  if (!showNiqqud) text = text.replace(NIQQUD_DISPLAY_RE, '');
+  // Same display toggles as the reader; hits are found on normalized words, so hidden
+  // nikkud / cantillation never changes what is highlighted.
+  const text = applyVocalization(decodeEntities(stripHtml(String(displayText || ''))).replace(/\s+/g, ' ').trim(), opts);
   const matcher = makeTermMatcher(terms);
   // Words + separators (whitespace, maqaf, paseq) alternate in `parts`.
   const parts = text.split(/(\s+|[־׀])/);

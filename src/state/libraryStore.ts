@@ -5,6 +5,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 interface LibraryUiState {
   /** Expanded category ids in the library tree. */
   expanded: Record<number, true>;
+  /** Selected folder in each column of the columns browser, root first (category ids). */
+  columnPath: number[];
+  setColumnPath: (path: number[]) => void;
   toggle: (categoryId: number) => void;
   expandMany: (ids: number[]) => void;
   collapseAll: () => void;
@@ -14,6 +17,8 @@ export const useLibraryUi = create<LibraryUiState>()(
   persist(
     (set) => ({
       expanded: {},
+      columnPath: [],
+      setColumnPath: (columnPath) => set({ columnPath }),
       toggle: (id) =>
         set((s) => {
           const next = { ...s.expanded };

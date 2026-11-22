@@ -14,3 +14,17 @@ export function generateBookAliases(categoryPath: string[] | string, bookTitle: 
 export function acronyms(phrase: string): string[];
 export function aliasKey(s: string): string;
 export function hebrewNumeralToInt(s: string): number | null;
+export interface VocalizationOptions {
+  showNikkud?: boolean;
+  /** Older spelling of showNikkud. */
+  showNiqqud?: boolean;
+  showCantillation?: boolean;
+}
+/** Cantillation marks (U+0591–U+05AF). */
+export const CANTILLATION_MARKS_RE: RegExp;
+/** Vowel points & diacritics ([U+05B0–U+05BD U+05BF U+05C1–U+05C2 U+05C4–U+05C5 U+05C7]). */
+export const NIKKUD_MARKS_RE: RegExp;
+export function stripCantillationMarks(text: string | null | undefined): string;
+export function stripNikkudMarks(text: string | null | undefined): string;
+/** Hiding nikkud hides cantillation too; hiding cantillation keeps the vowels. */
+export function applyVocalization(text: string | null | undefined, opts?: VocalizationOptions): string;

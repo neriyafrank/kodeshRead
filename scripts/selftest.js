@@ -692,6 +692,45 @@ async function refAlignTests() {
     const pb = indexer.parseBook('<h1>ס</h1>\n<h2>פרק א</h2>\n<h3>פסוק ב</h3>\nטקסט\n<h2>דף ג</h2>\n<h3>עמוד ב</h3>\nא', 'ס');
     assert.deepStrictEqual(pb.toc.map((t) => t.refPath), ['פרק א', 'פרק א|פסוק ב', 'דף ג', 'דף ג|עמוד ב']);
   });
+  await check('vocalization: hiding cantillation keeps nikkud, dagesh, shin dots, maqaf, sof pasuq', () => {
+    const { applyVocalization, stripCantillationMarks, stripNikkudMarks } = require('../shared/hebrew');
+    const verse = 'בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים אֵ֥ת הַשָּׁמַ֖יִם וְאֵ֥ת הָאָֽרֶץ׃';
+    const noTrope = applyVocalization(verse, { showNikkud: true, showCantillation: false });
+    assert.strictEqual(noTrope, 'בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם וְאֵת הָאָֽרֶץ׃');
+    assert.ok(!/[֑-֯]/.test(noTrope), 'no cantillation');
+    for (const mark of ['ּ', 'ׁ', 'ְ', '׃']) assert.ok(noTrope.includes(mark), `kept U+${mark.charCodeAt(0).toString(16)}`);
+    assert.strictEqual(stripCantillationMarks('כׇּל־עֲדַ֣ת'), 'כׇּל־עֲדַת', 'maqaf + qamats qatan kept');
+    assert.strictEqual(stripNikkudMarks('שָׁלוֹם'), 'שלום', 'nikkud only');
+    assert.strictEqual(stripNikkudMarks('בָּרָ֣א'), 'בר֣א', 'stripping nikkud alone leaves trope (the app always hides both)');
+  });
+  await check('vocalization: hiding nikkud also hides cantillation (punctuation stays)', () => {
+    const { applyVocalization } = require('../shared/hebrew');
+    const verse = 'בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים׃ כׇּל־עֲדַ֣ת ׀ יִשְׂרָאֵ֑ל';
+    const plain = applyVocalization(verse, { showNikkud: false, showCantillation: true });
+    assert.strictEqual(plain, 'בראשית ברא אלהים׃ כל־עדת ׀ ישראל');
+    assert.ok(!/[֑-ׇֽֿׁׂׅׄ]/.test(plain));
+    assert.strictEqual(applyVocalization(verse, { showNiqqud: false }), plain, 'older option name');
+    assert.strictEqual(applyVocalization(verse, {}), verse, 'both shown by default');
+    assert.strictEqual(reader.prepareDisplayText('<b>בָּרָ֣א</b> (א)', { showNikkud: false }), '‏<b>ברא</b> (א)', 'tags + RLM intact');
+  });
+  await check('vocalization: search highlighting aligns with the stripped text', () => {
+    const raw = '<b>וַיֹּ֥אמֶר</b> אֱלֹהִ֖ים יְהִ֣י א֑וֹר';
+    for (const opts of [{}, { showCantillation: false }, { showNikkud: false }, { showNikkud: false, showCantillation: false }]) {
+      for (const smart of [false, true]) {
+        const terms = search.parseSearchQuery('אלהים', { smart }).terms;
+        const shown = reader.prepareDisplayText(raw, opts);
+        const marked = search.markTerms(shown, terms);
+        const hit = /<mark>([^<]*)<\/mark>/.exec(marked);
+        assert.ok(hit, `marked with ${JSON.stringify(opts)} smart=${smart}: ${marked}`);
+        assert.strictEqual(hit[1], reader.prepareDisplayText('אֱלֹהִ֖ים', opts), 'the mark wraps exactly the displayed word');
+        assert.strictEqual(marked.replace(/<\/?mark>/g, ''), shown, 'marking never changes the text');
+        const k = search.buildKwic(raw, terms, opts);
+        const seg = k.segments.find((x) => x.hit);
+        assert.strictEqual(seg.text, reader.prepareDisplayText('אֱלֹהִ֖ים', opts), `KWIC hit ${JSON.stringify(opts)}`);
+        if (opts.showCantillation === false || opts.showNikkud === false) assert.ok(!/[֑-֯]/.test(k.segments.map((x) => x.text).join('')));
+      }
+    }
+  });
   await check('reader: cantillation toggle strips only te\'amim (also in the commentary drawer)', () => {
     const v = 'בְּרֵאשִׁ֖ית בָּרָ֣א';
     const noTeamim = reader.prepareDisplayText(v, { showNiqqud: true, showCantillation: false });

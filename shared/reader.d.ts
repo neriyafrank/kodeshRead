@@ -25,8 +25,8 @@ export const MAX_WINDOW: number;
 export function sanitizeInlineHtml(html: string | null | undefined): string;
 export function stripNiqqudForDisplay(text: string | null | undefined): string;
 export function needsRtlMark(text: string): boolean;
-/** showCantillation: false strips only the te'amim (U+0591–U+05AF); showNiqqud: false strips both. */
-export function prepareDisplayText(html: string, opts?: { showNiqqud?: boolean; showCantillation?: boolean }): string;
+/** showCantillation: false strips only the te'amim (U+0591–U+05AF); showNikkud (showNiqqud): false strips both. */
+export function prepareDisplayText(html: string, opts?: { showNikkud?: boolean; showNiqqud?: boolean; showCantillation?: boolean }): string;
 export function stripCantillation(text: string): string;
 export function windowAround(target: number, totalLines: number, size?: number): LineRange;
 export function nextChunk(range: LineRange, direction: 'forward' | 'backward', totalLines: number, chunk?: number): LineRange | null;

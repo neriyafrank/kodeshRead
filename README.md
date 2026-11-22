@@ -125,6 +125,18 @@ Abbreviations, other spellings and structural words are understood (`shared/hebr
 `מ"ב` · `שלחן ערוך אורח חיים כה`. A fully resolved reference shows a **פתח: ספר — מיקום** card on top.
 The search scope picker's book filter is abbreviation-aware too.
 
+## Reader display & library browser
+
+- **טעמים / ניקוד** pills in the reader toolbar (also in the `Aa` sheet), persisted as `showCantillation` /
+  `showNikkud` (both on by default). Hiding טעמים strips U+0591–U+05AF only, so vowels, dagesh, shin/sin dots
+  and maqaf stay. Hiding ניקוד strips the vowel points and the trope too. The same toggles apply to the
+  commentary drawer and search snippets (`shared/hebrew.js applyVocalization`). Highlighting matches
+  normalized words, so it is unaffected.
+- **Library browser:** RTL cascading columns (`src/components/LibraryColumns.tsx`). Root folders sit in
+  the rightmost column; each tap opens the folder's sub-folders and books in a new column to its left. The
+  active path is highlighted in every column and shown as a tappable breadcrumb. Shows ~2 columns on
+  phones and 3–4 on tablets, with independent vertical scrolling. The selected path is saved.
+
 ## Commentaries: Otzaria reference alignment
 
 Base books and their commentaries share parallel heading trees in Otzaria (פרק › פסוק, דף › עמוד,

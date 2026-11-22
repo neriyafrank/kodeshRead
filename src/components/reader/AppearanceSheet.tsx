@@ -29,7 +29,7 @@ export function AppearanceSheet({ visible, onClose }: Props) {
   const fontSize = useSettings((x) => x.fontSize);
   const lineHeight = useSettings((x) => x.lineHeight);
   const theme = useSettings((x) => x.theme);
-  const showNiqqud = useSettings((x) => x.showNiqqud);
+  const showNikkud = useSettings((x) => x.showNikkud);
   const showCantillation = useSettings((x) => x.showCantillation);
   const set = useSettings((x) => x.set);
   const reset = useSettings((x) => x.reset);
@@ -49,7 +49,7 @@ export function AppearanceSheet({ visible, onClose }: Props) {
           style={[s.preview, { fontFamily: font.regular, fontSize, lineHeight: fontSize * lineHeight }]}
           numberOfLines={2}
         >
-          {prepareDisplayText('בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים אֵ֥ת הַשָּׁמַ֖יִם וְאֵ֥ת הָאָֽרֶץ', { showNiqqud, showCantillation })}
+          {prepareDisplayText('בְּרֵאשִׁ֖ית בָּרָ֣א אֱלֹהִ֑ים אֵ֥ת הַשָּׁמַ֖יִם וְאֵ֥ת הָאָֽרֶץ', { showNikkud, showCantillation })}
         </Text>
 
         <Text style={s.label}>גופן</Text>
@@ -139,26 +139,26 @@ export function AppearanceSheet({ visible, onClose }: Props) {
 
         <View style={s.switchRow}>
           <View style={{ flex: 1 }}>
-            <Text style={s.label}>ניקוד וטעמים</Text>
-            <Text style={s.hint}>הצגת נקודות וטעמי המקרא</Text>
+            <Text style={s.label}>ניקוד</Text>
+            <Text style={s.hint}>הצגת נקודות התנועה (כיבוי מסתיר גם את הטעמים)</Text>
           </View>
           <Switch
-            value={showNiqqud}
-            onValueChange={(v) => set({ showNiqqud: v })}
-            accessibilityLabel="ניקוד וטעמים"
+            value={showNikkud}
+            onValueChange={(v) => set({ showNikkud: v })}
+            accessibilityLabel="ניקוד"
             testID="niqqud-switch"
             {...switchColors(s.palette)}
           />
         </View>
 
-        <View style={[s.switchRow, !showNiqqud && { opacity: 0.45 }]}>
+        <View style={[s.switchRow, !showNikkud && { opacity: 0.45 }]}>
           <View style={{ flex: 1 }}>
-            <Text style={s.label}>טעמי המקרא</Text>
+            <Text style={s.label}>טעמים</Text>
             <Text style={s.hint}>הסתרת הטעמים בלבד (הניקוד נשאר) — גם בחלונית המפרשים</Text>
           </View>
           <Switch
-            value={showNiqqud && showCantillation}
-            disabled={!showNiqqud}
+            value={showNikkud && showCantillation}
+            disabled={!showNikkud}
             onValueChange={(v) => set({ showCantillation: v })}
             accessibilityLabel="טעמי המקרא"
             testID="cantillation-switch"

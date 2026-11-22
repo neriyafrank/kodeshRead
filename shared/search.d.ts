@@ -79,7 +79,7 @@ export function countMatches(
   query: string | ParsedQuery,
   opts?: { scope?: SearchScope; cap?: number; fts?: boolean; smart?: boolean },
 ): Promise<{ count: number; capped: boolean }>;
-export function buildKwic(displayText: string, terms: string[], opts?: { before?: number; after?: number; showNiqqud?: boolean }): Kwic;
+export function buildKwic(displayText: string, terms: string[], opts?: { before?: number; after?: number; showNikkud?: boolean; showNiqqud?: boolean; showCantillation?: boolean }): Kwic;
 export function makeTermMatcher(terms: string[] | null | undefined): TermMatcher;
 /** Wraps words of sanitized inline HTML matching `terms` (tokens, "x*" prefixes, phrases) in <mark>…</mark>. */
 export function markTerms(html: string, terms: string[]): string;

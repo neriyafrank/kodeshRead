@@ -12,7 +12,8 @@ import { createRouter, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type Li
 import { useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { closeQuietly } from './dbUtils';
-import { installStagedCore, openCoreDatabase, openUserDatabase, deleteCoreDatabase, toAdapter, type CoreInfo } from './library';
+import { readMeta } from '../../shared/indexer';
+import { installStagedCore, isWeb, openCoreDatabase, openUserDatabase, deleteCoreDatabase, toAdapter, type CoreInfo } from './library';
 
 export interface Library {
   /** Routes per-book queries to the owning DB and merges library-wide ones. */
@@ -62,7 +63,12 @@ export function useLibraryController(): LibraryController {
 async function buildLibrary(core: Library['core'], user: SQLiteDatabase, generation: number): Promise<Library> {
   const sources: LibrarySource[] = [];
   if (core) sources.push({ name: 'core', adapter: toAdapter(core.db), idBase: 0 });
-  sources.push({ name: 'user', adapter: toAdapter(user), idBase: USER_ID_BASE, categoryRoot: USER_ROOT_NAME });
+  // Web preview only: after a page reload expo-sqlite's web storage can hand back the seeded
+  // core database under the user database's name; querying it as "user" would list every
+  // core book twice. A personal library always says kind = user.
+  const userKind = isWeb ? (await readMeta(toAdapter(user)).catch(() => null))?.kind : 'user';
+  if (userKind === 'user' || userKind === undefined) sources.push({ name: 'user', adapter: toAdapter(user), idBase: USER_ID_BASE, categoryRoot: USER_ROOT_NAME });
+  else console.warn(`user library storage returned a "${userKind}" database (web preview); personal books unavailable`);
   const adapter = createRouter(sources);
   const [bookIndex, fts] = await Promise.all([loadBookIndex(adapter), hasFts5(adapter)]);
   if (!fts) console.warn('SQLite build has no FTS5 (web preview): full-text search uses a slow LIKE fallback');
