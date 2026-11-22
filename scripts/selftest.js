@@ -30,6 +30,8 @@ const { makeBookMatcher, writerAdapter, nodeFs } = require('./build-db');
 const indexer = require('../shared/indexer');
 const sources = require('../shared/sources');
 const release = require('../shared/release');
+const dict = require('../shared/hebrewTorahDict');
+const quickJump = require('../shared/quickJump');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -183,6 +185,143 @@ async function main() {
     assert.strictEqual(search.formatTocPath('דף ב. > עמוד א'), 'דף ב. › עמוד א');
   });
 
+  // 1b. Hebrew Torah linguistic & abbreviation engine ------------------------
+  await check('dict: bidirectional book / section abbreviations (with & without gershayim)', () => {
+    assert.deepStrictEqual(dict.expandAbbreviation('שו"ע'), ['שולחנ ערוכ']);
+    assert.deepStrictEqual(dict.expandAbbreviation('שו״ע'), ['שולחנ ערוכ']);
+    assert.deepStrictEqual(dict.expandAbbreviation('שוע'), ['שולחנ ערוכ']);
+    for (const r of ['רמבם', 'רמב"ם', 'רמב״ם', 'רמב׳׳ם']) assert.strictEqual(dict.expandAbbreviation(r)[0], 'משנה תורה', r);
+    assert.ok(dict.expandAbbreviation('או"ח').includes('אורח חיימ'));
+    assert.ok(dict.expandAbbreviation('יו"ד').includes('יורה דעה'));
+    assert.ok(dict.expandAbbreviation('אה"ע').includes('אבנ העזר'));
+    assert.ok(dict.expandAbbreviation('חו"מ').includes('חושנ משפט'));
+    assert.ok(dict.expandAbbreviation('משנ"ב').includes('משנה ברורה'));
+    assert.ok(dict.expandAbbreviation('ב"ק').includes('בבא קמא'));
+    assert.ok(dict.expandAbbreviation("בר'").includes('בראשית'));
+    assert.ok(dict.expandAbbreviation('שמ"א').includes('שמואל א'));
+    assert.ok(dict.expandAbbreviation("הל'").includes('הלכות'));
+    assert.ok(dict.expandAbbreviation('קצוה"ח').includes('קצות החושנ'));
+    assert.ok(dict.expandAbbreviation('רעק"א').includes('רבי עקיבא איגר'));
+    // Reverse direction, spelling-insensitive (ktiv chaser "שלחן").
+    assert.ok(dict.abbreviationsFor('שולחן ערוך').includes('שוע'));
+    assert.ok(dict.abbreviationsFor('שלחן ערוך').includes('שוע'));
+    assert.ok(dict.abbreviationsFor('בבא קמא').includes('בק'));
+    assert.ok(dict.abbreviationsFor('משנה ברורה').includes('משנב'));
+  });
+  await check('dict: general phrases + strict-mode precision guards', () => {
+    const st = dict.dictionaryStats();
+    assert.ok(st.byKind.general >= 300, `general entries ${st.byKind.general}`);
+    assert.ok(st.entries >= 500, `entries ${st.entries}`);
+    assert.deepStrictEqual(dict.expandAbbreviation('ב"ד'), ['בית דינ']);
+    assert.deepStrictEqual(dict.expandAbbreviation('בי"ד'), ['בית דינ']);
+    assert.ok(dict.expandAbbreviation('הקב"ה').includes('הקדוש ברוכ הוא'));
+    assert.ok(dict.expandAbbreviation('אע"פ').includes('אפ על פי'));
+    assert.ok(dict.expandAbbreviation('ק"ו').includes('קל וחומר'));
+    assert.deepStrictEqual(dict.expandAbbreviation('ד"א'), ['דבר אחר', 'ארבע אמות']);
+    assert.ok(dict.expandAbbreviation('ר"ת').includes('רבנו תמ') && dict.expandAbbreviation('ר"ת').includes('ראשי תיבות'));
+    assert.ok(dict.abbreviationsFor('בית דין').includes('בד'));
+    assert.ok(dict.abbreviationsFor('הקדוש ברוך הוא').includes('הקבה'));
+    assert.ok(dict.abbreviationsFor('קל וחומר').includes('קו'));
+    // Strict (search): un-marked common words never expand; marked tokens always do.
+    assert.deepStrictEqual(dict.expandAbbreviation('בר', { strict: true }), []);
+    assert.deepStrictEqual(dict.expandAbbreviation('ראש', { strict: true }), []);
+    assert.deepStrictEqual(dict.expandAbbreviation('בד', { strict: true }), []);
+    assert.ok(dict.expandAbbreviation("בר'", { strict: true }).includes('בראשית'));
+    assert.ok(!dict.abbreviationsFor('בראשית', { strict: true }).includes('בר'), 'truncation that is a word');
+    assert.ok(!dict.abbreviationsFor('שפתי כהן', { strict: true }).includes('שכ'), 'numeral-shaped (320)');
+    assert.ok(dict.abbreviationsFor('ראש השנה', { strict: true }).includes('רה'), 'tractates keep numeral-shaped keys');
+  });
+  await check('dict: ktiv male / chaser variants', () => {
+    const has = (w, v) => assert.ok(dict.ktivVariants(w).includes(v), `${w} -> ${v}: ${dict.ktivVariants(w)}`);
+    has('שולחנ', 'שלחנ'); has('שלחנ', 'שולחנ'); has('קידושינ', 'קדושינ'); has('קדושינ', 'קידושינ');
+    has('תפילינ', 'תפלינ'); has('תפלינ', 'תפילינ'); has('אלוקימ', 'אלהימ'); has('אלהימ', 'אלוקימ');
+    has('כותל', 'כתל'); has('כתל', 'כותל'); has('ציצית', 'צצית'); has('צצית', 'ציצית'); has('דיבור', 'דבור'); has('דבור', 'דיבור');
+    has('מצוה', 'מצווה');
+    assert.deepStrictEqual(dict.ktivVariants('שבת'), [], 'short roots are left alone');
+    assert.ok(dict.ktivVariants('קדושינ', 3).length <= 3);
+  });
+  await check('dict: prefixes / suffixes / gematria', () => {
+    const v = dict.expandWordVariants('שבת');
+    for (const x of ['שבת*', 'ושבת*', 'בשבת*', 'ובשבת*', 'השבת*', 'שבשבת*']) assert.ok(v.includes(x), `${x}: ${v}`);
+    assert.ok(v.length <= dict.MAX_VARIANTS_PER_WORD);
+    assert.deepStrictEqual(dict.expandWordVariants('רב'), ['רב'], 'tiny words are not expanded');
+    assert.deepStrictEqual(dict.expandWordVariants('א'), ['א']);
+    assert.ok(dict.expandWordVariants('שולחנ').includes('ושלחנ*'));
+    assert.ok(!dict.expandWordVariants('שוע', 24, { wildcard: false }).some((x) => x.endsWith('*')));
+    assert.ok(dict.suffixStems('שבתות').includes('שבת'));
+    assert.ok(dict.suffixStems('מצוות').includes('מצוה'));
+    assert.ok(dict.suffixStems('תורת').includes('תורה'));
+    assert.ok(dict.prefixStems('ובשבת').includes('שבת'));
+    assert.strictEqual(dict.intToHebrewNumeral(328), 'שכח');
+    assert.strictEqual(dict.intToHebrewNumeral(15), 'טו');
+    assert.strictEqual(dict.intToHebrewNumeral(16), 'טז');
+    assert.strictEqual(dict.intToHebrewNumeral(124), 'קכד');
+    assert.strictEqual(dict.parseHebrewNumber('קכ"ד'), 124);
+    assert.strictEqual(dict.parseHebrewNumber('פ"ב'), 82);
+    assert.strictEqual(dict.parseHebrewNumber('17'), 17);
+    assert.ok(dict.isHebrewNumeral('שכח') && !dict.isHebrewNumeral('בק') && !dict.isHebrewNumeral('יה'));
+  });
+  await check('smart search: FTS5 query expansion, quoted phrases and safety caps', () => {
+    const p = (q) => search.parseSearchQuery(q, { smart: true });
+    const sh = p('שולחן');
+    assert.ok(sh.match.includes('"שלחנ"*') && sh.match.includes('"ושלחנ"*'), sh.match);
+    assert.ok(sh.variantCount <= dict.MAX_VARIANTS_PER_WORD);
+    const bd = p('ב"ד');
+    assert.ok(bd.match.includes('"בד"') && bd.match.includes('"בית דינ"'), bd.match);
+    assert.ok(!bd.match.includes('"בד"*'), 'abbreviations are not wildcarded');
+    const full = p('בית דין');
+    assert.ok(full.match.includes('"בד"') && full.match.includes(' AND '), full.match);
+    const sa = p('שו"ע או"ח');
+    assert.ok(sa.match.includes('"שולחנ ערוכ"') && sa.match.includes('"אורח חיימ"'), sa.match);
+    // Quoted phrases stay exact; exact mode is unchanged.
+    assert.ok(p('"שני כחות" באדם').match.startsWith('"שני כחות" AND '));
+    assert.strictEqual(p('"שבת"').match, '"שבת"');
+    assert.strictEqual(search.parseSearchQuery('שולחן').match, '"שולחנ"');
+    // Caps: per-word and per-query, and the expression stays syntactically safe.
+    const long = p('שולחן ערוך קידושין תפילין ציצית דיבור כותל אלוקים מצוות שבתות ובשבת הלכות ברכות תורה משנה גמרא נוסף');
+    assert.ok(long.variantCount <= search.MAX_QUERY_VARIANTS, `variants ${long.variantCount}`);
+    assert.ok(long.groups.length <= 16);
+    const outside = long.match.replace(/"[^"]*"/g, '');
+    assert.ok(/^[\s()*ANDOR]*$/.test(outside), `only operators outside quotes: ${outside}`);
+    assert.strictEqual(p('-*():^\'"').empty, true);
+  });
+  await check('smart highlight: reader + KWIC mark the matched variant', () => {
+    const t = (q) => search.parseSearchQuery(q, { smart: true }).terms;
+    assert.strictEqual(search.markTerms('על <b>ושֻׁלְחָן</b> ערוך', t('שולחן')), 'על <b><mark>ושֻׁלְחָן</mark></b> ערוך');
+    assert.strictEqual(search.markTerms('ובשבת קודש', t('שבת')), '<mark>ובשבת</mark> קודש');
+    assert.strictEqual(search.markTerms('אמרו <b>בית</b> דין של', t('ב"ד')), 'אמרו <b><mark>בית</mark></b> <mark>דין</mark> של');
+    assert.strictEqual(search.markTerms('והביאו לב"ד', t('בית דין')), 'והביאו לב"ד', 'prefixed 2-letter abbreviation is not a hit');
+    assert.strictEqual(search.markTerms('והביאו ב"ד', t('בית דין')), 'והביאו <mark>ב"ד</mark>');
+    assert.strictEqual(search.markTerms('בית המלך דין', t('ב"ד')), 'בית המלך דין', 'phrase words must be consecutive');
+    assert.strictEqual(search.markTerms('שבתאי ושבתות', t('שבת')), '<mark>שבתאי</mark> <mark>ושבתות</mark>');
+    const k = search.buildKwic('אמר רב ושלחן ערוך', t('שולחן'));
+    assert.ok(k.segments.some((x) => x.hit && x.text === 'ושלחן'), JSON.stringify(k.segments));
+    const m = search.makeTermMatcher(['בית דינ', 'שבת*']);
+    assert.deepStrictEqual(m.hits([['בית'], ['דינ'], ['שבתות'], ['בית']]), [true, true, true, false]);
+    assert.strictEqual(search.makeTermMatcher([]).empty, true);
+  });
+  await check('quick open: location parsing (structural words, gematria, daf/amud)', () => {
+    const loc = (q) => quickJump.parseLocation(quickJump.rawTokens(q));
+    assert.deepStrictEqual(loc("סי' שכח סעיף ד"), [{ key: 'שכח' }, { key: 'ד' }]);
+    assert.deepStrictEqual(loc('328 4'), [{ key: 'שכח' }, { key: 'ד' }]);
+    assert.deepStrictEqual(loc('דף ב ע"ב'), [{ key: 'ב' }, { key: 'עב' }]);
+    assert.deepStrictEqual(loc('דף יג עמוד ב'), [{ key: 'יג' }, { key: 'ב' }]);
+    assert.deepStrictEqual(loc('ב.'), [{ key: 'ב.' }]);
+    assert.deepStrictEqual(loc('פ"א ה"ב'), [{ key: 'פא', alt: 'א' }, { key: 'הב', alt: 'ב' }]);
+    assert.deepStrictEqual(loc("פ' ג"), [{ key: 'ג' }]);
+    assert.deepStrictEqual(loc('קכ"ד'), [{ key: 'קכד' }]);
+  });
+  await check('quick open: abbreviation-aware book filter', () => {
+    assert.ok(dict.bookMatchScore('שו"ע או"ח', 'אורח חיים', 'הלכה/שולחן ערוך') > 0);
+    assert.ok(dict.bookMatchScore('שו"ע או"ח', 'שולחן ערוך - אורח חיים', 'הלכה') > 0);
+    assert.ok(dict.bookMatchScore('ב"ק', 'בבא קמא', 'תלמוד בבלי') > 0);
+    assert.ok(dict.bookMatchScore('מ"ב', 'משנה ברורה', 'הלכה') > 0);
+    assert.ok(dict.bookMatchScore('רמב"ם שבת', 'הלכות שבת', 'הלכה/משנה תורה/ספר זמנים') > 0);
+    assert.ok(dict.bookMatchScore('שלחן ערוך', 'שולחן ערוך אורח חיים', 'הלכה') > 0, 'ktiv chaser');
+    assert.strictEqual(dict.bookMatchScore('ב"ק', 'שבת', 'תלמוד בבלי'), 0);
+    assert.strictEqual(dict.bookMatchScore('מ"ב', 'בבא מציעא', 'תלמוד בבלי'), 0);
+  });
+
   // 2. Synthetic fixture with deep headings -----------------------------------
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-fixture-'));
   try {
@@ -190,7 +329,7 @@ async function main() {
     const w = (rel, text) => { fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true }); fs.writeFileSync(path.join(lib, rel), text); };
     // Synthetic placeholder content (structure only, not real text).
     const oc = ['﻿<h1>שולחן ערוך אורח חיים</h1>', '<h2>הלכות הנהגת אדם בבוקר</h2>'];
-    for (const s of ['א', 'ב', 'כד', 'כה', 'כו']) {
+    for (const s of ['א', 'ב', 'כד', 'כה', 'כו', 'שכח']) {
       oc.push(`<h3>סימן ${s}</h3>`);
       for (const f of ['א', 'ב', 'ג', 'ד', 'ה']) oc.push(`<h4>סעיף ${f}</h4>`, `תוכן לדוגמה סימן ${s} סעיף ${f}.`);
     }
@@ -203,6 +342,9 @@ async function main() {
     w('הלכה/משנה תורה/ספר זמנים/הלכות שבת.txt', rm.join('\n'));
     const br = ['<h1>ברכות</h1>', '<h2>דף ב</h2>', '<h3>עמוד א</h3>', 'שורה א', '<h3>עמוד ב</h3>', 'שורה ב'];
     w('תלמוד בבלי/ברכות.txt', br.join('\n'));
+    w('תלמוד בבלי/בבא קמא.txt', ['<h1>בבא קמא</h1>', '<h2>דף ב.</h2>', 'שורה ב א', '<h2>דף ב:</h2>', 'שורה ב ב', '<h2>דף ג.</h2>', 'שורה ג א'].join('\n'));
+    w('תנך/תורה/בראשית.txt', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '(א) פסוק ראשון', '(ב) פסוק שני', '<h2>פרק ב</h2>', '(א) פסוק בפרק ב'].join('\n'));
+    w('הלכה/משנה ברורה.txt', ['<h1>משנה ברורה</h1>', '<h2>סימן א</h2>', 'תוכן לדוגמה'].join('\n'));
     fs.mkdirSync(path.join(tmp, 'links'));
     fs.writeFileSync(
       path.join(tmp, 'links', 'l.csv'),
@@ -220,7 +362,7 @@ async function main() {
     const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${path.join(tmp, 'links')}`], { encoding: 'utf8' });
     if (proc.status !== 0) throw new Error('fixture build failed:\n' + proc.stderr);
     const log = proc.stdout + proc.stderr;
-    await check('fixture build', () => assert.ok(/done: 3 books/.test(log), log));
+    await check('fixture build', () => assert.ok(/done: 6 books/.test(log), log));
     const db = openDb(out);
     const index = await loadBookIndex(db);
     await check('fixture: שוע אוח כה ה', () => expectJump(db, index, 'שוע אוח כה ה', 'שולחן ערוך אורח חיים', 3 + 3 * 11 + 1 + 4 * 2, 'סעיף ה'));
@@ -230,6 +372,42 @@ async function main() {
     await check('fixture: ברכות ב. (nested amud)', () => expectJump(db, index, 'ברכות ב.', 'ברכות', 3, 'עמוד א'));
     await check('fixture: ברכות ב:', () => expectJump(db, index, 'ברכות ב:', 'ברכות', 5, 'עמוד ב'));
     await check('fixture: ברכות ב ב', () => expectJump(db, index, 'ברכות ב ב', 'ברכות', 5, 'עמוד ב'));
+    // Abbreviation-aware Quick Open + location parsing.
+    const SIMAN_SHKH = 3 + 5 * 11;
+    await check('quick open: שו"ע או"ח סי\' שכח', () => expectJump(db, index, "שו\"ע או\"ח סי' שכח", 'שולחן ערוך אורח חיים', SIMAN_SHKH, 'סימן שכח'));
+    await check('quick open: שו"ע או"ח שכח ד (+ direct card)', async () => {
+      await expectJump(db, index, 'שו"ע או"ח שכח ד', 'שולחן ערוך אורח חיים', SIMAN_SHKH + 1 + 3 * 2, 'סעיף ד');
+      const [top] = await resolveReference(db, index, 'שו"ע או"ח שכח ד');
+      assert.ok(top.direct, 'direct card');
+      assert.strictEqual(top.location, 'סימן שכח › סעיף ד');
+    });
+    await check('quick open: digits (שוע אוח 328 4)', () => expectJump(db, index, 'שוע אוח 328 4', 'שולחן ערוך אורח חיים', SIMAN_SHKH + 1 + 3 * 2, 'סעיף ד'));
+    await check('quick open: ב"ק ב. / ב"ק דף ב ע"ב / ב"ק דף ב עמוד ב', async () => {
+      await expectJump(db, index, 'ב"ק ב.', 'בבא קמא', 2, 'דף ב.');
+      await expectJump(db, index, 'ב"ק דף ב ע"ב', 'בבא קמא', 4, 'דף ב:');
+      await expectJump(db, index, 'ב"ק דף ב עמוד ב', 'בבא קמא', 4, 'דף ב:');
+      await expectJump(db, index, 'בבא קמא ג', 'בבא קמא', 6, 'דף ג.');
+    });
+    await check('quick open: רמב"ם הל\' שבת פ"א / פ"ב ה"ג', async () => {
+      await expectJump(db, index, "רמב\"ם הל' שבת פ\"א", 'הלכות שבת', 2, 'פרק א');
+      await expectJump(db, index, 'רמב"ם הל\' שבת פ"ב ה"ג', 'הלכות שבת', 14, 'הלכה ג');
+      await expectJump(db, index, 'רמב"ם שבת', 'הלכות שבת', 1);
+    });
+    await check("quick open: בר' א א (truncation + verse marker)", async () => {
+      await expectJump(db, index, "בר' א א", 'בראשית', 3);
+      await expectJump(db, index, "בר' א ב", 'בראשית', 4);
+      await expectJump(db, index, 'בראשית ב', 'בראשית', 5, 'פרק ב');
+    });
+    await check('quick open: מ"ב / משנ"ב find משנה ברורה', async () => {
+      for (const q of ['מ"ב', 'משנ"ב', 'משנה ברורה']) assert.strictEqual((await resolveReference(db, index, q))[0].bookTitle, 'משנה ברורה', q);
+      await expectJump(db, index, 'משנ"ב סי\' א', 'משנה ברורה', 2, 'סימן א');
+    });
+    await check('quick open: ktiv chaser book name (שלחן ערוך אורח חיים כה)', () => expectJump(db, index, 'שלחן ערוך אורח חיים כה', 'שולחן ערוך אורח חיים', 3 + 3 * 11, 'סימן כה'));
+    await check('quick open: book-only result is not a direct card', async () => {
+      const [top] = await resolveReference(db, index, 'ב"ק');
+      assert.strictEqual(top.bookTitle, 'בבא קמא');
+      assert.ok(!top.direct);
+    });
     await check('fixture: links (dedupe, missing lines, unmatched warnings)', async () => {
       const rows = await db.all('SELECT l.*, a.title ta, b.title tb FROM links l JOIN books a ON a.id=l.book_a_id JOIN books b ON b.id=l.book_b_id ORDER BY l.id', []);
       assert.strictEqual(rows.length, 2, JSON.stringify(rows));
@@ -397,6 +575,47 @@ async function main() {
       const ms = Number(process.hrtime.bigint() - t) / 1e6 / (25 * qs.length);
       assert.ok(ms < 15, `avg ${ms.toFixed(2)}ms`);
       console.log(`  search page avg ${ms.toFixed(2)}ms/query`);
+    });
+    await check('smart search: finds morphological / abbreviation variants on the sample library', async () => {
+      const cnt = async (q, smart, extra) => (await search.countMatches(db, q, { cap: 100000, smart, ...(extra || {}) })).count;
+      assert.ok((await cnt('שבת', true)) > (await cnt('שבת', false)), 'prefixed ובשבת / בשבת');
+      assert.ok((await cnt('שולחן', true)) > 0 && (await cnt('שולחן', false)) === 0, 'ktiv chaser שלחן');
+      assert.ok((await cnt('ב"ד', true)) > (await cnt('ב"ד', false)), 'ב"ד -> בית דין');
+      assert.ok((await cnt('בית דין', true)) >= (await cnt('בית דין', false)));
+      assert.strictEqual(await cnt('"שני כחות באדם"', true), await cnt('"שני כחות באדם"', false), 'quoted phrase stays exact');
+      // Every hit of a smart query really contains a marked variant.
+      const q = search.parseSearchQuery('ב"ד', { smart: true });
+      const r = await search.searchParagraphs(db, q, { limit: 40 });
+      for (const row of r.rows) assert.ok(search.buildKwic(row.display_text, q.terms).hitCount > 0, row.display_text.slice(0, 80));
+      // LIKE fallback (web preview) closely agrees with FTS5.
+      for (const s2 of ['שבת', 'שולחן', 'ויאמר אלהים']) {
+        const a = await cnt(s2, true);
+        const b = await cnt(s2, true, { fts: false });
+        assert.ok(Math.abs(a - b) <= Math.max(2, a * 0.1), `${s2}: fts ${a} like ${b}`);
+      }
+    });
+    await check('smart search: punctuation fuzz never throws', async () => {
+      const junk = ['"', "'", '-', '*', '(', ')', ':', '^', '״', '׳', 'AND', 'OR', 'NEAR', ' ', 'ב"ד', 'שו"ע', 'שבת', 'ושלחן', "בר'"];
+      let seed = 11;
+      const rnd = (n) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+      for (let i = 0; i < 300; i++) {
+        let q = '';
+        for (let j = rnd(10) + 1; j > 0; j--) q += junk[rnd(junk.length)] + (rnd(2) ? ' ' : '');
+        await search.searchParagraphs(db, q, { limit: 5, smart: true });
+        await search.countMatches(db, q, { smart: true, fts: false, cap: 10 });
+      }
+    });
+    await check('smart search: latency', async () => {
+      const qs = ['שבת', 'שולחן', 'ב"ד', 'אמר רב יהודה אמר שמואל', 'ויאמר אלהים'];
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 20; i++) for (const q2 of qs) await search.searchParagraphs(db, q2, { limit: 40, smart: true });
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / (20 * qs.length);
+      assert.ok(ms < 50, `avg ${ms.toFixed(2)}ms`);
+      console.log(`  smart search page avg ${ms.toFixed(2)}ms/query`);
+    });
+    await check('sample quick open: ר"ה טז: / בר\' יב א / ראש השנה via abbreviation', async () => {
+      await expectJump(db, index, 'ר"ה דף טז ע"ב', 'ראש השנה', await line('ראש השנה', 'דף טז:'));
+      await expectJump(db, index, "בר' א", 'בראשית', await line('בראשית', 'פרק א'));
     });
     await check('sample: sliding window scrolls a whole book within MAX_WINDOW', async () => {
       const book = (await db.all("SELECT id, total_lines FROM books WHERE title = 'שבת'", []))[0];

@@ -4,6 +4,8 @@
  *  - input goes through the shared normalizeHebrew() + FTS5 sanitization
  *    (shared/search.js), so punctuation can never cause a syntax error;
  *  - words are AND-ed; "quoted text" is an exact phrase;
+ *  - "חיפוש מורחב" (default) expands abbreviations (ב"ד <-> בית דין), ktiv male/chaser
+ *    and Hebrew prefixes/suffixes; "חיפוש מדויק" matches the typed words only;
  *  - scope: Entire Library / folder / book (ScopeSheet);
  *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the
  *    line and highlights it for 2 seconds.
@@ -52,6 +54,8 @@ export default function SearchScreen() {
   const recent = useSearch((x) => x.recent);
   const remember = useSearch((x) => x.remember);
   const clearRecent = useSearch((x) => x.clearRecent);
+  const smart = useSearch((x) => x.smart);
+  const setSmart = useSearch((x) => x.setSmart);
   const openBook = useTabs((x) => x.openBook);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [results, setResults] = useState<ResultsState | null>(null);
@@ -64,7 +68,7 @@ export default function SearchScreen() {
     if (Number.isFinite(id) && id > 0) setScope({ kind: 'book', bookId: id, title: params.title ?? '' });
   }, [params.bookId, params.title, setScope]);
 
-  const parsed = useMemo(() => parseSearchQuery(query), [query]);
+  const parsed = useMemo(() => parseSearchQuery(query, { smart }), [query, smart]);
   const key = `${parsed.match}|${scopeKey(scope)}`;
 
   useEffect(() => {
@@ -166,6 +170,23 @@ export default function SearchScreen() {
               <Text style={s.clearText}>✕</Text>
             </Pressable>
           ) : null}
+          <View style={s.modes} accessibilityRole="radiogroup">
+            {([
+              [true, 'חיפוש מורחב', 'search-mode-smart'],
+              [false, 'חיפוש מדויק', 'search-mode-exact'],
+            ] as const).map(([value, label, id]) => (
+              <Pressable
+                key={id}
+                onPress={() => setSmart(value)}
+                style={[s.mode, smart === value && s.modeActive]}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: smart === value }}
+                testID={id}
+              >
+                <Text style={[s.modeText, smart === value && s.modeTextActive]}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
           <View style={s.flex} />
           {loading ? <ActivityIndicator size="small" color={c.accent} /> : null}
           {!loading && current ? (
@@ -182,6 +203,7 @@ export default function SearchScreen() {
           <Text style={s.helpText}>• כמה מילים — יימצאו פסקאות שמכילות את כולן.</Text>
           <Text style={s.helpText}>• ביטוי במירכאות — התאמה מדויקת: &quot;שני כחות&quot;</Text>
           <Text style={s.helpText}>• ניקוד, טעמים, אותיות סופיות וגרשיים אינם משנים את החיפוש.</Text>
+          <Text style={s.helpText}>• חיפוש מורחב: ראשי תיבות (ב&quot;ד ↔ בית דין), כתיב מלא/חסר (שולחן ↔ שלחן), אותיות שימוש וסיומות (ובשבת, שבתות).</Text>
           {recent.length ? (
             <>
               <View style={s.recentHeader}>
@@ -251,7 +273,7 @@ const createStyles = (c: Palette) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      maxWidth: '65%',
+      maxWidth: '45%',
       paddingHorizontal: spacing.md,
       paddingVertical: 6,
       borderRadius: 999,
@@ -262,6 +284,11 @@ const createStyles = (c: Palette) =>
     scopeValue: { flexShrink: 1, fontSize: 14, color: c.accent, fontWeight: '700', writingDirection: 'rtl' },
     scopeCaret: { fontSize: 12, color: c.accent },
     count: { fontSize: 13, color: c.textMuted },
+    modes: { flexDirection: 'row', borderRadius: 999, borderWidth: 1, borderColor: c.border, overflow: 'hidden' },
+    mode: { paddingHorizontal: spacing.sm, paddingVertical: 5 },
+    modeActive: { backgroundColor: c.accent },
+    modeText: { fontSize: 12, color: c.textMuted },
+    modeTextActive: { color: c.background, fontWeight: '700' },
     list: { paddingTop: spacing.sm, paddingBottom: spacing.xl },
     footer: { marginVertical: spacing.lg },
     empty: { color: c.textMuted, fontSize: 15, padding: spacing.xl, textAlign: 'center' },

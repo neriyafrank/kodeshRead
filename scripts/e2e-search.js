@@ -41,6 +41,18 @@ try {
     await page.evaluate(() => localStorage.clear());
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-search').waitFor({ timeout: 180000 });
+
+    // Quick open: abbreviation + daf/amud notation -> direct "פתח: ספר — מיקום" card.
+    await tid('quick-jump-input').fill('ר"ה דף טז ע"ב');
+    await tid('quick-jump-direct').waitFor({ timeout: 20000 });
+    const direct = await tid('quick-jump-direct').innerText();
+    assert.ok(direct.includes('פתח: ראש השנה') && direct.includes('טז:'), direct);
+    await tid('quick-jump-input').fill("בר' יב א");
+    await page.waitForFunction(() => (document.querySelector('[data-testid="quick-jump-direct"]') || {}).innerText?.includes('בראשית'), null, { timeout: 20000 });
+    await shot('0-quick-open');
+    await tid('quick-jump-input').fill('');
+    step('quick open resolves abbreviations to a direct card');
+
     await tid('open-search').click();
     await tid('search-input').waitFor();
     assert.strictEqual(await page.evaluate(() => document.documentElement.dir), 'rtl');
@@ -53,6 +65,38 @@ try {
     assert.ok(hits >= 3, `expected highlighted words, got ${hits}`);
     await shot('1-phrase');
     step('phrase search + KWIC highlight');
+
+    // Smart (default) vs exact search: ktiv chaser + prefixes only match in smart mode.
+    await tid('search-mode-smart').click();
+    // Results of the previous query stay on screen while a new one runs: wait for the new hit.
+    const hitText = (re) =>
+      page.waitForFunction(
+        (src) => [...document.querySelectorAll('[data-testid="search-hit"]')].some((el) => new RegExp(src).test(el.textContent.replace(/[\u0591-\u05C7]/g, ''))),
+        re,
+        { timeout: 20000 },
+      );
+    await tid('search-input').fill('שולחן');
+    await hitText('שו?לחן');
+    const countOf = async () => parseInt((await tid('search-count').innerText()).replace(/[^\d]/g, ' ').trim().split(' ')[0], 10);
+    await tid('search-count').waitFor();
+    const smartCount = await countOf();
+    await tid('search-mode-exact').click();
+    // Exact mode (web LIKE fallback = substring) misses the defective spelling "שלחן".
+    await page.waitForFunction((n) => {
+      const el = document.querySelector('[data-testid="search-count"]') || document.querySelector('[data-testid="search-empty"]');
+      if (!el) return false;
+      const m = /\d+/.exec(el.textContent || '');
+      return el.getAttribute('data-testid') === 'search-empty' || (m && Number(m[0]) < n);
+    }, smartCount, { timeout: 20000 });
+    await tid('search-mode-smart').click();
+    await tid('search-result').first().waitFor({ timeout: 20000 });
+    await shot('1b-smart');
+    step('חיפוש מורחב finds ktiv / prefix variants, חיפוש מדויק does not');
+
+    // Abbreviation -> full phrase.
+    await tid('search-input').fill('ב"ד');
+    await hitText('^דין$|^דינא?$');
+    step('abbreviations expand (ב"ד -> בית דין)');
 
     // Punctuation never breaks the query.
     await tid('search-input').fill('(*)-:^ "\'');
@@ -69,8 +113,18 @@ try {
     await tid('scope-sheet').waitFor();
     await tid('scope-all').waitFor();
     await shot('2-scope-sheet');
+    // Every visible result belongs to the scope (waits out the previous query's results).
+    const allResults = (src) =>
+      page.waitForFunction(
+        (re) => {
+          const els = [...document.querySelectorAll('[data-testid="search-result"]')];
+          return els.length > 0 && els.every((el) => new RegExp(re).test(el.innerText));
+        },
+        src,
+        { timeout: 30000 },
+      );
     await tid('scope-cat-1').click(); // תנך
-    await page.waitForTimeout(900);
+    await allResults('^(בראשית|במדבר)');
     assert.ok((await tid('scope-button').innerText()).includes('תנך'));
     for (const t of await tid('search-result').allInnerTexts()) assert.ok(/^(בראשית|במדבר)/.test(t), t);
     step('folder scope');
@@ -79,7 +133,7 @@ try {
     await tid('scope-button').click();
     await tid('scope-filter').fill('במדבר');
     await tid('scope-book-2').click();
-    await page.waitForTimeout(900);
+    await allResults('^במדבר');
     for (const t of await tid('search-result').allInnerTexts()) assert.ok(t.startsWith('במדבר'), t);
     step('book scope');
 

@@ -1,6 +1,8 @@
 /**
  * "קפיצה מהירה למקור" — type a shorthand reference ("שוע אוח כה ה", "שבת ב.",
- * "בראשית יב א") and get instant clickable preview cards.
+ * "בראשית יב א") and get instant clickable preview cards. Abbreviations and
+ * structural words are understood ("שו\"ע או\"ח סי' שכח ד", "ב\"ק דף ב ע\"ב");
+ * a fully resolved reference gets a prominent "פתח: ספר — מיקום" card on top.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -10,7 +12,7 @@ import { useLibrary } from '../db/LibraryContext';
 import { SearchIcon } from './Icons';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
-const EXAMPLES = ['שבת ב.', 'ראש השנה טז:', 'בראשית יב א', 'במדבר כז טו'];
+const EXAMPLES = ['שבת ב.', 'ר"ה טז:', 'בר\' יב א', 'במדבר כז טו'];
 const DEBOUNCE_MS = 90;
 
 interface Props {
@@ -87,6 +89,21 @@ export function QuickJumpBar({ onJump }: Props) {
 
       {query.trim() && results.length === 0 && elapsed !== null ? (
         <Text style={styles.empty}>לא נמצא ספר בשם זה</Text>
+      ) : null}
+
+      {results[0]?.direct ? (
+        <Pressable
+          onPress={() => jump(results[0])}
+          style={({ pressed }) => [styles.direct, pressed && styles.cardPressed]}
+          accessibilityRole="button"
+          testID="quick-jump-direct"
+        >
+          <Text style={styles.directText} numberOfLines={2}>
+            פתח: {results[0].bookTitle}
+            {results[0].location ? ` — ${results[0].location}` : ''}
+          </Text>
+          <Text style={styles.directGo}>←</Text>
+        </Pressable>
       ) : null}
 
       {results.map((r) => (
@@ -172,6 +189,17 @@ const createStyles = (colors: Palette) =>
     gap: 2,
   },
   cardPressed: { backgroundColor: colors.accentSoft },
+  direct: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+  },
+  directText: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.background, writingDirection: 'rtl' },
+  directGo: { fontSize: 18, fontWeight: '700', color: colors.background },
   cardHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   cardTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.text, writingDirection: 'rtl' },
   cardPath: { fontSize: 15, fontWeight: '500', color: colors.accent },

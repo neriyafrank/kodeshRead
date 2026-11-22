@@ -14,6 +14,9 @@ interface SearchState {
   query: string;
   scope: SearchScope;
   recent: string[];
+  /** "חיפוש מורחב" (abbreviations, ktiv male/chaser, prefixes/suffixes) vs "חיפוש מדויק". */
+  smart: boolean;
+  setSmart: (smart: boolean) => void;
   setQuery: (q: string) => void;
   setScope: (scope: SearchScope) => void;
   remember: (q: string) => void;
@@ -26,6 +29,8 @@ export const useSearch = create<SearchState>()(
       query: '',
       scope: { kind: 'all' },
       recent: [],
+      smart: true,
+      setSmart: (smart) => set({ smart }),
       setQuery: (query) => set({ query }),
       setScope: (scope) => set({ scope }),
       remember: (q) =>
@@ -40,7 +45,7 @@ export const useSearch = create<SearchState>()(
       name: 'kodeshread.search',
       storage: createJSONStorage(() => AsyncStorage),
       version: 1,
-      partialize: ({ query, scope, recent }) => ({ query, scope, recent }),
+      partialize: ({ query, scope, recent, smart }) => ({ query, scope, recent, smart }),
     },
   ),
 );

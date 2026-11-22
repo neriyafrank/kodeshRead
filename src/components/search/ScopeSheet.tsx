@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
 
 import { normalizeHebrew } from '../../../shared/hebrew';
+import { bookMatchScore } from '../../../shared/hebrewTorahDict';
 import type { SearchScope } from '../../../shared/search';
 import { loadCatalog } from '../../../shared/sources';
 import { useLibrary } from '../../db/LibraryContext';
@@ -88,9 +89,16 @@ export function ScopeSheet({ visible, scope, onSelect, onClose }: Props) {
     const catPath = new Map(data.cats.map((x) => [x.id, x.path]));
     if (f) {
       for (const cat of data.cats) if (norm(cat.name).includes(f)) out.push({ kind: 'category', key: `c${cat.id}`, depth: 0, cat, hasChildren: false, expanded: false });
-      for (const book of data.books)
-        if (norm(book.title).includes(f))
-          out.push({ kind: 'book', key: `b${book.id}`, depth: 0, book, folder: book.category_id != null ? catPath.get(book.category_id) : undefined });
+      // Books: substring or abbreviation-aware match ("שו\"ע או\"ח", "ב\"ק", "רמב\"ם שבת"), best first.
+      const hits: { book: BookRow; score: number }[] = [];
+      for (const book of data.books) {
+        const folder = book.category_id != null ? catPath.get(book.category_id) : undefined;
+        const score = norm(book.title).includes(f) ? 3 : bookMatchScore(filter, book.title, folder);
+        if (score > 0) hits.push({ book, score });
+      }
+      hits.sort((a, b) => b.score - a.score);
+      for (const { book } of hits)
+        out.push({ kind: 'book', key: `b${book.id}`, depth: 0, book, folder: book.category_id != null ? catPath.get(book.category_id) : undefined });
       return out;
     }
     const childCats = new Map<number | null, CatRow[]>();

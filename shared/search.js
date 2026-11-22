@@ -12,20 +12,32 @@
  *       punctuation) are stripped, so no input can raise "fts5: syntax error";
  *     - every token is re-wrapped in double quotes, so FTS5 keywords typed by
  *       the user (AND / OR / NOT / NEAR) are plain words; terms are AND-ed.
+ *     - smart mode ("חיפוש מורחב", { smart: true }) turns every word into an OR-group of
+ *       variants from shared/hebrewTorahDict.js: abbreviation <-> full phrase (ב"ד <->
+ *       "בית דין"), ktiv male/chaser (שולחן <-> שלחן), proclitic prefixes (ושבת, בשבת)
+ *       and suffixes (FTS5 prefix queries, "שבת"*). Quoted phrases stay exact. Variant
+ *       counts are capped per word and per query so FTS5 stays fast.
  *  2. searchParagraphs(): scoped query (library / folder / book), keyset paging
  *     in canonical book order (rowid = paragraphs.id, inserted in library order).
- *  3. buildKwic(): Key-Word-In-Context snippet of display_text with hits marked.
+ *  3. buildKwic() / markTerms(): hit highlighting. `terms` entries are plain tokens
+ *     ("שבת"), prefix patterns ("ושלחנ*") or multi-word phrases ("בית דינ"), so the
+ *     result card and the reader mark the variant that actually matched.
  */
 'use strict';
 
 const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
 const { sourcesOf, sourceForId, sourcesForCategory } = require('./sources');
+const dict = require('./hebrewTorahDict');
 
 /** Characters FTS5 treats as query syntax (spec list). */
 const FTS_RESERVED_RE = /["'\-*():^]/g;
 /** Quote characters that may open/close an exact phrase in the UI. */
 const PHRASE_QUOTES = new Set(['"', '“', '”', '„', '״']);
 const MAX_TERMS = 16;
+/** Upper bound on FTS5 terms (OR variants) in one smart query. */
+const MAX_QUERY_VARIANTS = 160;
+/** Variants per word: between these, depending on how many words the query has. */
+const MIN_WORD_VARIANTS = 6;
 
 /** Normalize one segment of user input into plain FTS tokens. */
 function toTokens(segment) {
@@ -72,15 +84,19 @@ function splitPhrases(input) {
   return out;
 }
 
-/**
- * @returns {{ match: string, terms: string[], phrases: string[][], empty: boolean }}
- *   match: FTS5 MATCH expression, e.g. `"שבת" "אור ליום"` (phrase) — AND semantics.
- *   terms: unique normalized tokens (for highlighting).
- */
-function parseSearchQuery(input) {
+// Query tree: AND of groups; a group is an OR of alternatives:
+//   { type: 'term', text, prefix }        one token ("שבת", or "שבת"* when prefix)
+//   { type: 'phrase', tokens, prefix }    adjacent tokens ("בית דינ")
+//   { type: 'and', groups }               all sub-groups anywhere in the paragraph
+
+const termAlt = (v) => (v.endsWith('*') ? { type: 'term', text: v.slice(0, -1), prefix: true } : { type: 'term', text: v, prefix: false });
+
+/** Exact (non-smart) parse: tokens AND-ed, quoted segments as phrases. */
+function parseExact(input) {
   const parts = [];
   const phrases = [];
   const terms = [];
+  const groups = [];
   let count = 0;
   for (const seg of splitPhrases(input)) {
     if (count >= MAX_TERMS) break;
@@ -92,11 +108,162 @@ function parseSearchQuery(input) {
     if (seg.phrase && tokens.length > 1) {
       phrases.push(tokens);
       parts.push(`"${tokens.join(' ')}"`);
+      groups.push({ alts: [{ type: 'phrase', tokens, prefix: false }] });
     } else {
-      for (const t of tokens) parts.push(`"${t}"`);
+      for (const t of tokens) {
+        parts.push(`"${t}"`);
+        groups.push({ alts: [{ type: 'term', text: t, prefix: false }] });
+      }
     }
   }
-  return { match: parts.join(' '), terms, phrases, empty: parts.length === 0 };
+  return { match: parts.join(' '), terms, phrases, groups, smart: false, empty: parts.length === 0 };
+}
+
+/** Raw words of an unquoted segment -> [{ tok, raw }] (raw keeps gershayim for abbreviation detection). */
+function rawWords(text) {
+  const out = [];
+  for (const raw of String(text).split(/[\s,;!?()[\]{}]+/)) {
+    const toks = toTokens(raw);
+    if (toks.length === 1) out.push({ tok: toks[0], raw });
+    else for (const t of toks) out.push({ tok: t, raw: t });
+  }
+  return out;
+}
+
+function pushAlt(alts, alt, limit) {
+  if (alts.length >= limit) return;
+  const key = altKey(alt);
+  if (!alts.some((a) => altKey(a) === key)) alts.push(alt);
+}
+function altKey(a) {
+  if (a.type === 'term') return 't:' + a.text + (a.prefix ? '*' : '');
+  if (a.type === 'phrase') return 'p:' + a.tokens.join(' ') + (a.prefix ? '*' : '');
+  return 'a:' + a.groups.map((g) => g.alts.map(altKey).join('|')).join('&');
+}
+
+/** Phrase alternatives for a multi-word expansion: "בית דינ", "ובית דינ", "בבית דינ", ... */
+function phraseAlts(words, max) {
+  const out = [{ type: 'phrase', tokens: words, prefix: false }];
+  if (words[0].length >= dict.MIN_EXPAND_LEN) for (const p of ['ו', 'ב', 'ל', 'ה', 'מ', 'ש', 'וב', 'ול'].slice(0, Math.max(0, max - 1))) out.push({ type: 'phrase', tokens: [p + words[0], ...words.slice(1)], prefix: false });
+  return out;
+}
+
+/** OR-group for one typed word in smart mode. */
+function smartWordGroup(w, budget) {
+  const alts = [];
+  // Abbreviation -> full phrase(s) (+ the other abbreviations of the same phrase).
+  const expansions = dict.expandAbbreviation(w.raw, { strict: true }).slice(0, 3);
+  // An abbreviation keeps its exact spelling (+ prefixes): "שוע"* would also match "שועל".
+  const variants = dict.expandWordVariants(w.tok, budget, { wildcard: !expansions.length }).map(termAlt);
+  const abbrAlts = [];
+  for (const exp of expansions) {
+    const words = exp.split(' ');
+    if (words.length > 1) abbrAlts.push(...phraseAlts(words, 3));
+    else abbrAlts.push(...dict.expandWordVariants(exp, 6).map(termAlt));
+    for (const a of dict.abbreviationsFor(exp, { strict: true })) if (a !== w.tok) abbrAlts.push({ type: 'term', text: a, prefix: false });
+  }
+  // A single full word with a dictionary abbreviation (תוספות -> תוס).
+  for (const a of dict.abbreviationsFor(w.tok, { strict: true })) abbrAlts.push({ type: 'term', text: a, prefix: false });
+  const head = abbrAlts.length ? Math.min(variants.length, Math.max(2, Math.floor(budget / 3))) : variants.length;
+  for (const a of variants.slice(0, head)) pushAlt(alts, a, budget);
+  for (const a of abbrAlts) pushAlt(alts, a, budget);
+  for (const a of variants.slice(head)) pushAlt(alts, a, budget);
+  return { alts };
+}
+
+/** OR-group for a typed dictionary full phrase ("בית דין"): all its words (expanded) OR its abbreviations. */
+function smartPhraseGroup(words, budget) {
+  const inner = Math.max(3, Math.floor(budget / (words.length + 1)));
+  const alts = [{ type: 'and', groups: words.map((t) => ({ alts: dict.expandWordVariants(t, inner).map(termAlt) })) }];
+  for (const a of dict.abbreviationsFor(words.join(' '), { strict: true })) pushAlt(alts, { type: 'term', text: a, prefix: false }, budget);
+  return { alts };
+}
+
+/** Number of FTS5 terms in a group. */
+function groupSize(g) {
+  return g.alts.reduce((n, a) => n + (a.type === 'and' ? a.groups.reduce((m, x) => m + groupSize(x), 0) : 1), 0);
+}
+
+/** Highlight patterns of a group: "שבת", "ושבת*", "בית דינ". */
+function groupTerms(g, out) {
+  for (const a of g.alts) {
+    if (a.type === 'term') out.add(a.text + (a.prefix ? '*' : ''));
+    else if (a.type === 'phrase') out.add(a.tokens.join(' ') + (a.prefix ? '*' : ''));
+    else for (const x of a.groups) groupTerms(x, out);
+  }
+  return out;
+}
+
+function altFts(a) {
+  if (a.type === 'term') return `"${a.text}"${a.prefix ? '*' : ''}`;
+  if (a.type === 'phrase') return `"${a.tokens.join(' ')}"${a.prefix ? '*' : ''}`;
+  return '(' + a.groups.map(groupFts).join(' AND ') + ')';
+}
+function groupFts(g) {
+  return g.alts.length === 1 ? altFts(g.alts[0]) : '(' + g.alts.map(altFts).join(' OR ') + ')';
+}
+
+/** Smart (morphological) parse. */
+function parseSmart(input) {
+  // 1. Items: exact quoted phrases, dictionary phrases, single words.
+  const items = [];
+  for (const seg of splitPhrases(input)) {
+    if (seg.phrase) {
+      const tokens = toTokens(seg.text);
+      if (tokens.length) items.push({ kind: 'exact', tokens });
+      continue;
+    }
+    const words = rawWords(seg.text);
+    const maxN = dict.maxFullPhraseWords();
+    for (let i = 0; i < words.length; ) {
+      let n = Math.min(maxN, words.length - i);
+      for (; n >= 2; n--) if (dict.isFullPhrase(words.slice(i, i + n).map((x) => x.tok))) break;
+      if (n >= 2) {
+        items.push({ kind: 'phrase', tokens: words.slice(i, i + n).map((x) => x.tok) });
+        i += n;
+      } else {
+        items.push({ kind: 'word', word: words[i] });
+        i += 1;
+      }
+    }
+  }
+  // 2. Groups within the term budgets.
+  const groups = [];
+  const phrases = [];
+  let count = 0;
+  const kept = [];
+  for (const it of items) {
+    const n = it.kind === 'word' ? 1 : it.tokens.length;
+    if (count + n > MAX_TERMS) break;
+    count += n;
+    kept.push(it);
+  }
+  const budget = Math.max(MIN_WORD_VARIANTS, Math.min(dict.MAX_VARIANTS_PER_WORD, Math.floor(MAX_QUERY_VARIANTS / Math.max(1, kept.length))));
+  let total = 0;
+  for (const it of kept) {
+    let g;
+    if (it.kind === 'exact') {
+      g = it.tokens.length > 1 ? { alts: [{ type: 'phrase', tokens: it.tokens, prefix: false }] } : { alts: [{ type: 'term', text: it.tokens[0], prefix: false }] };
+      if (it.tokens.length > 1) phrases.push(it.tokens);
+    } else if (it.kind === 'phrase') g = smartPhraseGroup(it.tokens, budget);
+    else g = smartWordGroup(it.word, budget);
+    total += groupSize(g);
+    groups.push(g);
+  }
+  const terms = new Set();
+  for (const g of groups) groupTerms(g, terms);
+  return { match: groups.map(groupFts).join(' AND '), terms: [...terms], phrases, groups, smart: true, variantCount: total, empty: groups.length === 0 };
+}
+
+/**
+ * @param {string} input
+ * @param {{ smart?: boolean }} [opts]  smart: morphological / abbreviation expansion ("חיפוש מורחב")
+ * @returns {{ match: string, terms: string[], phrases: string[][], groups: object[], smart: boolean, empty: boolean }}
+ *   match: FTS5 MATCH expression, e.g. `"שבת" "אור ליום"` (phrase) — AND semantics.
+ *   terms: highlight patterns (normalized tokens; smart mode adds "x*" prefixes and "a b" phrases).
+ */
+function parseSearchQuery(input, opts) {
+  return opts && opts.smart ? parseSmart(input) : parseExact(input);
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +329,8 @@ function matchSource(q, opts) {
     }
     return { sql, params, idCol: 'f.rowid' };
   }
-  const groups = [...q.phrases.map((ph) => ph.join(' ')), ...q.terms.filter((t) => !q.phrases.some((ph) => ph.includes(t)))];
-  let sql = 'FROM paragraphs p WHERE ' + groups.map(() => "p.clean_text LIKE ? ESCAPE '\\'").join(' AND ');
-  const params = groups.map((g) => '%' + likeEscape(g) + '%');
+  const params = [];
+  let sql = 'FROM paragraphs p WHERE ' + likeGroups(q).map((g) => likeGroup(g, params, !!q.smart)).join(' AND ');
   if (scope && scope.kind === 'book') {
     sql += ' AND p.book_id = ?';
     params.push(scope.bookId);
@@ -175,16 +341,68 @@ function matchSource(q, opts) {
   return { sql, params, idCol: 'p.id' };
 }
 
+/** Groups of a parsed query (older callers may pass { terms, phrases } only). */
+function likeGroups(q) {
+  if (q.groups) return q.groups;
+  const groups = q.phrases.map((ph) => ({ alts: [{ type: 'phrase', tokens: ph, prefix: false }] }));
+  for (const t of q.terms) if (!q.phrases.some((ph) => ph.includes(t))) groups.push({ alts: [{ type: 'term', text: t, prefix: false }] });
+  return groups;
+}
+
+/** GLOB character class of word characters (Hebrew letters, digits, Latin). */
+const WORD_CHAR_CLASS = 'א-ת0-9a-zA-Z';
+
+/** LIKE pattern text of a simple alternative (substring match covers prefixes and suffixes). */
+const likeText = (a) => (a.type === 'term' ? a.text : a.tokens.join(' '));
+
+/**
+ * LIKE fragment of a group. Exact queries keep the historical substring match; smart queries
+ * match terms at a word start (their prefixed / suffixed variants are enumerated anyway), so a
+ * short abbreviation ("בד") does not match inside other words ("עבד").
+ */
+function likeGroup(g, params, smart) {
+  const wordStart = (a) => smart && a.type === 'term';
+  const simple = g.alts.filter((a) => a.type !== 'and');
+  // An alternative already covered by a shorter one is redundant: substring ("ושבת" ⊃ "שבת")
+  // or, at a word start, a longer word with the same beginning ("שבתות" after "שבת").
+  const covered = (a) =>
+    simple.some((o) => o !== a && likeText(o) !== likeText(a) && (wordStart(o) ? o.prefix && wordStart(a) && likeText(a).startsWith(likeText(o)) : likeText(a).includes(likeText(o))));
+  const parts = [];
+  const seen = new Set();
+  for (const a of g.alts) {
+    if (a.type === 'and') {
+      parts.push('(' + a.groups.map((x) => likeGroup(x, params, smart)).join(' AND ') + ')');
+      continue;
+    }
+    const t = likeText(a);
+    const key = (wordStart(a) ? '^' : '') + t;
+    if (seen.has(key) || covered(a)) continue;
+    seen.add(key);
+    if (wordStart(a) && !a.prefix) {
+      // Whole word: next character is not a letter/digit (tokens are letters/digits only, so GLOB-safe).
+      params.push('* ' + t + '[^' + WORD_CHAR_CLASS + ']*');
+      parts.push("(' ' || p.clean_text || ' ') GLOB ?");
+    } else if (wordStart(a)) {
+      params.push('% ' + likeEscape(t) + '%');
+      parts.push("(' ' || p.clean_text) LIKE ? ESCAPE '\\'");
+    } else {
+      params.push('%' + likeEscape(t) + '%');
+      parts.push("p.clean_text LIKE ? ESCAPE '\\'");
+    }
+  }
+  return parts.length === 1 ? parts[0] : '(' + parts.join(' OR ') + ')';
+}
+
 /**
  * Run a search. Results are in canonical library order; pass the last result's
  * `id` as `afterId` to fetch the next page (keyset paging, no OFFSET scans).
  *
  * @param {{ all: Function }} db
  * @param {string | ReturnType<typeof parseSearchQuery>} query
- * @param {{ scope?: SearchScope, afterId?: number, limit?: number, fts?: boolean }} [opts]
+ * @param {{ scope?: SearchScope, afterId?: number, limit?: number, fts?: boolean, smart?: boolean }} [opts]
  */
 async function searchParagraphs(db, query, opts) {
-  const q = typeof query === 'string' ? parseSearchQuery(query) : query;
+  const q = typeof query === 'string' ? parseSearchQuery(query, opts) : query;
   const limit = (opts && opts.limit) || PAGE_SIZE;
   if (q.empty) return { rows: [], hasMore: false, query: q };
   // Sources are ordered by id namespace (core, then personal books), so keyset paging
@@ -225,7 +443,7 @@ async function searchOne(db, q, opts, take) {
 
 /** Number of matching paragraphs, capped at COUNT_CAP (returns { count, capped }). */
 async function countMatches(db, query, opts) {
-  const q = typeof query === 'string' ? parseSearchQuery(query) : query;
+  const q = typeof query === 'string' ? parseSearchQuery(query, opts) : query;
   if (q.empty) return { count: 0, capped: false };
   const cap = (opts && opts.cap) || COUNT_CAP;
   const src = matchSource(q, opts);
@@ -257,16 +475,13 @@ function buildKwic(displayText, terms, opts) {
   const showNiqqud = !opts || opts.showNiqqud !== false;
   let text = decodeEntities(stripHtml(String(displayText || ''))).replace(/\s+/g, ' ').trim();
   if (!showNiqqud) text = text.replace(NIQQUD_DISPLAY_RE, '');
-  const termSet = new Set(terms || []);
+  const matcher = makeTermMatcher(terms);
   // Words + separators (whitespace, maqaf, paseq) alternate in `parts`.
   const parts = text.split(/(\s+|[־׀])/);
   const words = [];
-  for (let i = 0; i < parts.length; i += 2) {
-    const w = parts[i];
-    const sep = parts[i + 1] || '';
-    const toks = toTokens(w);
-    words.push({ text: w, sep, hit: toks.some((t) => termSet.has(t)) });
-  }
+  for (let i = 0; i < parts.length; i += 2) words.push({ text: parts[i], sep: parts[i + 1] || '', hit: false });
+  const flags = matcher.hits(words.map((w) => toTokens(w.text)));
+  words.forEach((w, i) => (w.hit = flags[i]));
   const first = words.findIndex((w) => w.hit);
   const hitCount = words.filter((w) => w.hit).length;
   let from = 0;
@@ -299,23 +514,80 @@ function buildKwic(displayText, terms, opts) {
 }
 
 /**
+ * Compiles highlight `terms` into a word matcher. A term is a normalized token ("שבת"),
+ * a prefix pattern ("ושלחנ*": any word starting with it) or a phrase of such words
+ * ("בית דינ": consecutive words). hits(words) takes each displayed word's tokens
+ * (toTokens) and returns which words are part of a match.
+ */
+function makeTermMatcher(terms) {
+  const exact = new Set();
+  const prefixes = [];
+  const phrases = [];
+  const parse = (w) => (w.endsWith('*') ? { text: w.slice(0, -1), prefix: true } : { text: w, prefix: false });
+  for (const t of terms || []) {
+    const words = String(t || '').split(' ').filter(Boolean);
+    if (words.length > 1) phrases.push(words.map(parse));
+    else if (words.length === 1) {
+      const w = parse(words[0]);
+      if (!w.text) continue;
+      if (w.prefix) prefixes.push(w.text);
+      else exact.add(w.text);
+    }
+  }
+  const tokHit = (tok) => exact.has(tok) || prefixes.some((p) => tok.startsWith(p));
+  const wordMatches = (toks, pw) => toks.some((t) => (pw.prefix ? t.startsWith(pw.text) : t === pw.text));
+  return {
+    empty: !exact.size && !prefixes.length && !phrases.length,
+    /** @param {string[][]} words  tokens of each word */
+    hits(words) {
+      const flags = words.map((toks) => toks.some(tokHit));
+      if (phrases.length) {
+        // Phrases only count when their words are consecutive (empty "words" such as
+        // punctuation-only pieces are skipped).
+        const idx = [];
+        words.forEach((toks, i) => toks.length && idx.push(i));
+        for (let k = 0; k < idx.length; k++) {
+          for (const ph of phrases) {
+            if (k + ph.length > idx.length) continue;
+            let ok = true;
+            for (let j = 0; j < ph.length && ok; j++) ok = wordMatches(words[idx[k + j]], ph[j]);
+            if (ok) for (let j = 0; j < ph.length; j++) flags[idx[k + j]] = true;
+          }
+        }
+      }
+      return flags;
+    },
+  };
+}
+
+/**
  * Wraps the words of sanitized inline HTML (prepareDisplayText output) that match the
  * search terms in <mark>…</mark>, normalizing each word exactly like the index (niqqud,
- * finals, gershayim). Tags are left untouched; used by the reader to flash the hit.
+ * finals, gershayim). Terms may be prefix patterns or phrases (see makeTermMatcher), so
+ * smart-search hits such as "ושלחן" or "בית דין" are marked too. Tags are left untouched
+ * (a phrase may span inline tags); used by the reader to flash the hit.
  */
 function markTerms(html, terms) {
-  const termSet = new Set((terms || []).filter(Boolean));
-  if (!html || !termSet.size) return html || '';
-  return String(html)
-    .split(/(<[^>]*>)/)
-    .map((part) => {
-      if (!part || part[0] === '<') return part;
-      return part
-        .split(/(\s+|[־׀])/)
-        .map((w, i) => (i % 2 === 0 && w && toTokens(w).some((t) => termSet.has(t)) ? `<mark>${w}</mark>` : w))
-        .join('');
-    })
-    .join('');
+  const matcher = makeTermMatcher(terms);
+  if (!html || matcher.empty) return html || '';
+  const pieces = [];
+  const wordIdx = [];
+  for (const part of String(html).split(/(<[^>]*>)/)) {
+    if (!part) continue;
+    if (part[0] === '<') {
+      pieces.push(part);
+      continue;
+    }
+    part.split(/(\s+|[־׀])/).forEach((w, i) => {
+      if (i % 2 === 0 && w) wordIdx.push(pieces.length);
+      pieces.push(w);
+    });
+  }
+  const flags = matcher.hits(wordIdx.map((i) => toTokens(pieces[i])));
+  wordIdx.forEach((pi, k) => {
+    if (flags[k]) pieces[pi] = `<mark>${pieces[pi]}</mark>`;
+  });
+  return pieces.join('');
 }
 
 /** "Part > Chapter > Section" from the stored toc_path (separator agnostic). */
@@ -331,6 +603,7 @@ module.exports = {
   FTS_RESERVED_RE,
   PAGE_SIZE,
   COUNT_CAP,
+  MAX_QUERY_VARIANTS,
   splitPhrases,
   parseSearchQuery,
   scopeClause,
@@ -338,6 +611,7 @@ module.exports = {
   searchParagraphs,
   countMatches,
   buildKwic,
+  makeTermMatcher,
   markTerms,
   formatTocPath,
 };

@@ -120,6 +120,27 @@ the compressed release artifact (see [Publishing a library release](#publishing-
 `שבת ב.` · `שבת קנז ב` · `ר"ה טז:` · `מסכת ראש השנה ג` · `בראשית יב א` (verse) ·
 `שוע אוח כה ה` · `רמבם שבת א א` (once those books are in the library)
 
+Abbreviations, other spellings and structural words are understood (`shared/hebrewTorahDict.js`):
+`שו"ע או"ח סי' שכח ד` · `שוע אוח 328 4` · `ב"ק דף ב ע"ב` · `רמב"ם הל' שבת פ"א` · `בר' א א` ·
+`מ"ב` · `שלחן ערוך אורח חיים כה`. A fully resolved reference shows a **פתח: ספר — מיקום** card on top.
+The search scope picker's book filter is abbreviation-aware too.
+
+## Hebrew Torah linguistic engine (search)
+
+`shared/hebrewTorahDict.js` is a zero-dependency module shared by search and Quick Jump. It works
+at query time on the index's normalized form, so it needs no schema change or re-indexing:
+
+- ~580 bidirectional abbreviation entries (books, Shulchan Aruch / Rambam sections, tractates,
+  Tanach, midrash, sages, 300+ general phrases): `ב"ד` ↔ `בית דין`, `שו"ע` ↔ `שולחן ערוך`.
+  `רמבם` / `רמב"ם` / `רמב״ם` resolve identically.
+- Ktiv male/chaser variants (`שולחן` ↔ `שלחן`, `קידושין` ↔ `קדושין`, `תפילין` ↔ `תפלין`, `אלוקים` / `אלהים`).
+- Proclitic prefixes (`ו ה ב כ ל מ ש`, `וב`, `וה`, `של`, `כש`…) and suffixes (FTS5 prefix queries `"שבת"*`).
+  Words of 1–2 letters are never expanded.
+
+The Search screen's **חיפוש מורחב** mode (default) builds an OR-group of variants per word, capped at
+24 per word and 160 per query; **חיפוש מדויק** matches the typed words only. A `"quoted phrase"` is always
+exact. Result cards and the reader mark the variant that actually matched (`ושלחן`, `בית דין`, `ובשבת`).
+
 ## Library storage & updates
 
 Nothing is bundled in the APK. On the device there are two SQLite databases in the app's
