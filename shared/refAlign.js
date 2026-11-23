@@ -20,7 +20,7 @@
  */
 'use strict';
 
-const { normalizeHebrew, extractRefKey, aliasKey, decodeEntities, stripHtml, intToHebrew } = require('./hebrew');
+const { normalizeHebrew, extractRefKey, aliasKey, decodeEntities, stripHtml, stripNiqqud, intToHebrew, hebrewNumeralToInt } = require('./hebrew');
 
 const plainHeadingText = (html) => decodeEntities(stripHtml(String(html || ''))).replace(/\s+/g, ' ').trim();
 
@@ -41,6 +41,8 @@ const UNIT_TYPES = new Map(
     'סעיף קטן': 'סעיף קטן', סק: 'סעיף קטן',
     משנה: 'משנה', משניות: 'משנה',
     הלכה: 'הלכה', הל: 'הלכה',
+    // Bavli commentaries (Otzaria): "שורה ה" under a daf / amud = the 5th paragraph of that amud.
+    שורה: 'שורה', שורות: 'שורה', פסקה: 'שורה', פיסקה: 'שורה', פסקא: 'שורה', פיסקא: 'שורה',
     אות: 'אות', כלל: 'כלל', מאמר: 'מאמר', שער: 'שער', פרשה: 'פרשה', פרשת: 'פרשה', מזמור: 'מזמור',
   }).map(([k, v]) => [normalizeHebrew(k, { keepPunctuation: false }), v]),
 );
@@ -90,6 +92,11 @@ function unitLabels(title) {
     // Unit words extractRefKey does not know ("כלל א", "מזמור ג"): drop the word itself.
     if (type && tokens.length > 1 && key.split(' ')[0] === tokens[0]) key = tokens.slice(1).join(' ');
   }
+  // "שורה טז:" / "שורה 12" / "פסקה ה" -> one canonical key per paragraph number ("טז", "יב", "ה").
+  if (type === 'שורה') {
+    const n = paragraphNumber(`שורה ${key}`);
+    if (n != null) key = intToHebrew(n) || String(n);
+  }
   const amud = /^(.+?)([.:])$/.exec(key);
   if (amud && (type === 'דף' || type === undefined) && NUMERAL_RE.test(key)) {
     return [{ type: 'דף', key: amud[1] }, { type: 'עמוד', key: amud[2] === '.' ? 'א' : 'ב' }];
@@ -98,6 +105,26 @@ function unitLabels(title) {
   // No structural prefix: a bare numeral ("<h3>כה</h3>") or a named section ("הקדמה").
   if (tokens.length === 1 && NUMERAL_RE.test(tokens[0])) return [{ type: '', key: tokens[0] }];
   return [{ type: '', key: tokens.join(' ') }];
+}
+
+/**
+ * Paragraph number of a Bavli sub-heading ("שורה ה", "שורה טו", "שורה א'", "שורה ב:", "שורה 12",
+ * "פסקה ה" / "פיסקה ה"): the 1-based index of a body paragraph inside the daf / amud above it,
+ * NOT a visual line. null for anything else (a longer paragraph, a non-canonical numeral).
+ * Accepts the raw heading / line text (HTML, niqqud, geresh / gershayim and trailing punctuation
+ * are ignored).
+ */
+const PARAGRAPH_MARKER_RE = /^(?:שורה|שורות|פסקה|פיסקה|פסקא|פיסקא)\s*[-–:]?\s*(\S{1,8})$/;
+function paragraphNumber(text) {
+  const plain = stripNiqqud(plainHeadingText(text)).replace(/[\u200E\u200F]/g, '').trim();
+  const m = PARAGRAPH_MARKER_RE.exec(plain);
+  if (!m) return null;
+  const tok = m[1].replace(/["״'׳.:,;()[\]]/g, '');
+  if (/^\d{1,3}$/.test(tok)) return Number(tok) > 0 ? Number(tok) : null;
+  if (!/^[א-ת]{1,4}$/.test(tok)) return null;
+  const n = hebrewNumeralToInt(tok);
+  // Only canonical numerals ("טו" / "טז", never "יה"): a stray word cannot pass for a number.
+  return n && intToHebrew(n) === normalizeHebrew(tok, { keepPunctuation: false }) ? n : null;
 }
 
 const labelText = (l) => (l.type ? `${l.type} ${l.key}` : l.key);
@@ -350,11 +377,82 @@ async function alignUnits(baseUnits, commUnits, commContent, baseContent, opts) 
     }
     return v;
   };
+  // Bavli paragraph-level alignment ("שורה N" = the N-th body paragraph of the amud, see
+  // paragraphNumber): the paragraphs (line numbers) of a base daf / amud unit, loaded once each.
+  const isAmudUnit = (b) => !!b && b.labels.length > 0 && ['עמוד', 'דף'].includes(b.labels[b.labels.length - 1].type);
+  const paraCache = new Map();
+  const paragraphsOf = async (amud) => {
+    let v = paraCache.get(amud.id);
+    if (!v) {
+      v = baseContent ? (await baseContent(amud)).map((l) => l.line).sort((a, b) => a - b) : [];
+      paraCache.set(amud.id, v);
+    }
+    return v;
+  };
+  /** { amud, paras } of the base daf / amud a commentary unit refers to, or null. */
+  const amudOf = async (labels) => {
+    const amud = index.find(labels);
+    if (!isAmudUnit(amud)) return null;
+    const paras = await paragraphsOf(amud);
+    return paras.length ? { amud, paras } : null;
+  };
+  // N clamps to the last paragraph (noisy texts: more "שורה" numbers than base paragraphs).
+  const paraLine = (paras, n) => paras[Math.min(Math.max(n, 1), paras.length) - 1];
+  const leafOf = (u) => u.labels[u.labels.length - 1];
+  const numberOf = (u) => {
+    const leaf = leafOf(u);
+    if (!leaf || leaf.type !== 'שורה' || u.labels.length < 2) return null;
+    const n = paragraphNumber(u.title);
+    return n != null ? n : paragraphNumber('שורה ' + leaf.key);
+  };
+  // daf / amud units of the commentary that have "שורה N" sub-headings.
+  const withParagraphs = new Set();
+  for (const u of commUnits) if (numberOf(u) != null) withParagraphs.add(refKeyOf(u.labels.slice(0, -1)));
+
   const out = [];
   for (const u of commUnits) {
     // Only units with their own text (the דיבורים under this heading, before any sub-heading).
     const own = u.ownEnd > u.start ? linesIn(u.start + 1, u.ownEnd) : [];
     if (!own.length) continue;
+
+    // "שורה N" sub-heading: its entries belong to body paragraph N of the daf / amud above it.
+    const lineNo = numberOf(u);
+    if (lineNo != null && !index.find(u.labels)) {
+      const target = await amudOf(u.labels.slice(0, -1));
+      if (target) {
+        const line = paraLine(target.paras, lineNo);
+        out.push({ refKey: u.refKey, baseStart: line, baseEnd: line, commStart: u.start, commEnd: u.ownEnd });
+        continue;
+      }
+    }
+    // The daf / amud's own text before its first "שורה": paragraph 1 (nothing is dropped, and the
+    // rest of the amud is not shown for every paragraph).
+    if (withParagraphs.has(u.refKey)) {
+      const target = await amudOf(u.labels);
+      if (target) {
+        out.push({ refKey: u.refKey, baseStart: target.paras[0], baseEnd: target.paras[0], commStart: u.start, commEnd: u.ownEnd });
+        continue;
+      }
+    }
+    // Same markers as plain paragraphs under the daf / amud (not headings): split the amud per marker.
+    const marks = own.filter((l) => l.text != null && l.text.length < 12 && paragraphNumber(l.text) != null);
+    if (marks.length) {
+      const target = await amudOf(u.labels);
+      if (target) {
+        if (own[0].line < marks[0].line) {
+          out.push({ refKey: u.refKey, baseStart: target.paras[0], baseEnd: target.paras[0], commStart: u.start, commEnd: marks[0].line - 1 });
+        }
+        for (let i = 0; i < marks.length; i++) {
+          const segEnd = i + 1 < marks.length ? marks[i + 1].line - 1 : u.ownEnd;
+          if (!own.some((l) => l.line > marks[i].line && l.line <= segEnd)) continue; // marker with no entries
+          const n = paragraphNumber(marks[i].text);
+          const line = paraLine(target.paras, n);
+          out.push({ refKey: `${u.refKey}|שורה ${intToHebrew(n) || n}`, baseStart: line, baseEnd: line, commStart: marks[i].line, commEnd: segEnd });
+        }
+        continue;
+      }
+    }
+
     const base = index.find(u.labels);
     let range = base ? { start: base.start, end: base.end } : null;
     // No heading for the leaf in the base book: resolve the verse / seif inside the matching parent
@@ -423,6 +521,7 @@ module.exports = {
   pairCommentariesAsync,
   inlineUnitWord,
   markerKey,
+  paragraphNumber,
   inlineUnits,
   alignUnits,
 };

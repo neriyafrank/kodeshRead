@@ -15,6 +15,7 @@
 'use strict';
 
 const { adapterForBook } = require('./sources');
+const { paragraphNumber } = require('./refAlign');
 
 /** Longest commentary / base block rendered in the drawer (a whole chapter at most). */
 const MAX_BLOCK_LINES = 400;
@@ -180,6 +181,8 @@ async function fetchLinkedEntries(db, bookId, line) {
       const k = r.book_id + ':' + r.line;
       if (seen.has(k)) continue;
       seen.add(k);
+      // A Bavli "שורה ה" marker stored as a plain paragraph (not a heading) is only a label.
+      if (u.role === 'base' && paragraphNumber(r.display_text) != null) continue;
       // `direct`: an Otzaria link file also points at exactly this paragraph.
       out.push({ ...r, link_type: u.role === 'base' ? u.link_type || 'commentary' : 'source', block, direct: explicit.has(k) });
     }

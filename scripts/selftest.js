@@ -58,6 +58,7 @@ const release = require('../shared/release');
 const dict = require('../shared/hebrewTorahDict');
 const quickJump = require('../shared/quickJump');
 const refAlign = require('../shared/refAlign');
+const hebrew = require('../shared/hebrew');
 const rank = require('../shared/commentaryRank');
 const hs = require('../shared/hebrewSearch');
 
@@ -494,17 +495,20 @@ async function main() {
       assert.ok(n >= 20, `links=${n}`);
       const shabbat = (await db.all("SELECT id FROM books WHERE title='שבת'", []))[0].id;
       const counts = await commentary.fetchLinkCounts(db, shabbat, 1, 30);
-      assert.strictEqual(counts.get(3), 3, `line 3: ${counts.get(3)}`); // 2x רש"י + תוספות (line links)
-      assert.strictEqual(counts.get(2), 2, 'amud heading: רש"י + תוספות aligned units');
+      // 2x רש"י line links + תוספות + the רש"י שורה א unit (paragraph-level alignment of the sample רש"י).
+      assert.strictEqual(counts.get(3), 4, `line 3: ${counts.get(3)}`);
+      assert.strictEqual(counts.get(2), 1, 'amud heading: only תוספות (no שורה headings) is aligned at the amud');
       assert.ok(!counts.has(4));
       const rows = commentary.attachLinkCounts(await reader.fetchRange(db, shabbat, 1, 10), counts);
-      assert.strictEqual(rows.find((r) => r.line_index === 3).link_count, 3);
+      assert.strictEqual(rows.find((r) => r.line_index === 3).link_count, 4);
       assert.strictEqual(rows.find((r) => r.line_index === 4).link_count, 0);
-      // The whole aligned amud block of each commentator; the explicitly linked dibburim are `direct`.
+      // רש"י: only the entries of שורה א (paragraph 1) -- the heading row is not an entry; תוספות (no
+      // שורה headings) keeps its whole amud block. The explicitly linked dibburim are `direct`.
       const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, shabbat, 3));
-      assert.deepStrictEqual(groups.map((g) => [g.name, g.entries.length, g.entries.filter((e) => e.direct).length]), [['רש"י', 6, 2], ['תוספות', 2, 1]]);
-      assert.ok(groups[0].entries.every((e) => e.display_text && e.toc_path === 'דף ב.'), JSON.stringify(groups[0].entries));
-      assert.deepStrictEqual(groups[0].block, { refKey: 'דף ב|עמוד א', start: 2, end: 8 });
+      assert.deepStrictEqual(groups.map((g) => [g.name, g.entries.length, g.entries.filter((e) => e.direct).length]), [['רש"י', 2, 2], ['תוספות', 2, 1]]);
+      assert.ok(groups[0].entries.every((e) => e.display_text && e.toc_path === 'דף ב. > שורה א'), JSON.stringify(groups[0].entries));
+      assert.deepStrictEqual(groups[0].block, { refKey: 'דף ב|עמוד א|שורה א', start: 3, end: 5 });
+      assert.deepStrictEqual(groups[1].block, { refKey: 'דף ב|עמוד א', start: 2, end: 4 });
       // Reverse direction: from the commentary back to the Gemara line.
       const rashi = groups[0].bookId;
       const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, rashi, groups[0].entries[0].line));
@@ -523,6 +527,40 @@ async function main() {
         [['אונקלוס', 'עיקריים'], ['רש"י', 'עיקריים'], ['רמב"ן', 'עיקריים'], ['אבן עזרא', 'עיקריים'], ['ספורנו', 'עיקריים'], ['מלבי"ם', 'עיקריים'], ['דעת זקנים', 'ראשונים'], ['גור אריה', 'אחרונים']],
       );
       assert.deepStrictEqual([...rank.defaultExpandedKeys(ranked)], ['אונקלוס', 'רשי', 'רמבנ']);
+    });
+    await check('sample: Bavli שורה N = N-th body paragraph of the amud; Rashi dibur hamatchil matches the linked Gemara paragraph', async () => {
+      const norm = (t) => hebrew.normalizeHebrew(String(t).replace(/<[^>]*>/g, ''), { keepPunctuation: false });
+      const shabbat = (await db.all("SELECT id FROM books WHERE title='שבת'", []))[0].id;
+      const rashi = (await db.all("SELECT id FROM books WHERE title='רש\"י על שבת'", []))[0].id;
+      const rows = await db.all('SELECT ref_key, base_start, base_end, comm_start, comm_end FROM ref_links WHERE comm_book_id = ? AND base_book_id = ? ORDER BY comm_start', [rashi, shabbat]);
+      assert.strictEqual(rows.length, 9, 'every שורה of the sample רש"י is aligned');
+      assert.ok(rows.every((x) => x.base_start === x.base_end), 'paragraph-level rows only (no amud-level dump)');
+      let checked = 0;
+      for (const row of rows) {
+        const n = refAlign.paragraphNumber(row.ref_key.split('|').pop());
+        // Paragraph N of the amud = the N-th non-heading line after the amud heading.
+        const amudHeading = (await db.all("SELECT MAX(line_index) AS l FROM paragraphs WHERE book_id = ? AND is_heading = 1 AND line_index < ?", [shabbat, row.base_start]))[0].l;
+        const body = await db.all('SELECT line_index FROM paragraphs WHERE book_id = ? AND is_heading = 0 AND line_index > ? ORDER BY line_index LIMIT ?', [shabbat, amudHeading, n]);
+        assert.strictEqual(body[n - 1].line_index, row.base_start, `${row.ref_key} -> paragraph ${n}`);
+        const gemara = norm((await db.all('SELECT display_text FROM paragraphs WHERE book_id = ? AND line_index = ?', [shabbat, row.base_start]))[0].display_text);
+        const entries = await db.all('SELECT display_text FROM paragraphs WHERE book_id = ? AND line_index BETWEEN ? AND ? AND is_heading = 0', [rashi, row.comm_start, row.comm_end]);
+        assert.ok(entries.length >= 1);
+        for (const e of entries) {
+          const dh = /<b>([^<]+)<\/b>/.exec(e.display_text);
+          assert.ok(dh, e.display_text);
+          const words = norm(dh[1]);
+          assert.ok(gemara.includes(words), `${row.ref_key}: ד"ה "${words}" is in Gemara paragraph ${n}`);
+          checked++;
+        }
+      }
+      assert.strictEqual(checked, 11);
+      // Tapping Gemara paragraph 5 (line 7): exactly שורה ה, never שורה א / שורה ו / the whole amud.
+      const g = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, shabbat, 7));
+      const r5 = g.find((x) => x.bookId === rashi);
+      assert.deepStrictEqual(r5.entries.map((e) => e.toc_path), ['דף ב. > שורה ה']);
+      assert.ok(/שניהם פטורין/.test(r5.entries[0].display_text));
+      // Paragraph 2 (line 4, "כיצד?") has no רש"י entry at all.
+      assert.ok(!commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, shabbat, 4)).some((x) => x.bookId === rashi));
     });
     await check('sample: commentary books do not hijack Quick Jump', async () => {
       await expectJump(db, index, 'שבת ב.', 'שבת', await line('שבת', 'דף ב.'));
@@ -1636,6 +1674,16 @@ async function refAlignTests() {
     assert.strictEqual(reader.prepareDisplayText(v, { showNiqqud: false, showCantillation: true }), 'בראשית ברא');
     assert.strictEqual(reader.prepareDisplayText(v), v);
   });
+  await check('refAlign: paragraphNumber parses Bavli "שורה N" markers (gematria + punctuation variants)', () => {
+    const n = refAlign.paragraphNumber;
+    const cases = [['שורה א', 1], ['שורה ה', 5], ['שורה טו', 15], ['שורה טז', 16], ['שורה כד', 24], ['שורה 12', 12],
+      ["שורה א'", 1], ['שורה א׳', 1], ['שורה א:', 1], ['שורה א.', 1], ['שורה ט"ו', 15], ['שורה ט״ז', 16], ["שורה י'", 10],
+      ['שורה יב', 12], ['שורה קכג', 123], ['פסקה ה', 5], ['פיסקה ה', 5], ['פסקה 7', 7], ['<h3>שורה ה</h3>', 5], ['שוֹרָה ג', 3], ['  שורה   ב ', 2]];
+    for (const [t, v] of cases) assert.strictEqual(n(t), v, t);
+    for (const t of ['', 'שורה', 'שורה ראשונה', 'שורה ארוכה', 'שורה יה', 'שורה 0', 'שורה א ב', 'דף ב.', 'ד"ה שורה ה - טקסט', 'גמרא']) assert.strictEqual(n(t), null, t);
+    // Headings of a Bavli commentary: a "שורה" is a sub-unit of its amud.
+    assert.strictEqual(refAlign.refKeyOf([...refAlign.unitLabels('דף ב.'), ...refAlign.unitLabels('שורה ה')]), 'דף ב|עמוד א|שורה ה');
+  });
   await check('refAlign: commentary <-> base pairing (Otzaria naming + known bases)', () => {
     const b = (id, title, categoryPath, aliases) => ({ id, title, categoryPath, aliases: aliases || [] });
     const books = [
@@ -1665,6 +1713,11 @@ async function refAlignTests() {
     // Talmud: nested "דף ב" > "עמוד א" in the base, "דף ב." / "דף ב:" in the commentary.
     w('תלמוד בבלי/סדר זרעים/ברכות.txt', ['<h1>ברכות</h1>', '<h2>דף ב</h2>', '<h3>עמוד א</h3>', 'מאימתי קורין', '<h3>עמוד ב</h3>', 'גמרא עמוד ב']);
     w('תלמוד בבלי/מפרשים/תוספות על ברכות.txt', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב.</h2>', 'ד"ה מאימתי - תוס', '<h2>דף ב:</h2>', 'ד"ה גמרא - תוס ב']);
+    // Bavli paragraph-level alignment: "שורה N" = the N-th body paragraph of the amud.
+    w('תלמוד בבלי/סדר מועד/סוכה.txt', ['<h1>סוכה</h1>', '<h2>דף ב.</h2>', 'גמרא אחת', 'גמרא שתיים', 'גמרא שלוש', 'גמרא ארבע', 'גמרא חמש', 'גמרא שש', '<h2>דף ב:</h2>', 'גמרא ב א', 'גמרא ב ב']);
+    w('תלמוד בבלי/מפרשים/רשי על סוכה.txt', ['<h1>רש"י על סוכה</h1>', '<h2>דף ב.</h2>', 'רשי הקדמה', '<h3>שורה א</h3>', 'ד"ה גמרא אחת - רשי א1', '<h3>שורה ה</h3>', 'ד"ה גמרא חמש - רשי ה1', 'ד"ה חמש - רשי ה2', '<h3>שורה טז:</h3>', 'ד"ה שש - רשי טז', '<h2>דף ב:</h2>', '<h3>שורה ב</h3>', 'ד"ה ב ב - רשי ב-ב']);
+    w('תלמוד בבלי/מפרשים/תוספות על סוכה.txt', ['<h1>תוספות על סוכה</h1>', '<h2>דף ב.</h2>', 'תוס עמוד']);
+    w('תלמוד בבלי/מפרשים/מאירי על סוכה.txt', ['<h1>מאירי על סוכה</h1>', '<h2>דף ב.</h2>', 'מאירי פתיחה', 'שורה ג', 'מאירי ג1', "שורה ד'", 'מאירי ד1', 'מאירי ד2']);
     // Mishnah of the same name must not be confused with the Talmud tractate.
     w('משנה/סדר זרעים/ברכות.txt', ['<h1>ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'מאימתי קורין את שמע']);
     w('משנה/מפרשים/ברטנורא על משנה ברכות.txt', ['<h1>ברטנורא על משנה ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'ד"ה מאימתי - ברטנורא']);
@@ -1678,7 +1731,7 @@ async function refAlignTests() {
     const out = path.join(tmp, 'ref.db');
     const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`, `--links=${links}`], { encoding: 'utf8' });
     if (proc.status !== 0) throw new Error('ref fixture build failed:\n' + proc.stderr);
-    await check('refAlign: build reports aligned units', () => assert.ok(/ref links: 7 commentary\/base pair\(s\)/.test(proc.stdout), proc.stdout));
+    await check('refAlign: build reports aligned units', () => assert.ok(/ref links: 10 commentary\/base pair\(s\)/.test(proc.stdout), proc.stdout));
 
     const db = openWritable(out);
     const r = db.read;
@@ -1769,6 +1822,57 @@ async function refAlignTests() {
       assert.deepStrictEqual(mb, ['מב סימן א סק א', 'מב סימן א סק ב'], 'ס"ק aligned at the siman');
       assert.ok(!(await texts(oc, 9))['משנה ברורה'], 'not on סימן ב');
     });
+    await check('refAlign: Bavli "שורה N" = N-th paragraph of the amud (not the whole amud, not a neighbour)', async () => {
+      const sukkah = await id('סוכה');
+      const rashiS = await id('רש"י על סוכה');
+      // Rows: paragraph-level only (single base line), intro -> paragraph 1, שורה טז clamps to the last paragraph.
+      const rows = await r.all('SELECT ref_key, base_start, base_end FROM ref_links WHERE comm_book_id = ? ORDER BY comm_start', [rashiS]);
+      assert.deepStrictEqual(rows.map((x) => [x.ref_key, x.base_start, x.base_end]), [
+        ['דף ב|עמוד א', 3, 3],
+        ['דף ב|עמוד א|שורה א', 3, 3],
+        ['דף ב|עמוד א|שורה ה', 7, 7],
+        ['דף ב|עמוד א|שורה טז', 8, 8],
+        ['דף ב|עמוד ב|שורה ב', 11, 11],
+      ]);
+      // Tapping paragraph 5 (line 7): both entries of שורה ה, nothing from שורה א / the intro / the clamped שורה טז.
+      const t5 = await texts(sukkah, 7);
+      assert.deepStrictEqual(t5['רש"י'], ['רשי ה1', 'רשי ה2']);
+      // Paragraph 1 (line 3): the intro + שורה א; the "שורה א" heading row is not an entry.
+      assert.deepStrictEqual((await texts(sukkah, 3))['רש"י'], ['רשי הקדמה', 'רשי א1']);
+      // Paragraphs 2 / 4 have no רש"י (line 4 = paragraph 2, line 6 = paragraph 4).
+      for (const line of [4, 5, 6]) assert.ok(!(await texts(sukkah, line))['רש"י'], `line ${line}`);
+      // N beyond the amud's paragraphs: clamped to the last paragraph (line 8), never dropped.
+      assert.deepStrictEqual((await texts(sukkah, 8))['רש"י'], ['רשי טז']);
+      // The second amud: שורה ב = its 2nd paragraph (line 11), not its first (line 10).
+      assert.deepStrictEqual((await texts(sukkah, 11))['רש"י'], ['רשי ב-ב']);
+      assert.ok(!(await texts(sukkah, 10))['רש"י']);
+      // The block names the commentary's own headings: "דף ב. > שורה ה".
+      const g5 = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, sukkah, 7)).find((g) => g.bookId === rashiS);
+      assert.deepStrictEqual(g5.block, { refKey: 'דף ב|עמוד א|שורה ה', start: 6, end: 8 });
+      assert.strictEqual(g5.entries[0].toc_path, 'דף ב. > שורה ה');
+      // Reverse: a רש"י paragraph under שורה ה links back to paragraph 5 only.
+      for (const line of [7, 8]) {
+        const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, rashiS, line));
+        assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries.map((e) => e.line)]), [['סוכה', [7]]], `רש"י line ${line}`);
+      }
+      // The intro and שורה א paragraphs link back to paragraph 1.
+      for (const line of [3, 5]) {
+        const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(r, rashiS, line));
+        assert.deepStrictEqual(back.map((g) => g.entries.map((e) => e.line)), [[3]], `רש"י line ${line}`);
+      }
+    });
+    await check('refAlign: Bavli commentaries without שורה headings stay at the amud level; plain "שורה N" lines split too', async () => {
+      const sukkah = await id('סוכה');
+      // תוספות על סוכה: daf / amud headings only -> the whole amud, on every paragraph.
+      for (const line of [2, 3, 5, 8]) assert.deepStrictEqual((await texts(sukkah, line))['תוספות'], ['תוס עמוד'], `line ${line}`);
+      assert.ok(!(await texts(sukkah, 10))['תוספות'], 'not on the next amud');
+      // מאירי על סוכה: the markers are plain paragraphs under the amud -> intro on paragraph 1,
+      // שורה ג on paragraph 3 (line 5), שורה ד' on paragraph 4 (line 6); the marker lines are not entries.
+      assert.deepStrictEqual((await texts(sukkah, 3))['מאירי'], ['מאירי פתיחה']);
+      assert.deepStrictEqual((await texts(sukkah, 5))['מאירי'], ['מאירי ג1']);
+      assert.deepStrictEqual((await texts(sukkah, 6))['מאירי'], ['מאירי ד1', 'מאירי ד2']);
+      for (const line of [4, 7, 8]) assert.ok(!(await texts(sukkah, line))['מאירי'], `line ${line}`);
+    });
     await check('refAlign: lookup latency < 5ms', async () => {
       const t = process.hrtime.bigint();
       for (let i = 0; i < 200; i++) {
@@ -1805,7 +1909,7 @@ async function refAlignTests() {
       await indexer.migrateSchema(db.w);
       assert.deepStrictEqual((await r.all("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_ref_links%' ORDER BY name", [])).map((x) => x.name), ['idx_ref_links_base_v5', 'idx_ref_links_comm_v5']);
       const st = await indexer.indexRefLinks(db.w, {});
-      assert.strictEqual(st.pairs, 7);
+      assert.strictEqual(st.pairs, 10);
       await db.w.exec('BEGIN');
       await indexer.deleteBook(db.w, RASHI);
       await db.w.exec('COMMIT');

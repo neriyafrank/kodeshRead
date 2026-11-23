@@ -95,6 +95,17 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `bookIdsCondition`) is one `book_id IN (...)` condition in FTS5 and the web fallback; chips: `ScopeChips.tsx`.
 > Daf/amud spellings (`דף ב, א`, `דף ב - עמוד ב`, `ע"ב`, `דף ב עמוד א.`) normalize in `refAlign.unitLabels`.
 
+> **Bavli paragraph-level commentary (`שורה N`):** in Otzaria's Bavli commentaries (רש"י, ...) the sub-headings
+> `שורה א` / `שורה ה` / `שורה טו` (also `שורה א'`, `א:`, `12`, `פסקה ה`) under a daf / amud mean the **N-th body
+> (non-heading) paragraph of that amud** in the base Gemara, not a visual line (`refAlign.paragraphNumber`, canonical
+> gematria). `refAlign.alignUnits` links each `שורה N` block to that single base paragraph (`ref_links`, no schema change;
+> N beyond the paragraph count clamps to the last paragraph), the amud's text before the first `שורה` to paragraph 1, and
+> also splits plain-paragraph `שורה N` markers (stored as lines, not headings). A commentary without `שורה` headings keeps
+> the amud-level link. Both directions are paragraph-exact (רש"י שורה ה <-> Gemara paragraph 5); the drawer shows only that
+> block (heading rows are never entries; plain marker lines are filtered in `commentary.fetchLinkedEntries`), labelled
+> "רש"י על שבת ‹ דף ב. ‹ שורה ה". The sample `רש"י על שבת` uses this format. Self-tested (gematria, fixtures, sample dibur
+> hamatchil <-> Gemara paragraph) and in `e2e:commentary`.
+
 > **Cloud library (multi-part release):** `.github/workflows/build-library.yml` (workflow_dispatch: `source_repo`,
 > `library_scope` = `classical_full` | `all`) builds `core_library.db` on a runner (`scripts/ci/fetch-otzaria-source.sh`,
 > `build-db.js --scope --lean`, `scripts/cloud-release.js validate|manifest`), zips it, splits it into 1.5 GB

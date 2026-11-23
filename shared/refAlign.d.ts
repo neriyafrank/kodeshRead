@@ -37,6 +37,8 @@ export function pairCommentaries(books: { id: number; title: string; aliases?: s
 export function pairCommentariesAsync(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[], pause?: () => Promise<void>): Promise<import("./pairing").Pairs>;
 /** Name of "(א)" units inside a heading: פסוק (Tanach), משנה, סעיף (סימן / כלל), else אות. */
 export function inlineUnitWord(parentTitle: string, categoryPath?: string | null): string;
+/** Paragraph number of a Bavli "שורה N" sub-heading (1-based body paragraph of the amud), or null. */
+export function paragraphNumber(text: string | null | undefined): number | null;
 export function markerKey(text: string | null | undefined): string | null;
 /** `ordinal: false`: markers only (never "n-th line = verse n"). */
 export function inlineUnits(contentLines: { line: number; text: string }[], unit: { start: number; end: number }, opts?: { ordinal?: boolean }): Map<string, { start: number; end: number }>;

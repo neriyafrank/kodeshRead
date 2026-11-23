@@ -58,11 +58,12 @@ try {
     await tid('quick-jump-result').first().click();
     await tid('para-3').waitFor({ timeout: 20000 });
 
-    // Badges: line 3 (מתני' יציאות השבת) has 2x רש"י + תוספות line links; line 4 has none;
-    // the amud heading (line 2) carries the heading-aligned units of רש"י and תוספות.
-    assert.strictEqual((await tid('links-badge-3').innerText()).trim(), '3');
+    // Badges: line 3 (paragraph 1, מתני' יציאות השבת) has 2x רש"י + תוספות line links + the רש"י
+    // "שורה א" unit; line 4 has none; the amud heading (line 2) carries only תוספות' amud-level unit
+    // (the sample רש"י is aligned per paragraph: "שורה N" = the N-th paragraph of the amud).
+    assert.strictEqual((await tid('links-badge-3').innerText()).trim(), '4');
     assert.strictEqual(await tid('links-badge-4').count(), 0);
-    assert.strictEqual((await tid('links-badge-2').innerText()).trim(), '2');
+    assert.strictEqual((await tid('links-badge-2').innerText()).trim(), '1');
     await shot('1-badges');
     step('link-count badges');
 
@@ -78,13 +79,16 @@ try {
     // Talmud Bavli: Rashi is #1 (ahead of Tosafot), both under the primary commentators (עיקריים).
     assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים']);
     assert.ok((await tid('commentary-group').first().innerText()).includes('רש"י'), 'Rashi is the first card');
-    // Whole aligned amud block per commentator (6 רש"י + 2 תוספות); the 3 explicitly linked are marked.
+    // רש"י: only the entries of שורה א (2); תוספות has no שורה headings: its whole amud block (2).
+    // The 3 explicitly linked dibburim are marked.
     const entries = page.locator('[data-testid^="commentary-entry"]');
-    assert.strictEqual(await entries.count(), 8);
+    assert.strictEqual(await entries.count(), 4);
     assert.strictEqual(await tid('commentary-entry-direct').count(), 3);
     assert.strictEqual(await tid('commentary-open-block').count(), 2);
     // The block bar names the unit with the commentary's own heading ("דף ב."), not the normalized key.
-    assert.ok((await tid('commentary-block').first().innerText()).includes('רש"י על שבת ‹ דף ב.'), await tid('commentary-block').first().innerText());
+    assert.ok((await tid('commentary-block').first().innerText()).includes('רש"י על שבת ‹ דף ב. ‹ שורה א'), await tid('commentary-block').first().innerText());
+    // The "שורה א" sub-heading is the block's label, not a standalone row in the drawer body.
+    assert.ok(!(await tid('commentary-group').first().innerText()).replace('שורה א', '').includes('שורה'), 'no שורה heading rows');
     // Two commentators: no tools header and no toggle for it.
     assert.strictEqual(await tid('commentary-tools-toggle').count(), 0);
     assert.strictEqual(await tid('commentary-tools').count(), 0);
@@ -93,14 +97,39 @@ try {
     await shot('2-drawer');
     step('drawer shows each commentator\'s full block for the amud');
 
-    // Switching paragraph while open re-syncs the drawer (line 4: same amud block, no direct links).
+    // Switching paragraph while open re-syncs the drawer (line 4 = paragraph 2: no רש"י entry at all,
+    // only תוספות' amud block, no direct links).
     await tid('para-4').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-entry-direct"]').length === 0);
-    assert.strictEqual(await page.locator('[data-testid^="commentary-entry"]').count(), 8);
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['תוספות']);
+    assert.strictEqual(await page.locator('[data-testid^="commentary-entry"]').count(), 2);
     await tid('para-5').click();
-    await tid('commentary-group').first().waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group-name"]').length === 2);
     assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י', 'תוספות']);
     step('drawer follows the tapped paragraph');
+
+    // Paragraph-specific Rashi on a Bavli amud: paragraph 3 (line 5) shows only רש"י שורה ג ("העני עומד
+    // בחוץ" + "חייב"), paragraph 5 (line 7) only שורה ה ("שניהם פטורין"), paragraph 7 (line 9) only שורה ז.
+    const rashiOnly = async (line, header, ...needles) => {
+      await tid(`para-${line}`).click();
+      await page.waitForFunction((h) => document.querySelector('[data-testid="commentary-block"]')?.innerText.includes(h), header).catch(async (e) => {
+        throw new Error(`line ${line}: no "${header}" block; drawer shows ${JSON.stringify(await tid('commentary-block').allInnerTexts())} / ${e.message}`);
+      });
+      const g = tid('commentary-group').first();
+      const text = await g.innerText();
+      assert.ok(text.includes('רש"י'), 'Rashi is the first card');
+      const rashiEntries = await g.locator('[data-testid^="commentary-entry"]').count();
+      assert.strictEqual(rashiEntries, needles.length, `line ${line}: ${text}`);
+      for (const n of needles) assert.ok(text.includes(n), `line ${line} shows "${n}"`);
+      for (const other of ['יציאות השבת.', 'ידיעות הטומאה', 'תנן התם', 'העני עומד בחוץ', 'שניהם פטורין'].filter((o) => !needles.includes(o))) {
+        assert.ok(!text.includes(other), `line ${line} does not show "${other}"`);
+      }
+    };
+    await rashiOnly(7, 'שורה ה', 'שניהם פטורין');
+    await rashiOnly(9, 'שורה ז', 'תנן התם');
+    await rashiOnly(5, 'שורה ג', 'העני עומד בחוץ', 'חייב'); // (tapping the selected paragraph again would close the drawer)
+    await shot('2a-paragraph-rashi');
+    step('paragraph-specific רש"י on a Bavli amud (שורה N = N-th paragraph)');
 
     // Next paragraph with commentaries (line 7: one רש"י line link); the text scrolls with it.
     await tid('commentary-next').click();
@@ -205,9 +234,10 @@ try {
           return cs.position === 'absolute' && parseFloat(cs.opacity) > 0.5 && !/rgba\(0, 0, 0, 0\)|transparent/.test(cs.backgroundColor) && ch.getBoundingClientRect().height > 20;
         }),
       ).length;
-    await page.waitForFunction(`(${litRows.toString()})() >= 3`, null, { timeout: 5000 }).catch(() => undefined);
+    await page.waitForFunction(`(${litRows.toString()})() >= 1`, null, { timeout: 5000 }).catch(() => undefined);
     const lit = await page.evaluate(`(${litRows.toString()})()`);
-    assert.ok(lit >= 3, `whole unit highlighted (${lit} rows)`);
+    // The Rashi paragraph is under שורה N: its base block is that one Gemara paragraph (not the whole amud).
+    assert.strictEqual(lit, 1, `the linked Gemara paragraph is highlighted (${lit} rows)`);
     await shot('5-block-open');
     step(`"פתח בספר" opens the base unit and highlights the block (${lit} rows)`);
 
