@@ -3,8 +3,8 @@
  * the books of the open library and resolved to exact lines (chapter / verse, daf, mishnah, perek)
  * through their TOC headings and inline markers.
  *
- * Results are cached per (library generation, date, ארץ ישראל / חו"ל), so the TOC drawer and the
- * Library screen share one resolution. A book missing from the library (the small sample DB has
+ * Results are cached per (library generation, date, ארץ ישראל / חו"ל), so re-opening the Library
+ * screen's card does not resolve again. A book missing from the library (the small sample DB has
  * no Mishnah or Rambam) comes back `available: false` and is shown greyed out, never thrown.
  */
 import { useCallback, useEffect, useState } from 'react';

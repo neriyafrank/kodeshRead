@@ -27,6 +27,8 @@
  *    the offline daily-learning schedule (shared/dailyLearning.js: @hebcal/core + @hebcal/learning,
  *    ארץ ישראל / חו"ל) on fixed dates, mapped onto real Otzaria paths (otzaria_index_only.txt) and
  *    resolved to exact lines in the sample library (missing books reported, never thrown).
+ *    Quick Jump to a parsha / aliyah ("פרשת וישלח שני", "וישלח 2", "בראשית מפטיר", spelling
+ *    variants) over a full five-book Chumash fixture, without changing book lookups.
  */
 'use strict';
 
@@ -706,6 +708,7 @@ async function main() {
   await typographyTests();
   // 9. Parshiot / aliyot and the daily learning schedule.
   await torahStudyTests();
+  await parshaQuickJumpTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -3636,5 +3639,190 @@ async function torahStudyTests() {
     const found = await dl.findLibraryBooks(a, ['תנך/תורה/בראשית', 'תלמוד בבלי/סדר מועד/שבת', 'תלמוד בבלי/סדר זרעים/ברכות', 'משנה/סדר טהרות/משנה נגעים']);
     assert.deepStrictEqual(Object.fromEntries([...found].map(([k, v]) => [k, v.id])), { 'תנך/תורה/בראשית': 1, 'תלמוד בבלי/סדר מועד/שבת': 2, 'תלמוד בבלי/סדר זרעים/ברכות': 4 });
     m.close();
+  });
+}
+
+/** Quick Jump: parsha / aliyah queries (torahParshiot.parseParshaQuery + quickJump.resolveReference). */
+async function parshaQuickJumpTests() {
+  const tp = require('../shared/torahParshiot');
+  const { intToHebrew } = require('../shared/hebrew');
+  const parse = (q) => {
+    const r = tp.parseParshaQuery(q);
+    return r ? `${r.parsha.name}|${r.reading.name}|${r.strong ? 'strong' : 'weak'}` : null;
+  };
+
+  await check('parsha query parser: names, prefixes, ordinals (words / letters / digits), עלייה, מפטיר', () => {
+    const cases = {
+      'וישלח': 'וישלח|ראשון|strong',
+      'פרשת וישלח': 'וישלח|ראשון|strong',
+      'לך לך': 'לך לך|ראשון|strong',
+      'לך-לך': 'לך לך|ראשון|strong',
+      'כי תצא': 'כי תצא|ראשון|strong',
+      'כִּי תֵצֵא': 'כי תצא|ראשון|strong',
+      'וישלח שני': 'וישלח|שני|strong',
+      'פרשת וישלח שלישי': 'וישלח|שלישי|strong',
+      'וישלח ב': 'וישלח|שני|strong',
+      "וישלח ב'": 'וישלח|שני|strong',
+      'וישלח 2': 'וישלח|שני|strong',
+      'לך לך רביעי': 'לך לך|רביעי|strong',
+      'נח שביעי': 'נח|שביעי|strong',
+      'נח ז': 'נח|שביעי|strong',
+      'בראשית מפטיר': 'בראשית|מפטיר|strong',
+      'וישלח 8': 'וישלח|מפטיר|strong',
+      'פרשת תצוה עלייה חמישית': 'תצוה|חמישי|strong',
+      'תצוה עליה ה': 'תצוה|חמישי|strong',
+      'חיי שרה שנייה': 'חיי שרה|שני|strong',
+      'וישלח ששי': 'וישלח|שישי|strong',
+      'וישלח ראשונה': 'וישלח|ראשון|strong',
+    };
+    for (const [q, want] of Object.entries(cases)) assert.strictEqual(parse(q), want, q);
+  });
+
+  await check('parsha query parser: spelling variants and doubled weeks', () => {
+    const cases = {
+      'תצוה': 'תצוה', 'תצווה': 'תצוה', 'פינחס': 'פינחס', 'פנחס': 'פינחס', 'שלח': 'שלח', 'שלח לך': 'שלח',
+      'אחרי': 'אחרי מות', 'אחרי מות': 'אחרי מות', 'כי תבא': 'כי תבוא', 'כי תבוא': 'כי תבוא', 'בחקתי': 'בחוקותי',
+      'קורח': 'קרח', 'חוקת': 'חקת', 'ניצבים': 'נצבים', 'ויקהל פקודי': 'ויקהל', 'ויקהל-פקודי': 'ויקהל', 'מטות מסעי': 'מטות',
+      'וזאת הברכה': 'וזאת הברכה', 'כי תשא': 'כי תשא', 'בהעלתך': 'בהעלותך', 'שפטים': 'שופטים',
+    };
+    for (const [q, name] of Object.entries(cases)) assert.strictEqual(tp.parseParshaQuery(q)?.parsha.name, name, q);
+    // Every parsha's own name parses to itself, as a strong reference unless it is a book name.
+    for (const p of tp.PARSHIOT) {
+      const r = tp.parseParshaQuery(p.name);
+      assert.strictEqual(r && r.parsha, p, p.name);
+      assert.strictEqual(r.strong, !tp.CHUMASH_BOOKS.includes(p.name), p.name);
+      assert.strictEqual(tp.parseParshaQuery(`פרשת ${p.name}`).strong, true);
+    }
+  });
+
+  await check('parsha query parser: book names stay book references; non-parsha queries untouched', () => {
+    for (const q of ['בראשית א', 'בראשית לב יד', 'בראשית 32 14', 'שמות ב', 'דברים 5', 'במדבר כז טו', 'ויקרא א א']) assert.strictEqual(tp.parseParshaQuery(q), null, q);
+    assert.strictEqual(parse('בראשית'), 'בראשית|ראשון|weak');
+    assert.strictEqual(parse('פרשת בראשית'), 'בראשית|ראשון|strong');
+    assert.strictEqual(parse('בראשית שני'), 'בראשית|שני|strong');
+    assert.strictEqual(parse('פרשת שמות ב'), 'שמות|שני|strong');
+    assert.strictEqual(parse('דברים עליה ג'), 'דברים|שלישי|strong');
+    for (const q of ['שבת ב.', 'בבא מציעא ב.', 'שוע אוח כה ה', 'רשי על בראשית', 'וישלח ט', 'וישלח שני שלישי', 'וישלח עליה', 'וזאת הברכה מפטיר', 'פרשת', '']) assert.strictEqual(tp.parseParshaQuery(q), null, q);
+  });
+
+  // A five-book Chumash at Otzaria's paths ("(יד) בראשית 32:14" lines) + a Bavli tractate.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-parsha-'));
+  try {
+    const lib = path.join(tmp, 'lib');
+    const write = (rel, lines) => {
+      fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true });
+      fs.writeFileSync(path.join(lib, rel), lines.join('\n'));
+    };
+    for (const book of tp.CHUMASH_BOOKS) {
+      const lines = [`<h1>${book}</h1>`];
+      tp.CHAPTER_VERSES[book].forEach((n, ci) => {
+        lines.push(`<h2>פרק ${intToHebrew(ci + 1)}</h2>`);
+        for (let v = 1; v <= n; v++) lines.push(`(${intToHebrew(v)}) ${book} ${ci + 1}:${v}`);
+      });
+      write(`תנך/תורה/${book}.txt`, lines);
+    }
+    write('תנך/מפרשים/רשי על בראשית.txt', ['<h1>רשי על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית. רשי']);
+    write('תלמוד בבלי/סדר נזיקין/בבא מציעא.txt', ['<h1>בבא מציעא</h1>', '<h2>דף ב.</h2>', 'שנים אוחזין בטלית', '<h2>דף ב:</h2>', 'גמרא ב:', '<h2>דף ג.</h2>', 'גמרא ג.']);
+    const out = path.join(tmp, 'parsha.db');
+    const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`], { encoding: 'utf8' });
+    if (proc.status !== 0) throw new Error('parsha fixture build failed:\n' + proc.stderr);
+    const db = openDb(out);
+    const index = await loadBookIndex(db);
+    const textAt = async (r) => (await db.all('SELECT display_text FROM paragraphs WHERE book_id = ? AND line_index = ?', [r.bookId, r.targetLine]))[0]?.display_text;
+    const top = async (q) => (await resolveReference(db, index, q))[0];
+
+    await check('quick jump: parsha / aliyah queries land on the exact verse line, with an RTL label', async () => {
+      const cases = [
+        ['וישלח', 'פרשת וישלח · ראשון (בראשית ל״ב:ד׳)', 'בראשית 32:4'],
+        ['פרשת וישלח', 'פרשת וישלח · ראשון (בראשית ל״ב:ד׳)', 'בראשית 32:4'],
+        ['וישלח שני', 'פרשת וישלח · שני (בראשית ל״ב:י״ד)', 'בראשית 32:14'],
+        ['פרשת וישלח שלישי', 'פרשת וישלח · שלישי (בראשית ל״ב:ל״א)', 'בראשית 32:31'],
+        ['וישלח ב', 'פרשת וישלח · שני (בראשית ל״ב:י״ד)', 'בראשית 32:14'],
+        ['וישלח 2', 'פרשת וישלח · שני (בראשית ל״ב:י״ד)', 'בראשית 32:14'],
+        ['לך לך', 'פרשת לך לך · ראשון (בראשית י״ב:א׳)', 'בראשית 12:1'],
+        ['לך לך רביעי', 'פרשת לך לך · רביעי (בראשית י״ד:א׳)', 'בראשית 14:1'],
+        ['נח שביעי', 'פרשת נח · שביעי (בראשית י״א:א׳)', 'בראשית 11:1'],
+        ['בראשית מפטיר', 'פרשת בראשית · מפטיר (בראשית ו׳:ה׳)', 'בראשית 6:5'],
+        ['פרשת בראשית', 'פרשת בראשית · ראשון (בראשית א׳:א׳)', 'בראשית 1:1'],
+        ['בראשית שני', 'פרשת בראשית · שני (בראשית ב׳:ד׳)', 'בראשית 2:4'],
+        ['כי תצא', 'פרשת כי תצא · ראשון (דברים כ״א:י׳)', 'דברים 21:10'],
+        ['תצווה', 'פרשת תצוה · ראשון (שמות כ״ז:כ׳)', 'שמות 27:20'],
+        ['פרשת תצוה עלייה חמישית', 'פרשת תצוה · חמישי (שמות כ״ט:י״ט)', 'שמות 29:19'],
+        ['פנחס מפטיר', 'פרשת פינחס · מפטיר (במדבר כ״ט:ל״ה)', 'במדבר 29:35'],
+        ['שלח לך', 'פרשת שלח · ראשון (במדבר י״ג:א׳)', 'במדבר 13:1'],
+        ['אחרי', 'פרשת אחרי מות · ראשון (ויקרא ט״ז:א׳)', 'ויקרא 16:1'],
+        ['כי תבא שישי', 'פרשת כי תבוא · שישי (דברים כ״ח:ז׳)', 'דברים 28:7'],
+        ['עקב מפטיר', 'פרשת עקב · מפטיר (דברים י״א:כ״ב)', 'דברים 11:22'],
+      ];
+      for (const [q, label, text] of cases) {
+        const r = await top(q);
+        assert.ok(r && r.parsha, `${q}: parsha result first`);
+        assert.strictEqual(r.parsha.label, label, q);
+        assert.ok(r.direct && r.complete && !r.suggestion, `${q}: direct card`);
+        assert.ok((await textAt(r)).endsWith(text), `${q}: line ${r.targetLine} = ${await textAt(r)} (want ${text})`);
+        assert.strictEqual(r.bookTitle, text.split(' ')[0]);
+      }
+    });
+
+    await check('quick jump: all 54 parshiot × aliyot ("פרשת X <ordinal>") resolve to their verse', async () => {
+      const WORDS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שביעי', 'מפטיר'];
+      const misses = [];
+      for (const p of tp.PARSHIOT) {
+        for (const a of tp.readingsOf(p)) {
+          const r = await top(`פרשת ${p.name} ${WORDS[a.index]}`);
+          const want = `${p.book} ${a.start.chapter}:${a.start.verse}`;
+          if (!r || !r.parsha || !(await textAt(r)).endsWith(want)) misses.push(`${p.name} ${a.name}: ${r ? await textAt(r) : 'none'} != ${want}`);
+        }
+      }
+      assert.deepStrictEqual(misses, []);
+    });
+
+    await check('quick jump: book lookups unchanged (בראשית א, בראשית לב יד, שמות ב, בבא מציעא ב.)', async () => {
+      const chap = await resolveReference(db, index, 'בראשית א');
+      assert.ok(!chap.some((r) => r.parsha), 'no parsha card for a chapter reference');
+      assert.deepStrictEqual([chap[0].bookTitle, chap[0].path], ['בראשית', ['פרק א']]);
+      const verse = await top('בראשית לב יד');
+      assert.ok(!verse.parsha && verse.complete && verse.direct);
+      assert.strictEqual(await textAt(verse), '(יד) בראשית 32:14');
+      const shemot = await top('שמות ב');
+      assert.deepStrictEqual([shemot.bookTitle, shemot.path, !!shemot.parsha], ['שמות', ['פרק ב'], false]);
+      const bm = await resolveReference(db, index, 'בבא מציעא ב.');
+      assert.ok(!bm.some((r) => r.parsha));
+      assert.deepStrictEqual([bm[0].bookTitle, bm[0].path, bm[0].complete], ['בבא מציעא', ['דף ב.'], true]);
+      assert.strictEqual(await textAt({ ...bm[0], targetLine: bm[0].targetLine + 1 }), 'שנים אוחזין בטלית');
+      const bm2 = await top('בבא מציעא ב:');
+      assert.deepStrictEqual(bm2.path, ['דף ב:']);
+      // A bare book name: the book first, its first parsha as an extra (non-direct) suggestion.
+      const bare = await resolveReference(db, index, 'בראשית');
+      assert.strictEqual(bare[0].bookTitle, 'בראשית');
+      assert.ok(!bare[0].parsha);
+      const p = bare.find((r) => r.parsha);
+      assert.ok(p && !p.direct && p.parsha.label === 'פרשת בראשית · ראשון (בראשית א׳:א׳)');
+      // A commentary title that contains a parsha's book name is still a book lookup.
+      assert.strictEqual((await top('רשי על בראשית')).bookTitle, 'רשי על בראשית');
+    });
+
+    await check('quick jump: parsha queries stay fast', async () => {
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 50; i++) await resolveReference(db, index, 'פרשת וישלח שני');
+      const ms = Number(process.hrtime.bigint() - t) / 1e6 / 50;
+      assert.ok(ms < 15, `avg ${ms.toFixed(2)}ms`);
+      console.log(`  parsha quick jump avg ${ms.toFixed(2)}ms/query`);
+    });
+
+    await check('quick jump: no Chumash book in the library -> no parsha card, no error', async () => {
+      const shasOnly = { ...index, books: new Map([...index.books].filter(([, b]) => !tp.CHUMASH_BOOKS.includes(b.title))) };
+      const r = await resolveReference(db, shasOnly, 'וישלח שני');
+      assert.ok(!r.some((x) => x.parsha));
+    });
+    db.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  await check('QuickJumpBar renders parsha cards right-aligned with the parsha label', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/components/QuickJumpBar.tsx'), 'utf8');
+    assert.ok(src.includes('testID="quick-jump-parsha"') && src.includes('r.parsha.refLabel') && src.includes('`פתח: ${results[0].parsha.label}`'));
+    assert.ok(/parshaTitle: \{[^}]*\.\.\.alignRight/.test(src) && /parshaRef: \{[^}]*\.\.\.alignRight/.test(src));
   });
 }

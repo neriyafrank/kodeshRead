@@ -112,8 +112,8 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
     is resolved to its line (chapter / verse, daf, mishnah, perek) through the TOC headings. A book
     missing from the library (the sample has no Mishnah or Rambam) is shown greyed out as
     "לא נמצא בספרייה".
-  * One tap opens it from the collapsible **לימוד יומי** block at the top of the TOC drawer (from
-    any book) or from the **לימוד יומי** bar on the Library screen.
+  * One tap opens it from the collapsible **לימוד יומי** card on the Library screen. (The reader's
+    TOC drawer stays focused on the current book: פרקים / פרשות only.)
 
 ## Quick start
 
@@ -182,6 +182,16 @@ Abbreviations, other spellings and structural words are understood (`shared/hebr
 `שו"ע או"ח סי' שכח ד` · `שוע אוח 328 4` · `ב"ק דף ב ע"ב` · `רמב"ם הל' שבת פ"א` · `בר' א א` ·
 `מ"ב` · `שלחן ערוך אורח חיים כה`. A fully resolved reference shows a **פתח: ספר — מיקום** card on top.
 The search scope picker's book filter is abbreviation-aware too.
+
+**Parshiot & aliyot** (`parseParshaQuery` in `shared/torahParshiot.js`): `וישלח` · `פרשת וישלח` ·
+`לך לך` · `כי תצא` open the parsha at its first verse (ראשון); add an aliyah as a word, letter or
+digit, optionally after `עליה` / `עלייה`: `וישלח שני` · `פרשת וישלח שלישי` · `וישלח ב` · `וישלח 2` ·
+`נח שביעי` · `בראשית מפטיר` · `פרשת תצוה עלייה חמישית`. Spelling variants are accepted (`תצוה` /
+`תצווה`, `פינחס` / `פנחס`, `שלח` / `שלח לך`, `אחרי` / `אחרי מות`, `כי תבא` / `כי תבוא`, a doubled
+week's name opens its first parsha). The card reads `פרשת וישלח · שני (בראשית ל״ב:י״ד)`.
+The five book names stay book references: `בראשית א` / `בראשית לב יד` open chapter / verse as
+before, and a bare `בראשית` lists the book first with the parsha below it; `פרשת בראשית`,
+`בראשית שני` or `בראשית מפטיר` open the parsha / aliyah.
 
 ## Reader display & library browser
 

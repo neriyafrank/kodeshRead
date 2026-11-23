@@ -1,16 +1,16 @@
 /**
- * "לימוד יומי" quick-open UI (schedule: shared/dailyLearning.js, library resolution:
- * src/services/dailyLearningNav.ts).
+ * "לימוד יומי" quick-open UI on the Library screen (schedule: shared/dailyLearning.js, library
+ * resolution: src/services/dailyLearningNav.ts). The reader's TOC drawer deliberately has none:
+ * it navigates the current book only.
  *
  *   DailyLearningList     today's Hebrew date, the ארץ ישראל / חו"ל switch and one row per study
  *                         cycle (פרשת השבוע + today's aliyah, דף היומי, משנה יומית, רמב"ם 1 / 3
  *                         פרקים); a tap opens the exact place in a tab. Books missing from the
  *                         library are listed greyed out ("לא נמצא בספרייה").
- *   DailyLearningSection  the collapsible block at the top of the TOC drawer.
  *   DailyLearningCard     the collapsible bar on the Library screen.
  * Every label is right-aligned (alignRight).
  */
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { ResolvedItem, ResolvedTarget } from '../../../shared/dailyLearning';
 import { alignRight } from '../../lib/direction';
@@ -19,18 +19,12 @@ import { useLearning } from '../../state/learningStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 import { Collapsible } from '../Collapsible';
 
-interface ListProps {
-  onOpen: (t: ResolvedTarget) => void;
-  /** Smaller type and paddings (TOC drawer). */
-  compact?: boolean;
-}
-
-export function DailyLearningList({ onOpen, compact }: ListProps) {
+export function DailyLearningList({ onOpen }: { onOpen: (t: ResolvedTarget) => void }) {
   const s = useThemedStyles(createStyles);
   const { schedule, error } = useDailyLearning();
   if (!schedule) return <Text style={s.muted}>{error ? `שגיאה: ${error}` : 'טוען…'}</Text>;
   return (
-    <View style={compact ? s.listCompact : s.list} testID="daily-list">
+    <View style={s.list} testID="daily-list">
       <View style={s.metaRow}>
         <Text style={s.hebrewDate} testID="daily-hebrew-date">
           {schedule.hebrewDate}
@@ -38,7 +32,7 @@ export function DailyLearningList({ onOpen, compact }: ListProps) {
         <LocationSwitch />
       </View>
       {schedule.items.map((it) => (
-        <ItemRow key={it.key} item={it} compact={compact} onOpen={onOpen} />
+        <ItemRow key={it.key} item={it} onOpen={onOpen} />
       ))}
     </View>
   );
@@ -68,7 +62,7 @@ function LocationSwitch() {
   );
 }
 
-function ItemRow({ item, compact, onOpen }: { item: ResolvedItem; compact?: boolean; onOpen: (t: ResolvedTarget) => void }) {
+function ItemRow({ item, onOpen }: { item: ResolvedItem; onOpen: (t: ResolvedTarget) => void }) {
   const s = useThemedStyles(createStyles);
   const main = item.targets.find((t) => t.available) ?? item.targets[0];
   const available = !!main?.available;
@@ -77,7 +71,7 @@ function ItemRow({ item, compact, onOpen }: { item: ResolvedItem; compact?: bool
     <Pressable
       onPress={() => main && available && onOpen(main)}
       disabled={!available}
-      style={({ pressed }) => [s.item, compact && s.itemCompact, !available && s.itemOff, pressed && s.pressed]}
+      style={({ pressed }) => [s.item, !available && s.itemOff, pressed && s.pressed]}
       accessibilityRole="link"
       aria-disabled={!available}
       accessibilityState={{ disabled: !available }}
@@ -87,7 +81,7 @@ function ItemRow({ item, compact, onOpen }: { item: ResolvedItem; compact?: bool
       <Text style={s.itemLabel} numberOfLines={1}>
         {item.label}
       </Text>
-      <Text style={[s.itemTitle, compact && s.itemTitleCompact, !available && s.textOff]} testID={`daily-title-${item.key}`}>
+      <Text style={[s.itemTitle, !available && s.textOff]} testID={`daily-title-${item.key}`}>
         {item.title}
       </Text>
       <Text style={s.itemDetail} numberOfLines={2}>
@@ -103,38 +97,6 @@ function ItemRow({ item, compact, onOpen }: { item: ResolvedItem; compact?: bool
         </View>
       ) : null}
     </Pressable>
-  );
-}
-
-/** Collapsible "לימוד יומי" block at the top of the TOC drawer. */
-export function DailyLearningSection({ onOpen }: { onOpen: (t: ResolvedTarget) => void }) {
-  const s = useThemedStyles(createStyles);
-  const open = useLearning((x) => x.tocDailyOpen);
-  const setOpen = useLearning((x) => x.setTocDailyOpen);
-  const { schedule } = useDailyLearning();
-  return (
-    <View style={s.section} testID="toc-daily">
-      <Pressable
-        onPress={() => setOpen(!open)}
-        style={({ pressed }) => [s.sectionHead, pressed && s.pressed]}
-        accessibilityRole="button"
-        aria-expanded={open}
-        accessibilityState={{ expanded: open }}
-        testID="toc-daily-toggle"
-      >
-        <Text style={s.sectionTitle}>לימוד יומי</Text>
-        {/* The open list shows the date itself. */}
-        <Text style={s.sectionDate} numberOfLines={1}>
-          {open ? '' : (schedule?.hebrewDate ?? '')}
-        </Text>
-        <Text style={s.caret}>{open ? '▴' : '▾'}</Text>
-      </Pressable>
-      <Collapsible open={open}>
-        <ScrollView style={s.sectionBody} contentContainerStyle={{ paddingBottom: spacing.xs }} nestedScrollEnabled>
-          <DailyLearningList compact onOpen={onOpen} />
-        </ScrollView>
-      </Collapsible>
-    </View>
   );
 }
 
@@ -171,7 +133,6 @@ export function DailyLearningCard({ onOpen }: { onOpen: (t: ResolvedTarget) => v
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     list: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm, gap: spacing.xs },
-    listCompact: { paddingHorizontal: spacing.sm, paddingBottom: spacing.xs, gap: 3 },
     muted: { color: c.textMuted, fontSize: 13, padding: spacing.sm, ...alignRight },
     metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.xs, paddingVertical: 4 },
     hebrewDate: { flexShrink: 1, fontSize: 14, fontWeight: '700', color: c.text, ...alignRight },
@@ -190,22 +151,15 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.surface,
       gap: 1,
     },
-    itemCompact: { paddingHorizontal: spacing.sm, paddingVertical: 6 },
     itemOff: { backgroundColor: c.surfaceMuted, opacity: 0.75 },
     pressed: { opacity: 0.6 },
     itemLabel: { fontSize: 11, color: c.textMuted, fontWeight: '600', ...alignRight },
     itemTitle: { fontSize: 16, fontWeight: '700', color: c.accent, ...alignRight },
-    itemTitleCompact: { fontSize: 14 },
     textOff: { color: c.textMuted },
     itemDetail: { fontSize: 12, color: c.textMuted, ...alignRight },
     chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: 4 },
     chip: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: 10, backgroundColor: c.accentSoft },
     chipText: { fontSize: 12, color: c.accent, fontWeight: '600' },
-    section: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
-    sectionHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: 7, backgroundColor: c.surfaceMuted },
-    sectionTitle: { fontSize: 13, fontWeight: '700', color: c.accent, ...alignRight },
-    sectionDate: { flex: 1, minWidth: 0, fontSize: 12, color: c.textMuted, ...alignRight },
-    sectionBody: { maxHeight: 340 },
     caret: { fontSize: 12, color: c.textMuted },
     card: { marginHorizontal: spacing.md, marginTop: spacing.sm, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, backgroundColor: c.surfaceMuted, overflow: 'hidden' },
     cardHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },

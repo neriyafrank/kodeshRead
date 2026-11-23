@@ -36,6 +36,26 @@ export interface JumpResult {
   location: string;
   /** Fully resolved reference to a place inside the book: shown as the "פתח: ספר — מיקום" card. */
   direct: boolean;
+  /** Set when the query named a Torah parsha / aliyah ("וישלח שני"). */
+  parsha?: ParshaJump;
+}
+
+export interface ParshaJump {
+  index: number;
+  /** "וישלח" */
+  name: string;
+  /** "פרשת וישלח" */
+  title: string;
+  /** "שני" (ראשון for a parsha-only query, מפטיר ...). */
+  aliyah: string;
+  readingIndex: number;
+  /** Chumash book ("בראשית"). */
+  book: string;
+  ref: { chapter: number; verse: number };
+  /** 'בראשית ל״ב:י״ד' */
+  refLabel: string;
+  /** 'פרשת וישלח · שני (בראשית ל״ב:י״ד)' */
+  label: string;
 }
 
 export interface RawToken {

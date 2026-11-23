@@ -68,8 +68,10 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > Mishna Yomit and Rambam 1 / 3 offline (deep imports of `@hebcal/core/dist/esm/sedra`,
 > `@hebcal/learning/*Base`, `@hebcal/hdate`; ארץ ישראל default / חו"ל) and maps each onto a real Otzaria path,
 > resolved via `quickJump.resolveInBook` (`src/services/dailyLearningNav.ts`; missing books = unavailable).
-> UI: `src/components/learning/DailyLearning.tsx` (TOC block + Library bar). e2e pins today with
-> `globalThis.__KODESHREAD_TODAY__`.
+> UI: `src/components/learning/DailyLearning.tsx` (Library screen card only: the TOC drawer stays on the
+> current book). e2e pins today with `globalThis.__KODESHREAD_TODAY__`. Quick Jump understands parshiot /
+> aliyot (`torah.parseParshaQuery`, merged in `quickJump.resolveReference`; the 5 book names stay book
+> references unless `פרשת` / an aliyah word / `מפטיר` is typed).
 
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).

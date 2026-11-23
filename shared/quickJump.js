@@ -13,12 +13,18 @@
  * abbreviations or in another spelling ("שו\"ע או\"ח", "ב\"ק", "רמב\"ם הל' שבת",
  * "בר'", "שלחן ערוך"), and locations may carry structural words / abbreviations
  * ("סי' שכח", "סעיף ד", "פ\"א", "דף ב ע\"ב", "דף יג עמוד ב") or digits ("328").
+ *
+ * Torah parshiot (shared/torahParshiot.js): "וישלח", "פרשת וישלח שני", "וישלח ב" / "וישלח 2",
+ * "תצוה עלייה חמישית", "בראשית מפטיר" open that parsha / aliyah's verse in the Chumash book
+ * (spelling variants: תצוה / תצווה, פינחס / פנחס, שלח לך, אחרי, כי תבא ...). The five book names
+ * stay book references ("בראשית א", "בראשית לב יד"); see parseParshaQuery for the rules.
  */
 'use strict';
 
 const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
 const { sourcesOf, adapterForBook } = require('./sources');
 const dict = require('./hebrewTorahDict');
+const torah = require('./torahParshiot');
 
 const MAX_BOOK_CANDIDATES = 5;
 
@@ -280,11 +286,64 @@ async function previewText(router, bookId, line) {
   return t.length > 160 ? t.slice(0, 160) + '…' : t;
 }
 
+// --- Torah parshiot / aliyot --------------------------------------------------------------
+
+const chumashCache = new WeakMap();
+/** The library's Chumash books: Map(book name -> indexed book), core first. */
+function chumashBooks(index) {
+  let m = chumashCache.get(index);
+  if (m) return m;
+  m = new Map();
+  for (const b of index.books.values()) {
+    const name = torah.chumashBookOf(b.title, b.categoryPath);
+    if (name && !m.has(name)) m.set(name, b);
+  }
+  chumashCache.set(index, m);
+  return m;
+}
+
+/** A parsha / aliyah query resolved to its verse line in the library's Chumash book, or null. */
+async function resolveParsha(db, index, hit) {
+  const book = chumashBooks(index).get(hit.parsha.book);
+  if (!book) return null;
+  const start = hit.reading.start;
+  const r = await resolveInBook(db, book, [{ key: dict.intToHebrewNumeral(start.chapter) }, { key: dict.intToHebrewNumeral(start.verse) }]);
+  if (r.unmatched.length) return null;
+  const ref = torah.printedRef(hit.parsha.book, start);
+  const location = `${hit.parsha.title} · ${hit.reading.name}`;
+  return {
+    bookId: book.id,
+    bookTitle: book.title,
+    categoryPath: book.categoryPath,
+    path: r.path,
+    targetLine: r.targetLine,
+    marker: r.marker,
+    unmatched: [],
+    preview: await previewText(db, book.id, r.targetLine),
+    complete: true,
+    suggestion: false,
+    location,
+    direct: hit.strong,
+    parsha: { index: hit.parsha.index, name: hit.parsha.name, title: hit.parsha.title, aliyah: hit.reading.name, readingIndex: hit.readingIndex, book: hit.parsha.book, ref: { ...start }, refLabel: ref, label: `${location} (${ref})` },
+  };
+}
+
 /**
- * Resolve a quick-jump query.
- * @returns {Promise<Array<{ bookId, bookTitle, categoryPath, path: string[], targetLine, marker, unmatched: string[], preview, complete: boolean }>>}
+ * Resolve a quick-jump query: book references, plus a parsha / aliyah card when the query names
+ * one (first when it clearly does, after the book results for a bare "בראשית" / "שמות" ...).
+ * @returns {Promise<Array<{ bookId, bookTitle, categoryPath, path: string[], targetLine, marker, unmatched: string[], preview, complete: boolean, parsha? }>>}
  */
 async function resolveReference(db, index, input, opts) {
+  const hit = torah.parseParshaQuery(rawTokens(input).map((w) => w.tok));
+  const [parsha, books] = await Promise.all([hit ? resolveParsha(db, index, hit) : null, resolveBookReference(db, index, input, opts)]);
+  if (!parsha) return books;
+  const others = books.filter((b) => !(b.bookId === parsha.bookId && b.targetLine === parsha.targetLine));
+  if (!hit.strong) return [...others, parsha];
+  // Clearly a parsha: book-name completions of the same words stay below it, not as the direct card.
+  return [parsha, ...others.map((b) => ({ ...b, direct: false }))];
+}
+
+async function resolveBookReference(db, index, input, opts) {
   const limit = (opts && opts.limit) || MAX_BOOK_CANDIDATES;
   const words = rawTokens(input);
   const tokens = words.map((w) => w.tok);

@@ -18,7 +18,7 @@
  */
 'use strict';
 
-const { hebrewNumeralToInt, intToHebrew, formatHebrewNumeral } = require('./hebrew');
+const { hebrewNumeralToInt, intToHebrew, formatHebrewNumeral, normalizeHebrew } = require('./hebrew');
 const { adapterForBook } = require('./sources');
 
 const CHUMASH_BOOKS = ['בראשית', 'שמות', 'ויקרא', 'במדבר', 'דברים'];
@@ -206,6 +206,141 @@ function fullRefLabel(book, r) {
   return `${book} ${formatHebrewNumeral(r.chapter)} ${formatHebrewNumeral(r.verse)}`;
 }
 
+/** 'בראשית ל״ב:י״ד' (printed gershayim / geresh, chapter:verse) for Quick Jump cards. */
+function printedRef(book, r) {
+  const f = (n) => formatHebrewNumeral(n).replace(/"/g, '״').replace(/'/g, '׳');
+  return `${book} ${f(r.chapter)}:${f(r.verse)}`;
+}
+
+// --- typed parsha / aliyah references (Quick Jump) -------------------------------------------
+
+/**
+ * Other spellings / short forms users type for a parsha (matched after normalizeHebrew, so niqqud,
+ * gershayim, hyphens and final letters never matter). A doubled week's name ("ויקהל פקודי") opens
+ * its first parsha.
+ */
+const PARSHA_VARIANTS = {
+  נח: ['נוח'],
+  'חיי שרה': ['חיי'],
+  תולדות: ['תולדת'],
+  תצוה: ['תצווה'],
+  'כי תשא': ['כי תישא', 'תשא', 'תישא'],
+  ויקהל: ['ויקהל פקודי'],
+  תזריע: ['תזריע מצורע'],
+  מצורע: ['מצרע'],
+  'אחרי מות': ['אחרי', 'אחרי מות קדושים', 'אחרי קדושים'],
+  קדושים: ['קדשים'],
+  אמור: ['אמר'],
+  בהר: ['בהר סיני', 'בהר בחוקותי', 'בהר בחקתי'],
+  בחוקותי: ['בחקתי', 'בחוקתי', 'בחקותי'],
+  במדבר: ['במדבר סיני'],
+  נשא: ['נשוא'],
+  בהעלותך: ['בהעלתך'],
+  שלח: ['שלח לך'],
+  קרח: ['קורח'],
+  חקת: ['חוקת', 'חקת בלק', 'חוקת בלק'],
+  פינחס: ['פנחס'],
+  מטות: ['מטות מסעי', 'מטת'],
+  שופטים: ['שפטים'],
+  'כי תצא': ['תצא', 'כי תיצא'],
+  'כי תבוא': ['כי תבא', 'תבוא', 'תבא'],
+  נצבים: ['ניצבים', 'נצבים וילך', 'ניצבים וילך'],
+  האזינו: ['האזנו'],
+  'וזאת הברכה': ['זאת הברכה', 'וזאת', 'הברכה'],
+};
+
+const qnorm = (s) => normalizeHebrew(s, { keepAmud: true, keepPunctuation: false });
+
+let nameIndex = null;
+/** normalized name -> parsha; and the longest name length in tokens. */
+function parshaNameIndex() {
+  if (nameIndex) return nameIndex;
+  const map = new Map();
+  for (const p of PARSHIOT) {
+    for (const n of [p.name, ...(PARSHA_VARIANTS[p.name] || [])]) {
+      const k = qnorm(n);
+      if (!map.has(k)) map.set(k, p);
+    }
+  }
+  let max = 1;
+  for (const k of map.keys()) max = Math.max(max, k.split(' ').length);
+  nameIndex = { map, max };
+  return nameIndex;
+}
+
+/** Leading words naming a parsha ("פרשת וישלח"). */
+const PARSHA_PREFIX = new Set(['פרשת', 'פרשה', 'פרש'].map(qnorm));
+/** Words before an aliyah ("עלייה חמישית"). */
+const ALIYAH_PREFIX = new Set(['עליה', 'עלייה', 'עלית', 'בעליה', 'בעלייה'].map(qnorm));
+/** Aliyah ordinals as words (masculine / feminine / common spellings) -> reading index (7 = מפטיר). */
+const ALIYAH_WORDS = new Map(
+  [
+    [0, ['ראשון', 'ראשונה', 'ראשונ']],
+    [1, ['שני', 'שניה', 'שנייה']],
+    [2, ['שלישי', 'שלישית']],
+    [3, ['רביעי', 'רביעית']],
+    [4, ['חמישי', 'חמישית', 'חמשי']],
+    [5, ['שישי', 'ששי', 'שישית', 'ששית']],
+    [6, ['שביעי', 'שביעית']],
+    [7, ['מפטיר', 'מפטירה', 'למפטיר']],
+  ].flatMap(([i, words]) => words.map((w) => [qnorm(w), i])),
+);
+
+/**
+ * A typed reference to a parsha / aliyah ("וישלח", "פרשת וישלח שני", "וישלח ב", "וישלח 2",
+ * "תצוה עלייה חמישית", "בראשית מפטיר"), or null.
+ *   { parsha, readingIndex (0 = ראשון ... 7 = מפטיר), explicit, strong }
+ * The five Chumash book names are parsha names too; they stay book references unless the query
+ * says otherwise: "בראשית א" / "בראשית לב יד" -> null (chapter / verse lookup), "בראשית" alone ->
+ * weak (the book first, the parsha as an extra suggestion), "פרשת בראשית", "בראשית שני",
+ * "בראשית מפטיר" -> strong. Every other parsha name is strong.
+ * @param {string | string[]} input  the query, or its normalized tokens
+ */
+function parseParshaQuery(input) {
+  const tokens = Array.isArray(input) ? input.slice() : qnorm(input).split(' ').filter(Boolean);
+  if (!tokens.length) return null;
+  let i = 0;
+  const explicit = PARSHA_PREFIX.has(tokens[0]);
+  if (explicit) i = 1;
+  if (i >= tokens.length) return null;
+  const { map, max } = parshaNameIndex();
+  let parsha = null;
+  let used = 0;
+  for (let n = Math.min(max, tokens.length - i); n >= 1 && !parsha; n--) {
+    const hit = map.get(tokens.slice(i, i + n).join(' '));
+    if (hit) {
+      parsha = hit;
+      used = n;
+    }
+  }
+  if (!parsha) return null;
+  let rest = tokens.slice(i + used);
+  let aliyahPrefix = false;
+  if (rest.length && ALIYAH_PREFIX.has(rest[0])) {
+    aliyahPrefix = true;
+    rest = rest.slice(1);
+  }
+  let readingIndex = 0;
+  let wordOrdinal = false;
+  if (rest.length > 1) return null;
+  if (rest.length === 1) {
+    const t = rest[0];
+    if (ALIYAH_WORDS.has(t)) {
+      readingIndex = ALIYAH_WORDS.get(t);
+      wordOrdinal = true;
+    } else if (/^[1-8]$/.test(t)) readingIndex = Number(t) - 1;
+    else if (/^[א-ח]$/.test(t)) readingIndex = hebrewNumeralToInt(t) - 1;
+    else return null;
+  } else if (aliyahPrefix) return null;
+  const reading = readingsOf(parsha)[readingIndex];
+  if (!reading || (readingIndex === 7 && !parsha.maftir)) return null;
+  const bookName = CHUMASH_BOOKS.includes(parsha.name);
+  const given = rest.length === 1;
+  if (bookName && !explicit && !aliyahPrefix && given && !wordOrdinal) return null; // "בראשית א": chapter א
+  const strong = explicit || !bookName || wordOrdinal || aliyahPrefix;
+  return { parsha, readingIndex, reading, explicit, strong };
+}
+
 // --- library resolution ----------------------------------------------------------------------
 
 const VERSE_RE = /^\s*[([]\s*([א-ת]{1,4})\s*[)\]]/;
@@ -315,6 +450,9 @@ module.exports = {
   bookDividers,
   refLabel,
   fullRefLabel,
+  printedRef,
+  PARSHA_VARIANTS,
+  parseParshaQuery,
   chumashVerseLines,
   lineOfVerse,
   dividerLines,

@@ -3,12 +3,15 @@
  * "בראשית יב א") and get instant clickable preview cards. Abbreviations and
  * structural words are understood ("שו\"ע או\"ח סי' שכח ד", "ב\"ק דף ב ע\"ב");
  * a fully resolved reference gets a prominent "פתח: ספר — מיקום" card on top.
+ * Torah parshiot / aliyot ("וישלח", "פרשת וישלח שני", "בראשית מפטיר") get a parsha card:
+ * "פרשת וישלח · שני (בראשית ל״ב:י״ד)", right-aligned.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { resolveReference, type JumpResult } from '../../shared/quickJump';
 import { useLibrary } from '../db/LibraryContext';
+import { alignRight } from '../lib/direction';
 import { SearchIcon } from './Icons';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
@@ -98,15 +101,42 @@ export function QuickJumpBar({ onJump }: Props) {
           accessibilityRole="button"
           testID="quick-jump-direct"
         >
-          <Text style={styles.directText} numberOfLines={2}>
-            פתח: {results[0].bookTitle}
-            {results[0].location ? ` — ${results[0].location}` : ''}
+          <Text style={styles.directText} numberOfLines={2} testID="quick-jump-direct-text">
+            {results[0].parsha
+              ? `פתח: ${results[0].parsha.label}`
+              : `פתח: ${results[0].bookTitle}${results[0].location ? ` — ${results[0].location}` : ''}`}
           </Text>
           <Text style={styles.directGo}>←</Text>
         </Pressable>
       ) : null}
 
-      {results.map((r) => (
+      {results.map((r) =>
+        r.parsha ? (
+          <Pressable
+            key={`p${r.parsha.index}:${r.parsha.readingIndex}`}
+            onPress={() => jump(r)}
+            style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
+            accessibilityRole="button"
+            accessibilityLabel={r.parsha.label}
+            testID="quick-jump-parsha"
+          >
+            <View style={styles.cardHeader}>
+              <Text style={styles.parshaTitle} numberOfLines={1} testID="quick-jump-parsha-title">
+                {r.parsha.title}
+                <Text style={styles.cardPath}>{`  ·  ${r.parsha.aliyah}`}</Text>
+              </Text>
+              <Text style={styles.go}>מעבר ←</Text>
+            </View>
+            <Text style={styles.parshaRef} numberOfLines={1} testID="quick-jump-parsha-ref">
+              {r.parsha.refLabel}
+            </Text>
+            {r.preview ? (
+              <Text style={styles.preview} numberOfLines={2}>
+                {r.preview}
+              </Text>
+            ) : null}
+          </Pressable>
+        ) : (
         <Pressable
           key={`${r.bookId}:${r.targetLine}`}
           onPress={() => jump(r)}
@@ -136,7 +166,8 @@ export function QuickJumpBar({ onJump }: Props) {
             <Text style={styles.unmatched}>לא זוהה: {r.unmatched.join(' ')}</Text>
           ) : null}
         </Pressable>
-      ))}
+        ),
+      )}
       {results.length && elapsed !== null ? <Text style={styles.timing}>{elapsed} ms</Text> : null}
     </View>
   );
@@ -198,12 +229,14 @@ const createStyles = (colors: Palette) =>
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
   },
-  directText: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.background, writingDirection: 'rtl' },
+  directText: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.background, ...alignRight },
   directGo: { fontSize: 18, fontWeight: '700', color: colors.background },
   cardHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   cardTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.text, writingDirection: 'rtl' },
   cardPath: { fontSize: 15, fontWeight: '500', color: colors.accent },
   go: { fontSize: 14, color: colors.accent, fontWeight: '600' },
+  parshaTitle: { flex: 1, minWidth: 0, fontSize: 17, fontWeight: '700', color: colors.text, ...alignRight },
+  parshaRef: { fontSize: 13, color: colors.textMuted, ...alignRight },
   category: { fontSize: 12, color: colors.textMuted, writingDirection: 'rtl' },
   preview: { fontSize: 15, color: colors.text, lineHeight: 22, writingDirection: 'rtl', marginTop: 2 },
   unmatched: { fontSize: 13, color: colors.danger, marginTop: 2 },

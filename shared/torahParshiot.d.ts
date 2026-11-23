@@ -71,3 +71,18 @@ export function lineOfVerse(verseLines: Map<string, number>, ref: VerseRef): num
 export function dividerLines(book: string, verseLines: Map<string, number>): Map<number, LineDivider>;
 export function parshiotWithLines(book: string, verseLines: Map<string, number>): ResolvedParsha[];
 export function parshaForLine<P extends { line: number | null }>(resolved: P[], line: number): P | null;
+
+/** 'בראשית ל״ב:י״ד' */
+export function printedRef(book: string, ref: VerseRef): string;
+export const PARSHA_VARIANTS: Record<string, string[]>;
+export interface ParshaQuery {
+  parsha: Parsha;
+  /** 0 = ראשון ... 6 = שביעי, 7 = מפטיר. */
+  readingIndex: number;
+  reading: Aliyah;
+  /** Typed with "פרשת". */
+  explicit: boolean;
+  /** Clearly a parsha reference (false: a bare Chumash book name, the book comes first). */
+  strong: boolean;
+}
+export function parseParshaQuery(input: string | string[]): ParshaQuery | null;

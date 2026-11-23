@@ -28,13 +28,11 @@
  * right column lists the book's parshiot and the selected parsha opens its aliyot (ראשון..מפטיר)
  * to the left, each jumping to its exact verse (shared/torahParshiot.js).
  *
- * A collapsible "לימוד יומי" block at the top opens today's parsha / aliyah, Daf Yomi, Mishnah
- * Yomit or Rambam in one tap from any book (src/components/learning/DailyLearning.tsx).
+ * The drawer navigates the current book only ("לימוד יומי" lives on the Library screen).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type ScrollViewInstance } from 'react-native';
 
-import type { ResolvedTarget } from '../../../shared/dailyLearning';
 import { normalizeHebrew } from '../../../shared/hebrew';
 import { inlineUnitWord } from '../../../shared/refAlign';
 import {
@@ -56,7 +54,6 @@ import { parshaForLine, type ChumashBook, type ResolvedParsha } from '../../../s
 import { useLibrary } from '../../db/LibraryContext';
 import { useChumashBook, useResolvedParshiot } from '../../services/parshiotNav';
 import { useLearning } from '../../state/learningStore';
-import { DailyLearningSection } from '../learning/DailyLearning';
 import { LEFT_CHEVRON, alignRight, inputAlignRight, nativeDir, setWebDir } from '../../lib/direction';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 import { SideDrawer } from '../Overlay';
@@ -79,8 +76,6 @@ interface Props {
   onSelect: (line: number) => void;
   /** Wide screens: render as a panel beside the text (stays open after a jump). */
   docked?: boolean;
-  /** Opens a "לימוד יומי" target (any book) in a tab; enables the daily-learning block. */
-  onOpenTarget?: (t: ResolvedTarget) => void;
 }
 
 const ROW_H = 44;
@@ -97,8 +92,6 @@ const CHEVRON_SPACE = 14;
 const HEAD_FONT = 13;
 const HEAD_CHROME = spacing.md * 2 + 4;
 const DIRECT_CHROME = spacing.sm * 2 + spacing.md * 2 + 6;
-/** The open "לימוד יומי" block needs this much room for its rows. */
-const DAILY_MIN_WIDTH = 270;
 const REF_FONT = 12;
 
 export function TocDrawer({ visible, docked, onClose, ...rest }: Props) {
@@ -126,14 +119,12 @@ export function TocDrawer({ visible, docked, onClose, ...rest }: Props) {
 
 type PanelProps = Omit<Props, 'visible'> & { cap: number; onFitWidth: (w: number) => void };
 
-function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFitWidth, docked, onOpenTarget }: PanelProps) {
+function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFitWidth, docked }: PanelProps) {
   const s = useThemedStyles(createStyles);
   const { adapter } = useLibrary();
   const chumash = useChumashBook(bookId, bookTitle);
   const tocMode = useLearning((x) => x.tocMode);
   const setTocMode = useLearning((x) => x.setTocMode);
-  const dailyOpen = useLearning((x) => x.tocDailyOpen) && !!onOpenTarget;
-  const minPanel = dailyOpen ? DAILY_MIN_WIDTH : 0;
   const parshiotMode = !!chumash && tocMode === 'parshiot';
   const jump = (line: number) => {
     onSelect(line);
@@ -168,7 +159,6 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
           <Text style={s.closeText}>✕</Text>
         </Pressable>
       </View>
-      {onOpenTarget ? <DailyLearningSection onOpen={onOpenTarget} /> : null}
       {chumash ? (
         <View style={s.modeRow} accessibilityRole="radiogroup" accessibilityLabel="תצוגת תוכן העניינים">
           {(
@@ -195,7 +185,7 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
         </View>
       ) : null}
       {parshiotMode && chumash ? (
-        <ParshiotColumnsView key={`p${bookId}`} bookId={bookId} book={chumash} currentLine={currentLine} cap={cap} minPanel={minPanel} onFitWidth={onFitWidth} onJump={jump} />
+        <ParshiotColumnsView key={`p${bookId}`} bookId={bookId} book={chumash} currentLine={currentLine} cap={cap} onFitWidth={onFitWidth} onJump={jump} />
       ) : !ready ? (
         <ActivityIndicator style={{ marginTop: spacing.xl }} color={s.palette.accent} />
       ) : !ready.tree.roots.length ? (
@@ -208,7 +198,6 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
           total={ready.total}
           currentLine={currentLine}
           cap={cap}
-          minPanel={minPanel}
           onFitWidth={onFitWidth}
           onJump={jump}
         />
@@ -224,8 +213,6 @@ interface ColumnsProps {
   currentLine: number;
   /** Widest the panel may get (px). */
   cap: number;
-  /** Narrowest the panel may get (px), e.g. while the daily-learning block is open. */
-  minPanel: number;
   /**
    * Reports the width the open columns (or filter results) need; the drawer sizes itself from it.
    * The columns derive the same clamped width in their own render: waiting for it to come back
@@ -237,7 +224,7 @@ interface ColumnsProps {
 }
 
 /** Mounted per open, so its initial selection reflects the current reading position. */
-function TocColumnsView({ bookId, tree, total, currentLine, cap, minPanel, onFitWidth, onJump }: ColumnsProps) {
+function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJump }: ColumnsProps) {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const { adapter, bookIndex } = useLibrary();
@@ -299,7 +286,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, minPanel, onFit
   // Display order is LTR with the deepest column first (at the left edge).
   const displayWidths = useMemo(() => [...(verseList ? [verseWidth] : []), ...nodeWidths.slice().reverse()], [verseList, verseWidth, nodeWidths]);
   const columnsWidth = displayWidths.reduce((a, b) => a + b, 0);
-  const width = tocPanelWidth([columnsWidth], { min: Math.max(MIN_PANEL_WIDTH, minPanel), cap });
+  const width = tocPanelWidth([columnsWidth], { min: MIN_PANEL_WIDTH, cap });
   // A panel wider than the columns (its minimum width): the deepest column takes the slack.
   const slack = Math.max(0, width - columnsWidth);
   const widthAt = (displayIndex: number) => displayWidths[displayIndex] + (displayIndex === 0 ? slack : 0);
@@ -446,7 +433,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, minPanel, onFit
     const directW = showDirect && direct ? tocColumnWidth([`מעבר: ${direct.title}`], { fontSize: ROW_FONT, chrome: DIRECT_CHROME, max: Infinity }) : 0;
     return Math.max(rows, directW);
   }, [query, results, tree, showDirect, direct]);
-  const fit = Math.max(query.trim() ? filterWidth : columnsWidth, minPanel);
+  const fit = query.trim() ? filterWidth : columnsWidth;
   useEffect(() => {
     if (fit > 0) onFitWidth(fit);
   }, [fit, onFitWidth]);
@@ -514,7 +501,6 @@ interface ParshiotProps {
   book: ChumashBook;
   currentLine: number;
   cap: number;
-  minPanel: number;
   onFitWidth: (width: number) => void;
   onJump: (line: number) => void;
 }
@@ -523,7 +509,7 @@ interface ParshiotProps {
  * פרשות mode: [ aliyot of the selected parsha ] [ parshiot of the book ] (RTL, like the chapter
  * columns). Opens on the parsha (and aliyah) of the reading position.
  */
-function ParshiotColumnsView({ bookId, book, currentLine, cap, minPanel, onFitWidth, onJump }: ParshiotProps) {
+function ParshiotColumnsView({ bookId, book, currentLine, cap, onFitWidth, onJump }: ParshiotProps) {
   const s = useThemedStyles(createStyles);
   const parshiot = useResolvedParshiot(bookId, book);
   const [picked, setPicked] = useState<number | null>(null);
@@ -549,12 +535,11 @@ function ParshiotColumnsView({ bookId, book, currentLine, cap, minPanel, onFitWi
     [selected],
   );
   const columnsWidth = parshaWidth + aliyahWidth;
-  const width = tocPanelWidth([columnsWidth], { min: Math.max(MIN_PANEL_WIDTH, minPanel), cap });
+  const width = tocPanelWidth([columnsWidth], { min: MIN_PANEL_WIDTH, cap });
   const slack = Math.max(0, width - columnsWidth);
-  const fit = Math.max(columnsWidth, minPanel);
   useEffect(() => {
-    if (fit > 0) onFitWidth(fit);
-  }, [fit, onFitWidth]);
+    if (columnsWidth > 0) onFitWidth(columnsWidth);
+  }, [columnsWidth, onFitWidth]);
   useEffect(() => {
     const t = setTimeout(() => scrollRef.current?.scrollTo({ x: 0, animated: true }), 30);
     return () => clearTimeout(t);
