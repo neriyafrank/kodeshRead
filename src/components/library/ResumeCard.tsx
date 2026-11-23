@@ -9,6 +9,7 @@ import { useLibraryActions } from '../../services/libraryActions';
 import { useInterruptedImports } from '../../services/ingestionLifecycle';
 import type { InterruptedImport } from '../../services/localIndexer';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
+import { ErrorDetails } from './ErrorDetails';
 import { ProgressBar } from './JobStatus';
 
 function confirm(title: string, message: string, ok: string, onOk: () => void) {
@@ -45,6 +46,7 @@ function ResumeCard({ item }: { item: InterruptedImport }) {
   const done = Math.min(Number(st.processed_count) || 0, total);
   const phase = st.phase === 'scan' ? ' · שלב סריקת התיקיות' : st.phase === 'links' ? ' · שלב קישור הפרשנים' : st.phase === 'finalize' ? ' · שלב מיטוב האינדקס' : '';
   const killed = st.status === 'in_progress';
+  const finishing = core && item.finalizeOnly;
 
   const onDiscard = () =>
     confirm(
@@ -56,10 +58,14 @@ function ResumeCard({ item }: { item: InterruptedImport }) {
 
   return (
     <View style={s.card} testID={`resume-card-${item.target}`}>
-      <Text style={s.title}>{core ? 'המשך בנייה שנעצרה' : 'המשך ייבוא שנעצר'}</Text>
-      <Text style={s.body} numberOfLines={2}>
-        {core ? 'ספריית ליבה' : 'ספרים אישיים'} מ״{st.source_name ?? 'תיקייה'}״{killed ? ' — הפעולה נקטעה' : ' — הושהתה'}
-        {phase}
+      <Text style={s.title}>{finishing ? 'השלמת בניית ספריית הליבה' : core ? 'המשך בנייה שנעצרה' : 'המשך ייבוא שנעצר'}</Text>
+      <Text style={s.body} numberOfLines={3}>
+        {core ? 'ספריית ליבה' : 'ספרים אישיים'} מ״{st.source_name ?? 'תיקייה'}״
+        {finishing
+          ? item.readyToInstall
+            ? ' — כל הספרים נבנו; נותרה רק ההתקנה (כמה שניות, בלי לקרוא שוב אף ספר)'
+            : ' — כל הספרים נבנו; נותר רק שלב הסיום (בלי לקרוא שוב אף ספר)'
+          : `${killed ? ' — הפעולה נקטעה' : ' — הושהתה'}${phase}`}
       </Text>
       <ProgressBar fraction={total ? done / total : null} />
       <Text style={s.count} testID="resume-progress">
@@ -70,9 +76,10 @@ function ResumeCard({ item }: { item: InterruptedImport }) {
           {num(st.error_count)} קבצים פגומים דולגו{item.errors[0] ? `: ${item.errors.map((e) => e.file_path.split('/').pop()).slice(0, 3).join(', ')}` : ''}
         </Text>
       ) : null}
+      {st.last_error ? <ErrorDetails diagnostic={st.last_error} context={`resume ${item.target} ${st.phase}`} testID={`resume-error-${item.target}`} /> : null}
       <View style={s.row}>
         <Pressable onPress={() => void actions.resumeImport(item)} style={({ pressed }) => [s.primary, pressed && s.pressed]} accessibilityRole="button" testID="resume-import">
-          <Text style={s.primaryText}>המשך</Text>
+          <Text style={s.primaryText}>{finishing ? 'המשך (השלם התקנה)' : 'המשך'}</Text>
         </Pressable>
         <Pressable onPress={onDiscard} style={({ pressed }) => [s.danger, pressed && s.pressed]} accessibilityRole="button" testID="discard-import">
           <Text style={s.dangerText}>מחק ואפס</Text>

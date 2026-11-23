@@ -80,7 +80,7 @@ export function IngestionLifecycle() {
         const item = (await findInterruptedImports(lib.user)).find((i) => i.target === target);
         // Only an import whose source is still open in this session resumes on its own;
         // anything else waits for a tap on the resume card.
-        if (item && reopenSource(item.state)) {
+        if (item && (item.finalizeOnly || reopenSource(item.state))) {
           useLibraryJobs.getState().clearResult();
           await actions.resumeImport(item);
         }

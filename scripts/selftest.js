@@ -17,6 +17,8 @@
  *    book_units links -> finalize, surviving pauses and kills at any statement (mid-scan,
  *    mid-book, mid-link) with zero duplicates; pure path + book_units alignment over real pairs
  *    from every corpus of otzaria_index_only.txt; the Android foreground-service plugin.
+ * 7. End of a core build (shared/coreFinalize.js): swap over an open core with live -wal / -shm,
+ *    non-fatal finalize optimizations, finalize-only retries that read no book, step diagnostics.
  */
 'use strict';
 
@@ -691,6 +693,7 @@ async function main() {
   await streamingPipelineTests();
   await otzariaIndexPipelineTests();
   await foregroundServicePluginTests();
+  await coreFinalizeTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -2234,7 +2237,9 @@ async function streamingPipelineTests() {
       } catch (e) {
         err = e;
       }
-      assert.ok(err && (err.killed || /dead/.test(err.message)), `${name}: expected a kill at ${killAt}, got ${err && err.message}`);
+      // A kill inside a named finalize sub-step arrives wrapped in a coreFinalize.StepError.
+      const root = err && err.cause ? err.cause : err;
+      assert.ok(root && (root.killed || /dead/.test(root.message)), `${name}: expected a kill at ${killAt}, got ${err && err.message}`);
       db.raw.close(); // the OS took the process: the open transaction is gone
       db = openWal(file);
       await indexer.ensureSchema(db.w, { kind: 'core' });
@@ -2750,6 +2755,309 @@ async function foregroundServicePluginTests() {
     const js = fs.readFileSync(path.join(ROOT, 'src', 'services', 'importForegroundService.ts'), 'utf8');
     assert.ok(/requireOptionalNativeModule<NativeImportService>\('ImportForegroundService'\)/.test(js), 'JS looks the module up optionally (web no-op)');
   });
+}
+
+// ---------------------------------------------------------------------------------------------
+// End of an on-device core build: finalize optimizations, sealing, swap into core_library.db.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Writer adapter whose statements matching `re` throw a busy / locked error (like a real device),
+ * once `armed()` says so.
+ */
+function failing(w, re, log, armed) {
+  const guard = (fn) => async (sql, params) => {
+    if ((!armed || armed()) && re.test(String(sql))) {
+      if (log) log.push(String(sql).trim().slice(0, 60));
+      throw Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+    }
+    return fn(sql, params);
+  };
+  return { exec: guard(w.exec), run: guard(w.run), all: guard(w.all) };
+}
+
+/** shared/coreFinalize env for node: the SQLite directory `dir`, node fs, node:sqlite. */
+function nodeInstallEnv(dir, hooks) {
+  const p = (name) => path.join(dir, name);
+  const events = [];
+  return {
+    events,
+    env: {
+      exists: (name) => fs.existsSync(p(name)),
+      remove: (name) => {
+        events.push(`remove ${name}`);
+        fs.unlinkSync(p(name));
+      },
+      // Like expo-file-system's File.move(): asynchronous, completes on a later tick.
+      move: (from, to) =>
+        new Promise((resolve, reject) =>
+          setTimeout(() => {
+            try {
+              if (hooks && hooks.move) hooks.move(from, to);
+              fs.renameSync(p(from), p(to));
+              events.push(`move ${from} -> ${to}`);
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          }, 5),
+        ),
+      closeCore: async () => {
+        events.push('closeCore');
+        if (hooks && hooks.closeCore) await hooks.closeCore();
+      },
+      reopenCore: async () => {
+        events.push('reopenCore');
+        return hooks && hooks.reopenCore ? hooks.reopenCore() : null;
+      },
+      sleep: () => Promise.resolve(),
+    },
+  };
+}
+
+/** sealBuild env for a node:sqlite connection of `dir/name`. */
+function nodeSealEnv(db, dir, name) {
+  return {
+    checkpoint: async () => db.raw.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get(),
+    setJournalDelete: async () => db.raw.exec('PRAGMA journal_mode = DELETE'),
+    close: async () => db.raw.close(),
+    removeSideFiles: () => {
+      for (const s of ['-wal', '-shm']) if (fs.existsSync(path.join(dir, name + s))) fs.unlinkSync(path.join(dir, name + s));
+    },
+    sleep: () => Promise.resolve(),
+  };
+}
+
+async function coreFinalizeTests() {
+  const pipeline = require('../shared/pipeline');
+  const cf = require('../shared/coreFinalize');
+  const fx = makePipelineFixture();
+  const dir = path.join(fx.tmp, 'SQLite');
+  fs.mkdirSync(dir);
+  const BUILD = 'core_library.build.db';
+  const CORE = 'core_library.db';
+  const opts = (extra) => Object.assign({ source: { kind: 'folder', root: fx.lib }, sourceUri: 'file://' + fx.lib, sourceName: 'אוצריא', targetDb: 'core', idBase: 0, yieldToUI: () => Promise.resolve(), finalize: { analyze: true, analysisLimit: 1000, mergePages: 4 } }, extra);
+  const fresh = async (name) => {
+    for (const s of ['', '-wal', '-shm', '-journal']) fs.rmSync(path.join(dir, name + s), { force: true });
+    const db = openWal(path.join(dir, name));
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    return db;
+  };
+  /** A complete, sealed build in BUILD (as runCoreBuild leaves it before the install). */
+  const sealedBuild = async () => {
+    const db = await fresh(BUILD);
+    const r = await pipeline.runImport(db.w, nodeFs, opts());
+    assert.strictEqual(r.phase, 'done');
+    const meta = await cf.writeBuildMeta(db.w, { source: 'local:אוצריא' });
+    await cf.sealBuild(nodeSealEnv(db, dir, BUILD));
+    return meta;
+  };
+  try {
+    const ref = await fresh('ref.db');
+    await pipeline.runImport(ref.w, nodeFs, opts());
+    const refSnap = await librarySnapshot(ref.read);
+    ref.raw.close();
+
+    await check('core finalize: swap over an OPEN core with live -wal / -shm (closed first, side files removed, awaited rename)', async () => {
+      // The installed (old) library: WAL mode, auto-checkpoint off, so its -wal holds frames.
+      const old = openWal(path.join(dir, CORE));
+      old.raw.exec("PRAGMA wal_autocheckpoint = 0; CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); INSERT INTO meta VALUES ('db_version', 'old'), ('kind', 'core'); CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT);");
+      for (let i = 0; i < 200; i++) old.raw.prepare('INSERT INTO books (title) VALUES (?)').run('ישן ' + i);
+      assert.ok(fs.statSync(path.join(dir, CORE + '-wal')).size > 0 && fs.existsSync(path.join(dir, CORE + '-shm')), 'old core has live -wal / -shm');
+      const { version } = await sealedBuild();
+      assert.ok(!fs.existsSync(path.join(dir, BUILD + '-wal')) && !fs.existsSync(path.join(dir, BUILD + '-shm')), 'sealed build is one self-contained file');
+      let oldOpen = true;
+      let reopened = null;
+      const { env, events } = nodeInstallEnv(dir, {
+        closeCore: async () => {
+          // On the device the old -wal / -shm can outlive the connection (killed process, a handle
+          // the native layer had not released yet). Keep them, with their frames, next to the file.
+          const wal = fs.readFileSync(path.join(dir, CORE + '-wal'));
+          const shm = fs.readFileSync(path.join(dir, CORE + '-shm'));
+          old.raw.close();
+          fs.writeFileSync(path.join(dir, CORE + '-wal'), wal);
+          fs.writeFileSync(path.join(dir, CORE + '-shm'), shm);
+          oldOpen = false;
+        },
+        move: () => assert.ok(!oldOpen, 'old core closed before the rename'),
+        reopenCore: async () => {
+          reopened = openWritable(path.join(dir, CORE));
+          return (await indexer.readMeta(reopened.read)).db_version;
+        },
+      });
+      const got = await cf.installFile(env, { from: BUILD, to: CORE, settleMs: 0 });
+      assert.strictEqual(got, version);
+      // Order: close -> old side files removed -> rename -> reopen.
+      const i = (re) => events.findIndex((e) => re.test(e));
+      assert.ok(i(/^closeCore/) < i(/remove core_library\.db-wal/) && i(/remove core_library\.db-wal/) < i(/^move/) && i(/^move/) < i(/^reopenCore/), events.join(', '));
+      assert.ok(events.includes('remove core_library.db-shm'), events.join(', '));
+      assert.ok(!fs.existsSync(path.join(dir, BUILD)), 'build file consumed by the rename (no copy)');
+      assert.ok(fs.readdirSync(dir).every((f) => !f.startsWith(BUILD)), `build side files left: ${fs.readdirSync(dir)}`);
+      assert.strictEqual(reopened.raw.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+      assert.deepStrictEqual(await librarySnapshot(reopened.read), refSnap, 'installed library == reference build (no stale WAL frames applied)');
+      assert.strictEqual(reopened.raw.prepare("SELECT COUNT(*) AS n FROM books WHERE title LIKE 'ישן%'").get().n, 0);
+      reopened.raw.close();
+    });
+
+    await check('core finalize: a failed swap keeps the sealed build, names the step and its native code', async () => {
+      const { version } = await sealedBuild();
+      const { env } = nodeInstallEnv(dir, {
+        move: () => {
+          throw Object.assign(new Error('rename failed: Device or resource busy'), { code: 'EBUSY' });
+        },
+      });
+      let err = null;
+      try {
+        await cf.installFile(env, { from: BUILD, to: CORE, settleMs: 0 });
+      } catch (e) {
+        err = e;
+      }
+      assert.ok(err instanceof cf.StepError, String(err));
+      assert.strictEqual(err.step, 'finalize:swap_file');
+      assert.ok(/^finalize:swap_file · rename failed: Device or resource busy \[EBUSY\]$/.test(cf.diagnosticOf(err)), cf.diagnosticOf(err));
+      const b = openWritable(path.join(dir, BUILD));
+      const st = await indexer.readIngestionState(b.read);
+      assert.ok(cf.isReadyToInstall(st) && cf.needsFinalizeOnly(st), JSON.stringify(st));
+      assert.strictEqual((await indexer.readMeta(b.read)).db_version, version);
+      b.raw.close();
+      // A missing staged file is reported before the installed library is touched.
+      const { env: env2, events } = nodeInstallEnv(dir);
+      await assert.rejects(cf.installFile(env2, { from: 'nothing.db', to: CORE, settleMs: 0 }), (e) => e.step === 'finalize:check_staged' && /ENOENT/.test(e.diagnostic));
+      assert.ok(!events.includes('closeCore'), 'core left open when nothing can be installed');
+    });
+
+    await check('core finalize: optimization failures (FTS merge, ANALYZE, optimize, queue drop, checkpoint) are non-fatal', async () => {
+      const db = await fresh('soft.db');
+      const failed = [];
+      let finalizing = false;
+      const w = failing(db.w, /paragraphs_fts\(paragraphs_fts, rank\)|ANALYZE|PRAGMA optimize|DELETE FROM import_queue/, failed, () => finalizing);
+      const warned = [];
+      const r = await pipeline.runImport(
+        w,
+        nodeFs,
+        opts({
+          onProgress: (x) => (finalizing = finalizing || x.phase === 'finalize'),
+          onWarning: (x) => warned.push(x.step),
+          walCheckpoint: async () => {
+            if (finalizing) throw new Error('database is locked');
+          },
+        }),
+      );
+      assert.ok(failed.length >= 3, failed.join(', '));
+      assert.strictEqual(r.stopped, null);
+      assert.strictEqual(r.phase, 'done', 'the import completes');
+      assert.deepStrictEqual(r.warnings.map((x) => x.step), ['finalize:fts_optimize', 'finalize:analyze', 'finalize:pragma_optimize']);
+      assert.deepStrictEqual(warned, ['finalize:fts_optimize', 'finalize:analyze', 'finalize:pragma_optimize']);
+      assert.ok(r.warnings.every((x) => /database is locked \[SQLITE_BUSY\]/.test(x.message)), JSON.stringify(r.warnings));
+      const metaWarn = [];
+      const m = await cf.writeBuildMeta(w, { source: 'local:x', warn: (x) => metaWarn.push(x.step) });
+      assert.deepStrictEqual(metaWarn, ['finalize:drop_queue']);
+      assert.ok(m.version && m.counts.books > 0);
+      assert.ok(cf.isReadyToInstall(await indexer.readIngestionState(db.read)));
+      // Every book is there and searchable: an un-merged FTS index is valid, merely less compact.
+      assert.deepStrictEqual(await librarySnapshot(db.read), refSnap);
+      assert.strictEqual(db.raw.prepare("INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES('integrity-check', 1)").run().changes >= 0, true);
+      // Journal-mode switch failing is soft too; a WAL that cannot be emptied is not (data safety).
+      const sealWarn = [];
+      let busy = 2;
+      await cf.sealBuild(
+        Object.assign(nodeSealEnv(db, dir, 'soft.db'), {
+          checkpoint: async () => (busy-- > 0 ? { busy: 1, log: 5, checkpointed: 0 } : db.raw.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get()),
+          setJournalDelete: async () => {
+            throw new Error('database is locked');
+          },
+        }),
+        { warn: (x) => sealWarn.push(x.step), delayMs: 0 },
+      );
+      assert.deepStrictEqual(sealWarn, ['finalize:journal_mode'], 'busy checkpoint retried, journal mode soft');
+      await assert.rejects(
+        cf.sealBuild({ checkpoint: async () => ({ busy: 1, log: 9, checkpointed: 3 }), setJournalDelete: async () => undefined, close: async () => assert.fail('never closed'), removeSideFiles: () => undefined, sleep: () => Promise.resolve() }, { attempts: 3, delayMs: 0 }),
+        (e) => e.step === 'finalize:checkpoint' && /SQLITE_BUSY/.test(e.diagnostic),
+      );
+      // No VACUUM anywhere in the on-device finalize path.
+      for (const f of ['shared/coreFinalize.js', 'shared/pipeline.js', 'src/services/localIndexer.ts', 'src/db/library.ts']) {
+        const code = fs.readFileSync(path.join(ROOT, f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+        assert.ok(!/VACUUM/i.test(code), `${f} runs VACUUM`);
+      }
+    });
+
+    await check('core finalize: a failure inside finalize resumes ONLY finalize (no folder listed, no book read)', async () => {
+      // 1. Killed while writing the library meta (after the index optimizations ran).
+      const name = 'retry.db';
+      let db = await fresh(name);
+      const log = [];
+      const probe = killable(db.w, Infinity, log);
+      await pipeline.runImport(probe, nodeFs, opts());
+      const metaAt = log.length + 1; // the first statement after the pipeline
+      db.raw.close();
+      db = await fresh(name);
+      const w = killable(db.w, Infinity);
+      await pipeline.runImport(w, nodeFs, opts());
+      const k = killable(db.w, 1);
+      await assert.rejects(cf.writeBuildMeta(k, { source: 'local:x' }), (e) => /^finalize:/.test(e.step));
+      assert.ok(metaAt > 1);
+      db.raw.close();
+      db = openWal(path.join(dir, name));
+      await indexer.ensureSchema(db.w, { kind: 'core' });
+      let st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(st.phase, 'finalize');
+      assert.strictEqual(st.finalize_step, cf.FINALIZE_INDEX_DONE);
+      assert.ok(cf.needsFinalizeOnly(st), JSON.stringify(st));
+      // The retry: a resume with a source that must never be touched.
+      const t = tracingFs();
+      const stmts = [];
+      const r = await pipeline.runImport(killable(db.w, Infinity, stmts), t.fsa, opts({ resume: true }));
+      assert.strictEqual(r.phase, 'done');
+      assert.deepStrictEqual([t.lists.length, t.reads.length], [0, 0], 'no folder listed, no book read');
+      assert.ok(!stmts.some((x) => /paragraphs_fts\(paragraphs_fts, rank\)|ANALYZE/.test(x)), 'optimizations already done are skipped');
+      const m1 = await cf.writeBuildMeta(db.w, { source: 'local:x' });
+      assert.deepStrictEqual(await librarySnapshot(db.read), refSnap);
+
+      // 2. Sealed, then the swap failed: retrying is a no-op pipeline + the same version.
+      await cf.sealBuild(nodeSealEnv(db, dir, name));
+      db = openWal(path.join(dir, name));
+      await indexer.ensureSchema(db.w, { kind: 'core' });
+      st = await indexer.readIngestionState(db.read);
+      assert.ok(cf.isReadyToInstall(st));
+      const t2 = tracingFs();
+      const r2 = await pipeline.runImport(db.w, t2.fsa, opts({ resume: true }));
+      assert.strictEqual(r2.phase, 'done');
+      assert.deepStrictEqual([t2.lists.length, t2.reads.length], [0, 0], 'ready build: nothing re-imported');
+      const m2 = await cf.writeBuildMeta(db.w, { source: 'local:x' });
+      assert.strictEqual(m2.version, m1.version, 'same library version on retry');
+      assert.ok(m2.reused);
+      assert.deepStrictEqual(await librarySnapshot(db.read), refSnap, 'never re-seeded or wiped');
+      db.raw.close();
+
+      // 3. A build completed by an older app version (no finalize_step) is adopted, not rebuilt.
+      db = openWal(path.join(dir, name));
+      db.raw.exec("UPDATE ingestion_state SET finalize_step = NULL, phase = 'finalize'");
+      st = await cf.adoptCompletedBuild(db.w);
+      assert.ok(cf.isReadyToInstall(st), JSON.stringify(st));
+      db.raw.close();
+    });
+
+    await check('core finalize: step diagnostics ("step · message [code]")', () => {
+      const e = new cf.StepError('finalize:reopen_db', Object.assign(new Error('unable to open database file'), { code: 'ERR_INTERNAL_SQLITE_ERROR' }));
+      assert.strictEqual(e.diagnostic, 'finalize:reopen_db · unable to open database file [ERR_INTERNAL_SQLITE_ERROR]');
+      assert.strictEqual(cf.diagnosticOf(e), e.diagnostic);
+      assert.strictEqual(cf.diagnosticOf(new Error('x')), 'x');
+      assert.strictEqual(cf.describeError('plain'), 'plain');
+      assert.strictEqual(new cf.StepError('finalize:counts', Object.assign(new Error('none'), { retryable: false })).retryable, false);
+      // The UI shows it with a copy button, on the failure card and the resume card.
+      const ui = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+      assert.ok(/העתק פרטי שגיאה/.test(ui('src/components/library/ErrorDetails.tsx')) && /setStringAsync/.test(ui('src/components/library/ErrorDetails.tsx')));
+      assert.ok(/result\.diagnostic/.test(ui('src/components/library/JobStatus.tsx')) && /last_error/.test(ui('src/components/library/ResumeCard.tsx')));
+      // Every File.move() in src/ is awaited (it returns a Promise in expo-file-system 58).
+      for (const f of ['src/db/library.ts', 'src/services/localIndexer.ts', 'src/services/coreLibrary.ts']) {
+        for (const line of ui(f).split('\n')) {
+          if (/\.move\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)) assert.ok(/await |=> dbFile\(from\)\.move/.test(line), `${f}: un-awaited move: ${line.trim()}`);
+        }
+      }
+    });
+  } finally {
+    fs.rmSync(fx.tmp, { recursive: true, force: true });
+  }
 }
 
 main();

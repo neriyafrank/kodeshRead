@@ -8,6 +8,7 @@
  * going to the background) stops them after the current book commits; "cancel" stops them
  * the same way and then discards the partial import.
  */
+import { Platform } from 'react-native';
 import { create } from 'zustand';
 
 export type JobKind = 'download' | 'buildCore' | 'importFiles' | 'importFolder' | 'delete';
@@ -37,6 +38,13 @@ export interface JobResult {
   paused?: boolean;
   /** Books that failed and were skipped: { path, message } (first few). */
   errors?: { path: string; message: string }[];
+  /**
+   * Failure only: the exact sub-step and native error ("finalize:swap_file · ... [ERR_CODE]"),
+   * shown in the failure card with a "copy error details" button.
+   */
+  diagnostic?: string;
+  /** Failure only: the work is kept and "המשך" retries just the failed step. */
+  retryable?: boolean;
 }
 
 export type StopRequest = 'pause' | 'cancel' | null;
@@ -99,6 +107,12 @@ export const useLibraryJobs = create<JobsState>()((set, get) => ({
   bumpCheckpoint: () => set((s) => ({ checkpointGeneration: s.checkpointGeneration + 1 })),
   clearResult: () => set({ result: null }),
 }));
+
+// Web preview in development only: lets the Playwright suite (scripts/e2e-library.js) render a
+// job result, e.g. a failure card with its diagnostic line, without a file system.
+if (typeof __DEV__ !== 'undefined' && __DEV__ && Platform.OS === 'web') {
+  (globalThis as { __kodeshreadJobs?: typeof useLibraryJobs }).__kodeshreadJobs = useLibraryJobs;
+}
 
 /** The pending pause / cancel request of the running ingestion job (polled between books). */
 export function stopRequest(): StopRequest {

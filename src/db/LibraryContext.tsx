@@ -6,7 +6,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
-import { loadBookIndex, type BookIndex } from '../../shared/quickJump';
+import { loadBookIndex, type BookIndex, type QueryAdapter } from '../../shared/quickJump';
 import { hasFts5 } from '../../shared/search';
 import { createRouter, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type LibrarySource } from '../../shared/sources';
 import { useSearch } from '../state/searchStore';
@@ -36,10 +36,12 @@ export interface LibraryController {
   /** Re-reads both DBs (after importing or deleting personal books). */
   refresh: () => Promise<void>;
   /**
-   * Swaps in the verified staging file (core_library.db.tmp): closes the current core
-   * connection, renames the file over core_library.db, reopens. user_library.db is untouched.
+   * Swaps in a verified staging file of the SQLite directory (default core_library.db.tmp; an
+   * on-device build passes core_library.build.db): drains the core readers, closes the current
+   * core connection, removes its -wal / -shm, renames the file over core_library.db, reopens.
+   * user_library.db is untouched. Throws a coreFinalize.StepError naming the failed sub-step.
    */
-  installCore: () => Promise<void>;
+  installCore: (from?: string) => Promise<void>;
   removeCore: () => Promise<void>;
 }
 
@@ -60,9 +62,57 @@ export function useLibraryController(): LibraryController {
   return c;
 }
 
+/**
+ * Reader gate of one core connection: counts the queries in flight so a swap can wait for them
+ * (instead of closing the connection under a running statement), then refuses new ones until
+ * the new library is published (screens re-query on the generation bump).
+ */
+interface CoreGate {
+  adapter: QueryAdapter;
+  /** Stops new queries and waits (at most `timeoutMs`) for the running ones to finish. */
+  drain: (timeoutMs: number) => Promise<void>;
+}
+
+const coreGates = new WeakMap<SQLiteDatabase, CoreGate>();
+
+function coreGate(db: SQLiteDatabase): CoreGate {
+  const existing = coreGates.get(db);
+  if (existing) return existing;
+  let inflight = 0;
+  let closed = false;
+  let idle: (() => void)[] = [];
+  const settle = () => {
+    if (inflight) return;
+    const waiting = idle;
+    idle = [];
+    waiting.forEach((f) => f());
+  };
+  const gate: CoreGate = {
+    adapter: {
+      all: async <T,>(sql: string, params: (string | number | null)[]) => {
+        if (closed) throw new Error('ספריית הליבה מתעדכנת כעת — נסו שוב בעוד רגע');
+        inflight++;
+        try {
+          return await db.getAllAsync<T>(sql, params);
+        } finally {
+          inflight--;
+          settle();
+        }
+      },
+    },
+    drain: async (timeoutMs) => {
+      closed = true;
+      if (!inflight) return;
+      await Promise.race([new Promise<void>((r) => idle.push(r)), new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+    },
+  };
+  coreGates.set(db, gate);
+  return gate;
+}
+
 async function buildLibrary(core: Library['core'], user: SQLiteDatabase, generation: number): Promise<Library> {
   const sources: LibrarySource[] = [];
-  if (core) sources.push({ name: 'core', adapter: toAdapter(core.db), idBase: 0 });
+  if (core) sources.push({ name: 'core', adapter: coreGate(core.db).adapter, idBase: 0 });
   // Web preview only: after a page reload expo-sqlite's web storage can hand back the seeded
   // core database under the user database's name; querying it as "user" would list every
   // core book twice. A personal library always says kind = user.
@@ -139,24 +189,53 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
           if (!lib) return;
           publish(await buildLibrary(lib.core, lib.user, ++generation.current));
         }),
-      installCore: () =>
+      installCore: (from?: string) =>
         serial(async () => {
           const lib = current.current;
           if (!lib) return;
-          if (lib.core) await closeQuietly(lib.core.db);
+          let closed = false;
           try {
-            await installStagedCore();
-          } finally {
-            // Reopen whatever is there now (the new library, or the old one if the move failed).
-            const core = await openCoreDatabase();
-            publish(await buildLibrary(core, lib.user, ++generation.current));
+            await installStagedCore({
+              from,
+              closeCore: async () => {
+                if (!lib.core) return;
+                // No query may run on (or start against) the old file while it is replaced.
+                await coreGate(lib.core.db).drain(2000);
+                await lib.core.db.closeAsync();
+                closed = true;
+              },
+              reopenCore: async () => {
+                const core = await openCoreDatabase({ strict: true });
+                if (!core) throw new Error('core_library.db is not a valid library after the swap');
+                publish(await buildLibrary(core, lib.user, ++generation.current));
+              },
+              warn: (w) => console.warn(`library install: ${w.step} failed (ignored)`, w.message),
+            });
+          } catch (e) {
+            // Republish whatever is installed now (the old library if the swap did not happen).
+            // A failed close left the old connection open: keep serving it through a new gate.
+            let core: Library['core'] = null;
+            if (closed || !lib.core) core = await openCoreDatabase().catch(() => null);
+            else {
+              coreGates.delete(lib.core.db);
+              core = lib.core;
+            }
+            try {
+              publish(await buildLibrary(core, lib.user, ++generation.current));
+            } catch (again) {
+              console.warn('library could not be republished after a failed install', again);
+            }
+            throw e;
           }
         }),
       removeCore: () =>
         serial(async () => {
           const lib = current.current;
           if (!lib) return;
-          if (lib.core) await closeQuietly(lib.core.db);
+          if (lib.core) {
+            await coreGate(lib.core.db).drain(2000);
+            await closeQuietly(lib.core.db);
+          }
           await deleteCoreDatabase();
           publish(await buildLibrary(null, lib.user, ++generation.current));
         }),

@@ -59,6 +59,29 @@ try {
     await shot('manager');
     step('manager shows installed core library + release URL');
 
+    // Failure card: the exact sub-step + native error, and "copy error details".
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
+    const diag = 'finalize:swap_file · rename failed: Device or resource busy [EBUSY]';
+    await page.evaluate((d) => {
+      const jobs = globalThis.__kodeshreadJobs.getState();
+      jobs.start('buildCore', 'מסיים את הבנייה…', { resumable: true });
+      globalThis.__kodeshreadJobs.getState().finish({ ok: false, message: 'הספרייה נבנתה במלואה, אבל שלב הסיום וההתקנה נכשל.', diagnostic: d, retryable: true });
+    }, diag);
+    await tid('job-error-details').waitFor();
+    assert.strictEqual((await tid('job-error-details-text').innerText()).trim(), diag);
+    assert.strictEqual((await tid('job-error-details-copy').innerText()).trim(), 'העתק פרטי שגיאה');
+    await tid('job-error-details-copy').click();
+    await page.waitForFunction(() => /הועתק|ההעתקה נכשלה/.test(document.querySelector('[data-testid="job-error-details-copy"]').innerText));
+    const copied = (await tid('job-error-details-copy').innerText()).trim();
+    if (copied.startsWith('הועתק')) {
+      const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => null);
+      if (clip != null) assert.ok(clip.startsWith(`kodeshRead error: ${diag}\n`) && /context: job buildCore/.test(clip), clip);
+    }
+    await shot('failure-diagnostic');
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
+    step(`failure card shows the sub-step diagnostic + copy button (${copied})`);
+
     await tid('remove-core').click();
     await tid('job-result').waitFor();
     assert.ok((await tid('job-result').innerText()).includes('הוסרה'));

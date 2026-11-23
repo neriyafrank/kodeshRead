@@ -87,6 +87,10 @@ export interface IngestionState {
   inflight_key?: string | null;
   /** Runs that started this unit without finishing it (killed); skipped once it reaches the limit. */
   inflight_attempts?: number;
+  /** Finalize sub-progress of a core build: 'index' (optimizations ran), 'meta' (ready to install). */
+  finalize_step?: string | null;
+  /** "step · message" of the last failure of this run (shown on the resume card). */
+  last_error?: string | null;
   started_at: string;
   updated_at: string;
 }
@@ -282,6 +286,6 @@ export function indexLinks<H>(
 ): Promise<LinkStats>;
 export function finalizeIndex(
   db: WriterDb,
-  opts?: { analyze?: boolean; analysisLimit?: number; incremental?: boolean; mergePages?: number; maxSteps?: number; onStep?: (step: number) => Promise<void>; shouldStop?: () => unknown },
+  opts?: { analyze?: boolean; analysisLimit?: number; incremental?: boolean; mergePages?: number; maxSteps?: number; onStep?: (step: number) => Promise<void>; shouldStop?: () => unknown; optimize?: boolean },
 ): Promise<void>;
 export function libraryCounts(db: WriterDb): Promise<LibraryCounts>;

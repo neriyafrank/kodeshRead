@@ -373,8 +373,20 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
     `wal_checkpoint` every 150 books and `TRUNCATE` between phases, so the WAL never grows unbounded. FTS rows are added per book and merged at the
     end with incremental FTS5 `merge` steps (each its own short transaction + WAL checkpoint)
     instead of one giant `optimize`.
-  * The on-device core build lives in `SQLite/core_library.build.db` (kept across restarts);
-    when complete it is moved to `core_library.db.tmp` and installed atomically like a download.
+  * The on-device core build lives in `SQLite/core_library.build.db` (kept across restarts) and
+    is installed by renaming *that* file over `core_library.db` (same directory, an awaited
+    `File.move()`, never a copy). The end of a build (`shared/coreFinalize.js`) runs named
+    sub-steps: the optional optimizations (`finalize:fts_optimize`, `finalize:analyze`,
+    `finalize:pragma_optimize`, `finalize:drop_queue`, `finalize:journal_mode`) are non-fatal
+    and there is no on-device `VACUUM`; then `finalize:write_meta` (checkpoint `completed` +
+    `finalize_step = 'meta'`), a verified `wal_checkpoint(TRUNCATE)` (`finalize:checkpoint`),
+    `finalize:close_build_db`, and the swap: readers drained and the core connection closed
+    (`finalize:close_db`), the old `-wal` / `-shm` deleted (`finalize:remove_sidecars`),
+    `finalize:swap_file`, `finalize:reopen_db`. Until the rename the build file is untouched,
+    so a failure leaves a "השלמת בניית ספריית הליבה" card whose "המשך" retries only these
+    seconds (no folder, no book read). Failures show `step · message [code]` with a
+    "העתק פרטי שגיאה" button, on the failure card and (from `ingestion_state.last_error`) the
+    resume card. A transient error opening `core_library.db` never deletes it.
 * Tabs and search scopes pointing at books that disappeared (core replaced, book deleted) are
   closed or reset automatically.
 * Upgrading from a pre-M5 build: the old copied `library.db` is adopted as `core_library.db`.

@@ -163,6 +163,8 @@ CREATE TABLE IF NOT EXISTS ingestion_state (
   links_total INTEGER NOT NULL DEFAULT 0,
   inflight_key TEXT,
   inflight_attempts INTEGER NOT NULL DEFAULT 0,
+  finalize_step TEXT,
+  last_error TEXT,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -235,6 +237,10 @@ const INGESTION_COLUMNS = {
   links_total: 'INTEGER NOT NULL DEFAULT 0',
   inflight_key: 'TEXT',
   inflight_attempts: 'INTEGER NOT NULL DEFAULT 0',
+  // Finalize sub-progress of an on-device core build ('index' / 'meta', see shared/coreFinalize.js)
+  // and the "step · message" diagnostic of its last failure.
+  finalize_step: 'TEXT',
+  last_error: 'TEXT',
 };
 
 const FTS_TABLE_RE = /CREATE VIRTUAL TABLE paragraphs_fts[\s\S]*?\);\n/;
@@ -1401,7 +1407,8 @@ async function indexRefLinks(db, opts) {
  * `incremental: true` (on the device): repeated bounded FTS5 'merge' steps, each its own
  * short transaction followed by `onStep()` (e.g. a WAL checkpoint), so the WAL and memory
  * stay bounded on multi-GB libraries; `shouldStop()` may end it early (the index is valid
- * after every step, merely less compact).
+ * after every step, merely less compact). `optimize: false` skips the closing PRAGMA optimize
+ * (the on-device finalize runs ANALYZE / optimize itself, as separate non-fatal steps).
  */
 async function finalizeIndex(db, opts) {
   const o = opts || {};
@@ -1429,7 +1436,7 @@ async function finalizeIndex(db, opts) {
   }
   // analysis_limit bounds ANALYZE to a sample per index (multi-GB libraries on a phone).
   if (o.analyze) await db.exec(o.analysisLimit ? `PRAGMA analysis_limit = ${Number(o.analysisLimit) | 0}; ANALYZE` : 'ANALYZE');
-  await db.exec('PRAGMA optimize');
+  if (o.optimize !== false) await db.exec('PRAGMA optimize');
 }
 
 /** Current totals of a library database (also written to meta). */

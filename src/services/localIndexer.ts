@@ -6,8 +6,9 @@
  *    "הספרים שלי" folder (sub-folders preserved as categories). Re-importing the same path
  *    replaces the book.
  *  - buildCoreFromFolder: builds core_library.db from an Otzaria folder (the folder that
- *    contains "אוצריא", or a books folder) into CORE_BUILD_DB, then stages it as CORE_TMP_DB
- *    for the caller's atomic swap.
+ *    contains "אוצריא", or a books folder) into CORE_BUILD_DB and seals it for the caller's
+ *    atomic same-directory swap (installCore(CORE_BUILD_DB)); finalizeCoreBuild retries only
+ *    the end of a build (shared/coreFinalize.js) when its finalize / install step failed.
  *
  * Built for the full Otzaria library (7,674+ books) on a phone:
  *  - phases scan -> books -> links -> finalize, each incremental and checkpointed in the target
@@ -19,7 +20,8 @@
  *  - links: commentary <-> base pairing from folder paths / titles and the persisted heading
  *    units (book_units), 20 commentaries per transaction with a committed cursor. There are no
  *    external link files: a "links" folder next to the books is never read;
- *  - finalize: bounded FTS5 merge steps;
+ *  - finalize: optional optimizations (bounded FTS5 merges, ANALYZE), each non-fatal, no VACUUM;
+ *    the build file is consumed only by the final rename, so a failed finish retries in seconds;
  *  - WAL + synchronous=NORMAL, 16MB page cache, PASSIVE WAL checkpoints every 150 books and
  *    TRUNCATE between phases, so memory and the WAL stay bounded;
  *  - an Android foreground service (src/services/importForegroundService.ts) keeps the process
@@ -42,12 +44,14 @@ import { Directory, File, FileMode } from 'expo-file-system';
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 
 import { cleanName, nameFromUri, openTextReader } from '../../shared/bookStream';
+import * as coreFinalize from '../../shared/coreFinalize';
+import type { CheckpointRow } from '../../shared/coreFinalize';
 import * as indexer from '../../shared/indexer';
 import type { IngestionError, IngestionState, StopReason, TargetDb, WriterDb } from '../../shared/indexer';
 import * as pipeline from '../../shared/pipeline';
-import type { PipelineFs, PipelinePhase, PipelineProgress } from '../../shared/pipeline';
+import type { FinalizeWarning, PipelineFs, PipelinePhase, PipelineProgress } from '../../shared/pipeline';
 import { closeQuietly, yieldToUI } from '../db/dbUtils';
-import { CORE_BUILD_DB, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toWriter, USER_DB } from '../db/library';
+import { CORE_BUILD_DB, dbFile, isWeb, removeDbFiles, sqliteDir, toWriter, USER_DB } from '../db/library';
 import { stopRequest, useLibraryJobs } from '../state/libraryJobs';
 
 type Entry = File | Directory;
@@ -275,6 +279,7 @@ async function runPipeline(
       shouldStop: stopRequest,
       onProgress,
       onError: ({ relPath, error }) => console.warn('book skipped', relPath, error),
+      onWarning: (w) => console.warn(`import: ${w.step} failed (ignored, the import completes)`, w.message),
       yieldToUI: () => yieldToUI(15),
       walCheckpoint: walCheckpointer(db),
       checkpointEvery: 150,
@@ -375,37 +380,101 @@ export async function discardUserRun(user: SQLiteDatabase): Promise<void> {
 
 // --- core library --------------------------------------------------------------------
 
+/**
+ * The build's own connection (never shared through expo-sqlite's connection cache, so closing it
+ * really releases the file before the rename).
+ */
 async function openBuildDb(): Promise<SQLiteDatabase> {
-  const db = await openDatabaseAsync(CORE_BUILD_DB);
-  await tuneForImport(db);
-  return db;
+  const db = await openDatabaseAsync(CORE_BUILD_DB, { useNewConnection: true });
+  try {
+    await tuneForImport(db);
+    return db;
+  } catch (e) {
+    await closeQuietly(db);
+    throw e;
+  }
+}
+
+const coreWarn = (w: FinalizeWarning) => console.warn(`core build: ${w.step} failed (ignored, the import completes)`, w.message);
+
+export interface CoreBuildResult {
+  /** The built library's version, or null when the build paused / was cancelled. */
+  version: string | null;
+  summary: ImportSummary;
+  /** Totals of the finished library (from its meta). */
+  counts: { books: number; paragraphs: number } | null;
 }
 
 /**
- * Builds (or, with `resume`, continues) a complete core library from an Otzaria folder in
- * SQLite/core_library.build.db. When finished it is moved to core_library.db.tmp and the
- * new version is returned; install it with LibraryController.installCore(). When paused,
- * `version` is null and the build file (with its checkpoint) is kept for a later resume.
+ * Seals the finished build file so it can be renamed into place: verified WAL TRUNCATE
+ * checkpoint, journal mode DELETE (soft), close, empty -wal / -shm removed (soft).
  */
-export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}): Promise<{ version: string | null; summary: ImportSummary }> {
-  ensureNative();
-  if (!opts.resume) removeDbFiles(CORE_BUILD_DB);
-  useLibraryJobs.getState().update({ stage: PHASE_LABELS.scan, fraction: null, detail: null, phase: 'scan' });
-  const books = await resolveBooksRoot(root);
-  const uri = folderUri(root);
-  liveSources.set(uri, { kind: 'folder', dir: root });
+async function sealBuildDb(db: SQLiteDatabase): Promise<void> {
+  await coreFinalize.sealBuild(
+    {
+      checkpoint: () => db.getFirstAsync<CheckpointRow>('PRAGMA wal_checkpoint(TRUNCATE)'),
+      setJournalDelete: () => db.execAsync('PRAGMA journal_mode = DELETE;'),
+      close: () => db.closeAsync(),
+      // Only the WAL pair: a -journal could be a hot rollback journal and is never deleted here.
+      removeSideFiles: () => {
+        for (const suffix of ['-wal', '-shm']) {
+          const f = dbFile(CORE_BUILD_DB + suffix);
+          if (f.exists) f.delete();
+        }
+      },
+    },
+    { warn: coreWarn },
+  );
+}
 
+/**
+ * Best-effort: stores "step · message" of a failed build / install in the build checkpoint, so
+ * the resume card still shows it after a restart. Never throws.
+ */
+export async function recordCoreBuildError(e: unknown, open?: SQLiteDatabase | null): Promise<void> {
+  if (isWeb) return;
+  let db: SQLiteDatabase | null = open ?? null;
+  try {
+    if (!db) {
+      if (!dbFile(CORE_BUILD_DB).exists) return;
+      db = await openDatabaseAsync(CORE_BUILD_DB, { useNewConnection: true });
+    }
+    const w = toWriter(db);
+    if (await indexer.readIngestionState(w)) await indexer.writeIngestionState(w, { last_error: coreFinalize.diagnosticOf(e) });
+  } catch (err) {
+    console.warn('core build error not recorded', err);
+  } finally {
+    if (!open) await closeQuietly(db);
+    useLibraryJobs.getState().bumpCheckpoint();
+  }
+}
+
+/**
+ * Runs (or resumes) the pipeline into core_library.build.db and, when it finishes, writes the
+ * library meta and seals the file for installCore(CORE_BUILD_DB). `src` null = finalize only:
+ * the checkpoint is at the finalize phase (or the build is complete and waits for its install),
+ * so the source folder is not needed and no book is read again.
+ */
+async function runCoreBuild(src: { root: Directory; books: Directory } | null, resume: boolean): Promise<CoreBuildResult> {
+  ensureNative();
+  if (!resume) removeDbFiles(CORE_BUILD_DB);
+  else if (!dbFile(CORE_BUILD_DB).exists) throw new Error('קובץ הבנייה לא נמצא — יש לבנות את הספרייה מחדש');
   let db: SQLiteDatabase | null = await openBuildDb();
   try {
     const w = toWriter(db);
     await indexer.ensureSchema(w, { kind: 'core' });
+    const st = await coreFinalize.adoptCompletedBuild(w);
+    if (!src && !coreFinalize.needsFinalizeOnly(st)) throw new Error('הבנייה שנעצרה לא הגיעה לשלב הסיום: בחרו שוב את התיקייה כדי להמשיך');
+    if (src || !coreFinalize.isReadyToInstall(st)) useLibraryJobs.getState().update({ stage: PHASE_LABELS[src ? 'scan' : 'finalize'], fraction: null, detail: null, phase: src ? 'scan' : 'finalize' });
+    const uri = src ? folderUri(src.root) : (st?.source_uri ?? '');
     const summary = await runPipeline(db, 'core', {
-      source: { kind: 'folder', root: books },
+      // Finalize only: the pipeline resumes at the finalize phase and never touches the source.
+      source: src ? { kind: 'folder', root: src.books } : st?.source_kind === 'files' ? { kind: 'files', files: [] } : { kind: 'folder', root: sqliteDir() },
       sourceUri: uri,
-      sourceName: entryName(root),
+      sourceName: src ? entryName(src.root) : (st?.source_name ?? ''),
       idBase: 0,
-      aliasOverrides: await readAliases(books),
-      resume: !!opts.resume,
+      aliasOverrides: src ? await readAliases(src.books) : undefined,
+      resume,
     });
     if (summary.stopped) {
       await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE);').catch(() => undefined);
@@ -413,45 +482,58 @@ export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}
       db = null;
       if (summary.stopped === 'cancel') removeDbFiles(CORE_BUILD_DB);
       useLibraryJobs.getState().bumpCheckpoint();
-      return { version: null, summary };
+      return { version: null, summary, counts: null };
     }
 
-    const counts = await indexer.libraryCounts(w);
-    if (!counts.books) throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
-    const version = `local-${Date.now().toString(36)}`;
-    await w.exec('BEGIN');
-    await indexer.writeMeta(w, {
-      kind: 'core',
-      db_version: version,
-      built_at: new Date().toISOString(),
-      source: `local:${entryName(root)}`,
-      script_version: indexer.SCHEMA_VERSION,
-      books: counts.books,
-      categories: counts.categories,
-      paragraphs: counts.paragraphs,
-      links: counts.links,
-      toc_nodes: counts.tocNodes,
-    });
-    await w.exec('COMMIT');
-    await pipeline.completeImport(w);
-    // Fold the WAL into the main file so the staged library is one self-contained file.
-    await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;');
-    await closeQuietly(db);
-    db = null;
-    removeDbFiles(CORE_TMP_DB);
-    dbFile(CORE_BUILD_DB).move(dbFile(CORE_TMP_DB));
-    removeDbFiles(CORE_BUILD_DB);
+    useLibraryJobs.getState().update({ stage: 'מסיים את הבנייה…', fraction: null, detail: null, phase: 'finalize' });
+    const sourceName = src ? entryName(src.root) : (st?.source_name ?? '');
+    const meta = await coreFinalize.writeBuildMeta(w, { source: `local:${sourceName}`, warn: coreWarn });
+    const sealing = db;
+    db = null; // from here on the connection is closed by sealBuild (or left to it on failure)
+    try {
+      await sealBuildDb(sealing);
+    } catch (e) {
+      await closeQuietly(sealing);
+      throw e;
+    }
     useLibraryJobs.getState().bumpCheckpoint();
-    return { version, summary };
+    return { version: meta.version, summary, counts: { books: meta.counts.books, paragraphs: meta.counts.paragraphs } };
   } catch (e) {
-    // The build file and its checkpoint are kept: the next attempt resumes from here.
+    // The build file and its checkpoint are kept: the next attempt resumes from here (a build
+    // that reached the finalize phase retries only that).
     if (db) {
       await markPaused(toWriter(db));
+      await recordCoreBuildError(e, db);
       await closeQuietly(db);
+    } else {
+      await recordCoreBuildError(e);
     }
     useLibraryJobs.getState().bumpCheckpoint();
     throw e;
   }
+}
+
+/**
+ * Builds (or, with `resume`, continues) a complete core library from an Otzaria folder in
+ * SQLite/core_library.build.db. When finished the file is sealed (self-contained, closed) and
+ * the new version is returned; install it with LibraryController.installCore(CORE_BUILD_DB).
+ * When paused, `version` is null and the build file (with its checkpoint) is kept.
+ */
+export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}): Promise<CoreBuildResult> {
+  ensureNative();
+  useLibraryJobs.getState().update({ stage: PHASE_LABELS.scan, fraction: null, detail: null, phase: 'scan' });
+  const books = await resolveBooksRoot(root);
+  liveSources.set(folderUri(root), { kind: 'folder', dir: root });
+  return runCoreBuild({ root, books }, !!opts.resume);
+}
+
+/**
+ * Retries only the end of an interrupted core build (finalize optimizations, meta, sealing):
+ * for a checkpoint at the finalize phase or a complete build whose install failed. Reads no
+ * book and needs no folder permission. Install the result with installCore(CORE_BUILD_DB).
+ */
+export function finalizeCoreBuild(): Promise<CoreBuildResult> {
+  return runCoreBuild(null, true);
 }
 
 /** Deletes an interrupted on-device core build (the installed library is untouched). */
@@ -465,6 +547,10 @@ export interface InterruptedImport {
   target: TargetDb;
   state: IngestionState;
   errors: IngestionError[];
+  /** Core build: only the finalize step (or just the install) is left; no folder is needed. */
+  finalizeOnly?: boolean;
+  /** Core build: complete, only the install into core_library.db is left. */
+  readyToInstall?: boolean;
 }
 
 /** Checkpoints of imports that did not finish (paused, or killed mid-run), newest first. */
@@ -480,11 +566,18 @@ export async function findInterruptedImports(user: SQLiteDatabase): Promise<Inte
   if (!building && dbFile(CORE_BUILD_DB).exists) {
     let db: SQLiteDatabase | null = null;
     try {
-      db = await openDatabaseAsync(CORE_BUILD_DB);
+      db = await openDatabaseAsync(CORE_BUILD_DB, { useNewConnection: true });
       const w = toWriter(db);
-      const cs = await indexer.readIngestionState(w);
-      if (indexer.isResumableState(cs)) out.push({ target: 'core', state: cs, errors: await indexer.readIngestionErrors(w, 20) });
-      else if (!cs) {
+      const cs = await coreFinalize.adoptCompletedBuild(w);
+      if (indexer.isResumableState(cs) || coreFinalize.isReadyToInstall(cs)) {
+        out.push({
+          target: 'core',
+          state: cs as IngestionState,
+          errors: await indexer.readIngestionErrors(w, 20),
+          finalizeOnly: coreFinalize.needsFinalizeOnly(cs),
+          readyToInstall: coreFinalize.isReadyToInstall(cs),
+        });
+      } else if (!cs) {
         await closeQuietly(db);
         db = null;
         removeDbFiles(CORE_BUILD_DB); // a build file without a checkpoint cannot be resumed

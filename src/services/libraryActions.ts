@@ -15,8 +15,10 @@ import { Directory, File } from 'expo-file-system';
 import { useMemo } from 'react';
 import { Alert, Platform } from 'react-native';
 
+import { describeError, StepError } from '../../shared/coreFinalize';
 import type { IngestionState } from '../../shared/indexer';
 import { useLibrary, useLibraryController } from '../db/LibraryContext';
+import { CORE_BUILD_DB } from '../db/library';
 import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
@@ -26,10 +28,13 @@ import {
   deleteUserBooks,
   discardCoreBuild,
   discardUserRun,
+  finalizeCoreBuild,
   findInterruptedImports,
   importUserFiles,
   importUserFolder,
+  recordCoreBuildError,
   reopenSource,
+  type CoreBuildResult,
   type ImportSummary,
   type InterruptedImport,
 } from './localIndexer';
@@ -105,14 +110,38 @@ async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome
     useLibraryJobs.getState().finish(typeof out === 'string' ? { ok: true, message: out } : { ok: true, ...out });
   } catch (e) {
     console.warn(`library job ${kind} failed`, e);
-    const message = e instanceof CancelledError ? 'הפעולה בוטלה' : e instanceof Error ? e.message : String(e);
-    useLibraryJobs.getState().finish({ ok: false, message });
+    useLibraryJobs.getState().finish(failureResult(kind, e));
   } finally {
     if (stopService) await stopService().catch(() => undefined);
     await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
     if (after) await after().catch((e) => console.warn('library refresh failed', e));
   }
   return true;
+}
+
+/**
+ * Failure card of a job: a readable message plus the one-line diagnostic (exact sub-step +
+ * native error / code) that the "העתק פרטי שגיאה" button copies.
+ */
+function failureResult(kind: JobKind, e: unknown): Omit<JobResult, 'kind'> {
+  if (e instanceof CancelledError) return { ok: false, message: 'הפעולה בוטלה' };
+  const phase = useLibraryJobs.getState().job?.phase;
+  if (e instanceof StepError) {
+    const finishing = e.step.startsWith('finalize:');
+    const keep = kind === 'buildCore' && finishing && e.retryable;
+    return {
+      ok: false,
+      message: keep
+        ? 'הספרייה נבנתה במלואה, אבל שלב הסיום וההתקנה נכשל. שום ספר לא אבד: לחצו ״המשך״ כדי לנסות שוב רק את שלב הסיום (כמה שניות).'
+        : kind === 'download' && finishing
+          ? 'ההתקנה של הספרייה שהורדה נכשלה. הספרייה הקודמת נשמרה.'
+          : e.detail,
+      diagnostic: e.diagnostic,
+      retryable: keep,
+    };
+  }
+  const detail = describeError(e);
+  return { ok: false, message: e instanceof Error ? e.message : String(e), diagnostic: `${phase ?? kind} · ${detail}` };
 }
 
 function describeImport(s: ImportSummary): string {
@@ -159,20 +188,38 @@ export function useLibraryActions() {
   return useMemo(() => {
     const interrupted = async (target: 'core' | 'user') => (await findInterruptedImports(lib.user)).find((i) => i.target === target)?.state;
 
+    /** Installs a finished, sealed build (CORE_BUILD_DB) and describes the result. */
+    const installBuilt = async ({ version, summary, counts }: CoreBuildResult, finalizeOnly: boolean): Promise<JobOutcome> => {
+      if (!version) return ingestionOutcome(summary, describeImport);
+      useLibraryJobs.getState().update({ stage: 'מתקין את הספרייה…', fraction: null, detail: null, phase: 'finalize' });
+      try {
+        await ctl.installCore(CORE_BUILD_DB);
+      } catch (e) {
+        // The sealed build is still in place (unless the rename itself happened): keep the
+        // diagnostic on its checkpoint for the resume card.
+        await recordCoreBuildError(e);
+        throw e;
+      }
+      if (finalizeOnly) {
+        const books = (counts?.books ?? 0).toLocaleString('he-IL');
+        const lines = (counts?.paragraphs ?? 0).toLocaleString('he-IL');
+        return ingestionOutcome(summary, () => `ספריית הליבה הותקנה (${version}): ${books} ספרים (${lines} שורות)`);
+      }
+      return ingestionOutcome(summary, (s) => `ספריית הליבה נבנתה מהמכשיר (${version}): ${describeImport(s).replace('יובאו', '')}`);
+    };
+
     const runBuildCore = (dir: Directory, resume: boolean) =>
       runJob(
         'buildCore',
         resume ? 'ממשיך בנייה…' : 'סורק את התיקייה…',
-        async () => {
-          const { version, summary } = await buildCoreFromFolder(dir, { resume });
-          if (!version) return ingestionOutcome(summary, describeImport);
-          useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: null });
-          await ctl.installCore();
-          return ingestionOutcome(summary, (s) => `ספריית הליבה נבנתה מהמכשיר (${version}): ${describeImport(s).replace('יובאו', '')}`);
-        },
+        async () => installBuilt(await buildCoreFromFolder(dir, { resume }), false),
         undefined,
         true,
       );
+
+    /** Retries only the end of a core build (finalize + install); no folder, no book re-read. */
+    const runFinalizeCore = () =>
+      runJob('buildCore', 'מסיים את הבנייה…', async () => installBuilt(await finalizeCoreBuild(), true), undefined, true);
 
     const runImportFolder = (dir: Directory, resume: boolean) =>
       runJob(
@@ -203,7 +250,10 @@ export function useLibraryActions() {
       buildCoreFromDevice: async () => {
         const dir = await pickDirectory();
         if (!dir) return false;
-        return runBuildCore(dir, sameFolder(await interrupted('core'), dir));
+        const pending = (await findInterruptedImports(lib.user)).find((i) => i.target === 'core');
+        // Re-picking the folder of a build that only has its finish left: just finish it.
+        if (pending?.finalizeOnly && sameFolder(pending.state, dir)) return runFinalizeCore();
+        return runBuildCore(dir, sameFolder(pending?.state, dir));
       },
 
       importFiles: async () => {
@@ -224,6 +274,8 @@ export function useLibraryActions() {
        */
       resumeImport: async (item: InterruptedImport): Promise<boolean> => {
         const st = item.state;
+        // A core build that reached its finalize step needs neither the folder nor any book.
+        if (item.target === 'core' && item.finalizeOnly) return runFinalizeCore();
         let src = reopenSource(st);
         if (!src) {
           if (st.source_kind === 'files') {

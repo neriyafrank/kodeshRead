@@ -12,7 +12,8 @@
  *             done -> checkpoint, then the text is dropped and the event loop yields.
  *   links     commentary <-> base alignment from folder paths / titles + book_units
  *             (indexer.indexRefLinks), in small batches with a committed cursor.
- *   finalize  bounded FTS5 merge steps, each its own transaction.
+ *   finalize  optional optimizations (bounded FTS5 merge steps, ANALYZE, PRAGMA optimize), each
+ *             non-fatal (shared/coreFinalize.js); never VACUUM on the device.
  *
  * Every step commits its checkpoint (ingestion_state) together with the rows it describes, so a
  * pause, an OS kill or a crash at any statement resumes at the exact next folder / book / batch,
@@ -36,6 +37,7 @@
 'use strict';
 
 const indexer = require('./indexer');
+const coreFinalize = require('./coreFinalize');
 
 const PAD = 5; // sort_key segment width: up to 99,999 entries per folder
 const pad = (n) => String(n).padStart(PAD, '0');
@@ -379,29 +381,41 @@ async function linksPhase(db, o, report, out) {
  *   onProgress({ phase, current, total, detail })
  *   onError({ relPath, error })
  *   yieldToUI()      awaited after every folder / book / link batch (default: setTimeout 0)
- *   walCheckpoint(mode)  default: PRAGMA wal_checkpoint(mode); errors ignored
+ *   walCheckpoint(mode)  default: PRAGMA wal_checkpoint(mode); errors are always ignored
  *   checkpointEvery  books between PASSIVE WAL checkpoints (default 150)
  *   linksPerTransaction  commentary books per links transaction (default 20)
- *   finalize         false to skip the FTS merge; or finalizeIndex options
- * @returns {Promise<{ stopped, phase, books, paragraphs, failed, skippedFiles, errors, refLinks: { pairs, units } }>}
+ *   finalize         false to skip the optimizations; or { analyze, analysisLimit, mergePages, maxSteps }
+ *   onWarning({ step, message })  a non-fatal finalize sub-step failed (the import still completes)
+ * @returns {Promise<{ stopped, phase, books, paragraphs, failed, skippedFiles, errors, refLinks: { pairs, units }, warnings }>}
  */
 async function runImport(db, fsa, opts) {
   const o = Object.assign({}, opts);
   o.yieldToUI = o.yieldToUI || defaultYield;
-  o.walCheckpoint =
-    o.walCheckpoint ||
-    (async (mode) => {
-      try {
-        await db.all(`PRAGMA wal_checkpoint(${mode})`, []);
-      } catch {
-        // not in WAL mode / busy reader: harmless
-      }
-    });
+  // A WAL checkpoint only bounds the WAL file: it is never allowed to fail an import (a busy
+  // reader or a transient lock just leaves the frames for the next one).
+  const checkpointWal = o.walCheckpoint || ((mode) => db.all(`PRAGMA wal_checkpoint(${mode})`, []));
+  o.walCheckpoint = async (mode) => {
+    try {
+      await checkpointWal(mode);
+    } catch {
+      // not in WAL mode / busy reader: harmless
+    }
+  };
   const report = (phase, current, total, detail) => {
     if (o.onProgress) o.onProgress({ phase, current, total, detail });
   };
 
+  const warnings = [];
+  const warn = (w) => {
+    warnings.push(w);
+    if (o.onWarning) o.onWarning(w);
+  };
+
   let st = await indexer.readIngestionState(db);
+  if (o.resume && coreFinalize.isReadyToInstall(st)) {
+    // A finished build waiting only for its install: nothing left to import (never re-seed it).
+    return { stopped: null, phase: 'done', books: 0, paragraphs: 0, failed: Number(st.error_count) || 0, skippedFiles: Number(st.skipped_count) || 0, errors: (await indexer.readIngestionErrors(db, 1000)).map((e) => ({ relPath: e.file_path, message: e.message })), refLinks: { pairs: 0, units: 0 }, warnings };
+  }
   const resume = !!o.resume && indexer.isResumableState(st) && (st.source_kind === o.source.kind);
   if (!resume) {
     await seedRun(db, fsa, o);
@@ -416,7 +430,7 @@ async function runImport(db, fsa, opts) {
       await indexer.writeIngestionState(db, { status: 'in_progress', source_uri: newUri });
     });
   }
-  const out = { stopped: null, phase: st.phase, books: 0, paragraphs: 0, failed: 0, skippedFiles: 0, errors: [], refLinks: { pairs: 0, units: 0 } };
+  const out = { stopped: null, phase: st.phase, books: 0, paragraphs: 0, failed: 0, skippedFiles: 0, errors: [], refLinks: { pairs: 0, units: 0 }, warnings };
   const pause = async (stop) => {
     out.stopped = stop;
     // A clean stop: nothing is in flight any more.
@@ -449,17 +463,19 @@ async function runImport(db, fsa, opts) {
     phase = 'finalize';
   }
   if (o.finalize !== false) {
+    // Optional optimizations only: each sub-step is non-fatal (a busy / locked FTS merge or
+    // ANALYZE logs a warning and the import still completes), and none of them is VACUUM.
     report('finalize', null, null, null);
     const f = typeof o.finalize === 'object' ? o.finalize : {};
-    await indexer.finalizeIndex(db, Object.assign({ incremental: true }, f, {
+    const stop = await coreFinalize.optimizeIndex(db, Object.assign({ incremental: true }, f, {
       shouldStop: o.shouldStop,
+      warn,
       onStep: async (step) => {
         report('finalize', step, null, null);
         await o.walCheckpoint('PASSIVE');
         await o.yieldToUI();
       },
     }));
-    const stop = o.shouldStop ? o.shouldStop() : null;
     if (stop) return pause(stop);
   }
   // Done: the queue has served its purpose; the checkpoint is completed by the caller

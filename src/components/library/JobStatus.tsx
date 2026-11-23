@@ -3,6 +3,7 @@ import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native
 
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
+import { ErrorDetails } from './ErrorDetails';
 
 /** Cancelling an import discards its progress (pausing keeps it): ask first on the device. */
 function confirmCancel(resumable: boolean, onOk: () => void) {
@@ -85,6 +86,7 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
             <Text style={s.muted}>✕</Text>
           </Pressable>
         </View>
+        {!result.ok && result.diagnostic ? <ErrorDetails diagnostic={result.diagnostic} context={`job ${result.kind}`} testID="job-error-details" /> : null}
         {result.errors?.length ? (
           <View style={s.errors} testID="job-errors">
             <Text style={s.errorsTitle}>קבצים שדולגו בגלל שגיאה ({result.errors.length}):</Text>

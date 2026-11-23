@@ -8,6 +8,11 @@ export interface PipelineFs<H = unknown> extends FsAdapter<H> {
   open?(handle: H): Promise<import('./indexer').TextChunkReader>;
 }
 
+export interface FinalizeWarning {
+  step: string;
+  message: string;
+}
+
 export type PipelinePhase = 'scan' | 'books' | 'links' | 'finalize';
 
 export interface PipelineProgress {
@@ -31,6 +36,8 @@ export interface RunImportOptions<H = unknown> {
   shouldStop?: () => StopReason | null;
   onProgress?: (p: PipelineProgress) => void;
   onError?: (e: { relPath: string; error: unknown }) => void;
+  /** A non-fatal finalize sub-step failed (logged; the import still completes). */
+  onWarning?: (w: FinalizeWarning) => void;
   yieldToUI?: () => Promise<void>;
   walCheckpoint?: (mode: 'PASSIVE' | 'TRUNCATE') => Promise<void>;
   checkpointEvery?: number;
@@ -51,6 +58,8 @@ export interface RunImportResult {
   skippedFiles: number;
   errors: { relPath: string; message: string }[];
   refLinks: { pairs: number; units: number };
+  /** Non-fatal finalize sub-steps that failed ("finalize:fts_optimize", ...). */
+  warnings: FinalizeWarning[];
 }
 
 export interface QueueCounts {

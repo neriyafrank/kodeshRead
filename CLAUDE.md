@@ -38,6 +38,14 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > use their own SQLite connection. The foreground service never `stopService()`s before `startForeground()`.
 > Self-tested: streamed == whole-file builds, poison book / poison commentary, kill at every 9th statement.
 
+> **End of a core build (finalize + swap):** `shared/coreFinalize.js` runs named sub-steps
+> (`finalize:fts_optimize` ... `finalize:swap_file`, `finalize:reopen_db`); optimizations are non-fatal, no
+> on-device VACUUM. `ingestion_state.finalize_step` ('index' / 'meta') + `last_error` make a failed finish retry
+> only finalize (`localIndexer.finalizeCoreBuild`). The build installs by an awaited same-directory rename of
+> `core_library.build.db` (`installCore(CORE_BUILD_DB)`), after draining readers, closing the core connection
+> and deleting its `-wal` / `-shm`. Every `File.move()` must be awaited (async in expo-file-system 58).
+> Failures carry `JobResult.diagnostic` (`ErrorDetails.tsx`, "העתק פרטי שגיאה").
+
 > **Commentary drawer priority & accordion:** `shared/commentaryRank.js` orders linked commentaries
 > (⭐ pins from `src/state/commentaryStore.ts` -> base text -> per-corpus canonical core lists -> Otzaria era
 > folders תרגומים/ראשונים/אחרונים/מחברי זמננו -> alphabetical), assigns tier badges, picks the default-open
