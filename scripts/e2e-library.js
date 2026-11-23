@@ -10,6 +10,10 @@
  * covers the screen, the core-library stats, removing the core library (-> onboarding
  * card, personal library untouched) and restoring it on reload. Downloading, verifying
  * and indexing are covered in Node by `npm test`.
+ *
+ * Also the Library screen's "לימוד יומי" bar ("today" pinned to 2026-05-25, the week after a
+ * Shabbat Shavuot: ארץ ישראל reads בהעלותך, חו"ל still נשא): Hebrew date, the persisted ארץ
+ * ישראל / חו"ל switch changing the parsha, missing books greyed, and a tap opening the aliyah.
  */
 'use strict';
 
@@ -33,6 +37,9 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('dialog', (d) => d.accept());
+  await page.addInitScript(() => {
+    globalThis.__KODESHREAD_TODAY__ = '2026-05-25';
+  });
   const tid = (id) => page.locator(`[data-testid="${id}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
   const step = (name) => console.log(`✓ ${name}`);
@@ -42,6 +49,7 @@ try {
     await tid('open-library-manager').waitFor({ timeout: 180000 });
     assert.strictEqual(await tid('onboarding-card').count(), 0, 'no onboarding while a core library exists');
     step('library screen has the manager button, no onboarding');
+
 
 
     await tid('open-library-manager').click();
@@ -84,7 +92,8 @@ try {
 
     await tid('remove-core').click();
     await tid('job-result').waitFor();
-    assert.ok((await tid('job-result').innerText()).includes('הוסרה'));
+    const removed = await tid('job-result').innerText();
+    assert.ok(removed.includes('הוסרה'), removed);
     assert.strictEqual(await tid('core-info').count(), 0);
     step('core library removed (personal library kept)');
 
@@ -202,6 +211,53 @@ try {
     await page.waitForTimeout(300);
     assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()));
     step('טעמים / ניקוד toggles: independent, linked, persisted');
+
+    // --- "לימוד יומי" bar ------------------------------------------------------------------------
+    const last = (id) => tid(id).last();
+    // (Last: a reload before "remove core" trips a web-preview-only expo-sqlite quirk.)
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await last('library-daily-toggle').waitFor();
+    assert.strictEqual(await last('library-daily-toggle').getAttribute('aria-expanded'), 'false', 'folded by default');
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="library-daily-toggle"]')].pop().innerText.includes('בהעלותך · שני'));
+    assert.ok((await last('library-daily-toggle').innerText()).includes('ט׳ בסיון תשפ״ו'.replace(/׳/g, "'").replace(/״/g, '"')), 'folded summary: Hebrew date + parsha');
+    await last('library-daily-toggle').click();
+    await last('daily-item-parasha').waitFor();
+    await page.waitForTimeout(300);
+    assert.strictEqual((await last('daily-hebrew-date').innerText()).trim(), 'ט\' בסיון תשפ"ו');
+    assert.strictEqual(await last('daily-loc-il').getAttribute('aria-checked'), 'true', 'ארץ ישראל by default');
+    assert.strictEqual((await last('daily-title-parasha').innerText()).trim(), 'בהעלותך · שני');
+    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ח\' ט"ו'), 'בהעלותך שני = במדבר ח טו');
+    for (const key of ['dafYomi', 'mishna', 'rambam1', 'rambam3']) {
+      assert.strictEqual(await last(`daily-item-${key}`).getAttribute('aria-disabled'), 'true', `${key} greyed (not in the sample)`);
+    }
+    const align = await page.evaluate(() =>
+      ['daily-hebrew-date', 'daily-title-parasha', 'daily-title-dafYomi'].map((id) => {
+        const el = [...document.querySelectorAll(`[data-testid="${id}"]`)].pop();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        return { id, align: getComputedStyle(el).textAlign, gap: el.getBoundingClientRect().right - r.getBoundingClientRect().right };
+      }),
+    );
+    assert.ok(align.every((a) => a.align === 'right' && a.gap <= 2), `right-aligned: ${JSON.stringify(align)}`);
+    await shot('daily-library');
+    // חו"ל: the Diaspora read Shavuot on Shabbat, so this week is still נשא.
+    await last('daily-loc-diaspora').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop().innerText.trim() === 'נשא · שני');
+    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ד\' ל"ח'));
+    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.il), false, 'location persisted');
+    await page.reload();
+    await last('daily-item-parasha').waitFor({ timeout: 60000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop()?.innerText.trim() === 'נשא · שני');
+    assert.strictEqual(await last('daily-loc-diaspora').getAttribute('aria-checked'), 'true', 'חו"ל restored after reload (card stays open)');
+    await last('daily-item-parasha').click();
+    await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק ד'), null, { timeout: 20000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid^="aliyah-divider-"]')].some((e) => e.innerText.trim() === 'שני' && e.getBoundingClientRect().height > 0));
+    await shot('daily-opened');
+    await last('reader-back').click();
+    await last('daily-loc-il').click();
+    await last('library-daily-toggle').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.il === true);
+    step('לימוד יומי bar: ט\' בסיון תשפ"ו, ארץ ישראל בהעלותך / חו"ל נשא (persisted), missing books greyed, tap opens the aliyah');
 
     assert.deepStrictEqual(errors, [], 'no page errors');
     console.log('\ne2e library manager: all passed');

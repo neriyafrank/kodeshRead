@@ -325,6 +325,34 @@ function hebrewNumeralToInt(s) {
   return n;
 }
 
+const ONES = ['', 'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט'];
+const TENS = ['', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ'];
+
+function hebrewLetters(n) {
+  let v = n;
+  let out = '';
+  while (v >= 400) { out += 'ת'; v -= 400; }
+  if (v >= 300) { out += 'ש'; v -= 300; }
+  if (v >= 200) { out += 'ר'; v -= 200; }
+  if (v >= 100) { out += 'ק'; v -= 100; }
+  if (v === 15) return out + 'טו';
+  if (v === 16) return out + 'טז';
+  return out + TENS[Math.floor(v / 10)] + ONES[v % 10];
+}
+
+/** 1..499 -> plain Hebrew numeral without gershayim ("טו", "קנז"); null outside that range. */
+function intToHebrew(n) {
+  if (!Number.isInteger(n) || n <= 0 || n >= 500) return null;
+  return hebrewLetters(n);
+}
+
+/** Hebrew numeral with gershayim / geresh, as printed (1..999): 13 -> 'י"ג', 5 -> "ה'", 787 -> 'תשפ"ז'. */
+function formatHebrewNumeral(n) {
+  const plain = Number.isInteger(n) && n > 0 && n < 1000 ? hebrewLetters(n) : null;
+  if (!plain) return String(n);
+  return plain.length === 1 ? `${plain}'` : `${plain.slice(0, -1)}"${plain.slice(-1)}`;
+}
+
 module.exports = {
   normalizeHebrew,
   normalizeFinals,
@@ -336,6 +364,8 @@ module.exports = {
   acronyms,
   aliasKey,
   hebrewNumeralToInt,
+  intToHebrew,
+  formatHebrewNumeral,
   CANTILLATION_MARKS_RE,
   NIKKUD_MARKS_RE,
   stripCantillationMarks,

@@ -60,3 +60,12 @@ export function rawTokens(input: string): RawToken[];
 export function parseLocation(words: RawToken[]): LocationToken[];
 /** Book candidates for a normalized token sequence (literal alias, then abbreviation-expanded). */
 export function lookupBook(index: BookIndex, tokens: string[], raws?: string[]): { book: IndexedBook; exactTitle: boolean }[] | null;
+/**
+ * Resolves location keys inside one book (TOC headings by ref_key, then an inline "(ג)" marker in
+ * the deepest section): [{ key: 'לב' }, { key: 'יד' }] -> chapter לב, verse יד; [{ key: 'ב.' }] -> daf ב amud א.
+ */
+export function resolveInBook(
+  db: LibraryDb,
+  book: { id: number; totalLines: number },
+  locTokens: LocationToken[],
+): Promise<{ path: string[]; targetLine: number; marker: string | null; unmatched: string[] }>;

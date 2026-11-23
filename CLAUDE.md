@@ -59,6 +59,18 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > David / Assistant / Heebo / `system` ("מערכת"). Themes בהיר / ספיה / כהה (Dark = charcoal `#212121`,
 > text `#E8E6E3`, `selection` slate-indigo). Self-tested in `scripts/selftest.js`, e2e in `e2e:reader`.
 
+> **Torah study (parshiot & daily learning):** `shared/torahParshiot.js` is the static dataset of the 54
+> parshiot (7 aliyot + maftir, Hebrew chapter / verse numbering, cross-checked with hebcal) plus
+> `chumashVerseLines()` (verse -> line from the `פרק` TOC + `(א)` markers). The reader draws centered
+> parsha / aliyah dividers above the verse rows of a Chumash book (`BookReader.tsx`, outside the rows' press
+> targets: no line index or link changes); the TOC drawer has a persisted `פרקים | פרשות` switch
+> (`src/state/learningStore.ts`). `shared/dailyLearning.js` computes פרשת השבוע + today's aliyah, Daf Yomi,
+> Mishna Yomit and Rambam 1 / 3 offline (deep imports of `@hebcal/core/dist/esm/sedra`,
+> `@hebcal/learning/*Base`, `@hebcal/hdate`; ארץ ישראל default / חו"ל) and maps each onto a real Otzaria path,
+> resolved via `quickJump.resolveInBook` (`src/services/dailyLearningNav.ts`; missing books = unavailable).
+> UI: `src/components/learning/DailyLearning.tsx` (TOC block + Library bar). e2e pins today with
+> `globalThis.__KODESHREAD_TODAY__`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

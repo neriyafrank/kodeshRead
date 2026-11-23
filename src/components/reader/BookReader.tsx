@@ -15,6 +15,9 @@
  * - Paragraphs with entries in `links` carry a small count badge (counts are fetched
  *   with each window chunk). Tapping such a paragraph opens the commentary drawer,
  *   docked under the text as a resizable split view and synchronized to it.
+ * - Chumash books (בראשית..דברים) get subtle centered parsha / aliyah dividers above the verse
+ *   each one starts at (shared/torahParshiot.js). They are drawn outside the paragraph rows'
+ *   press targets and change no stored line, index or link.
  */
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -47,8 +50,10 @@ import {
 import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
 import { lineHeightMultiplier, splitVerseMarker, verseGutterWidth } from '../../../shared/typography';
 import { markTerms } from '../../../shared/search';
+import type { LineDivider } from '../../../shared/torahParshiot';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
+import { useChumashBook, useChumashDividers } from '../../services/parshiotNav';
 import { useSettings } from '../../state/settingsStore';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
 import { spacing, useAppTheme, type Palette } from '../../theme';
@@ -123,6 +128,9 @@ export function BookReader({ tab, onOpenToc }: Props) {
   const [areaHeight, setAreaHeight] = useState(0);
   const [resizing, setResizing] = useState(false);
   const listHeight = useRef(0);
+  // Parsha / aliyah dividers (Chumash books only; null elsewhere).
+  const chumash = useChumashBook(bookId, tab.bookTitle);
+  const dividers = useChumashDividers(bookId, chumash);
 
   const listRef = useRef<FlashListRef<ReaderRow>>(null);
   const winRef = useRef<WindowState | null>(null);
@@ -409,12 +417,13 @@ export function BookReader({ tab, onOpenToc }: Props) {
         row={item}
         typo={typo}
         selected={item.line_index === selectedLine}
+        divider={dividers?.get(item.line_index)}
         onPress={onPressRow}
         highlightNonce={highlight && item.line_index >= highlight.line && item.line_index <= (highlight.end ?? highlight.line) ? highlight.nonce : 0}
         highlightTerms={highlight && highlight.line === item.line_index ? highlight.terms : undefined}
       />
     ),
-    [typo, highlight, selectedLine, onPressRow],
+    [typo, highlight, selectedLine, onPressRow, dividers],
   );
 
   const crumbs = topRow.tocPath ? topRow.tocPath.split(' > ') : [];
@@ -435,7 +444,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
           data={win.rows}
           extraData={renderItem}
           keyExtractor={(r) => String(r.line_index)}
-          getItemType={(r) => (r.is_heading ? 'h' : 'p')}
+          getItemType={(r) => (r.is_heading ? 'h' : dividers?.has(r.line_index) ? 'd' : 'p')}
           renderItem={renderItem}
           initialScrollIndex={win.initialIndex}
           initialScrollIndexParams={{ viewOffset: win.initialViewOffset }}
@@ -522,9 +531,38 @@ interface RowProps {
   highlightNonce: number;
   /** Search terms marked inside the row while it is highlighted. */
   highlightTerms?: string[];
+  /** Parsha / aliyah starting at this verse (Chumash). */
+  divider?: LineDivider;
 }
 
-const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms }: RowProps) {
+/** Subtle centered marker above a verse: "פרשת וישלח" (with rules) and / or the aliyah ("שני"). */
+function TorahDivider({ divider, palette: c, fontSize }: { divider: LineDivider; palette: Palette; fontSize: number }) {
+  const line = divider.line;
+  return (
+    <View pointerEvents="none" style={styles.dividerBox} testID={`torah-divider-${line}`}>
+      {divider.parsha ? (
+        <View style={styles.dividerRow} accessibilityRole="header" testID={`parsha-divider-${line}`}>
+          <View style={[styles.dividerRule, { backgroundColor: c.border }]} />
+          <Text style={[styles.parshaText, { color: c.accent, fontSize: Math.max(13, Math.round(fontSize * 0.82)) }]} numberOfLines={1}>
+            {divider.parsha}
+          </Text>
+          <View style={[styles.dividerRule, { backgroundColor: c.border }]} />
+        </View>
+      ) : null}
+      {divider.aliyot.length ? (
+        <View style={styles.dividerRow} testID={`aliyah-divider-${line}`}>
+          <View style={[styles.aliyahRule, { backgroundColor: c.border }]} />
+          <Text style={[styles.aliyahText, { color: c.verseNumber, borderColor: c.border, fontSize: Math.max(11, Math.round(fontSize * 0.62)) }]} numberOfLines={1}>
+            {divider.aliyot.join(' · ')}
+          </Text>
+          <View style={[styles.aliyahRule, { backgroundColor: c.border }]} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms, divider }: RowProps) {
   const { html, verse } = useMemo(() => {
     const prepared = prepareDisplayText(row.display_text, { showNikkud: typo.showNikkud, showCantillation: typo.showCantillation });
     // "(א) ..." -> the verse number goes to the margin column, the text keeps a clean edge.
@@ -579,7 +617,7 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
       testID={verse ? `verse-text-${row.line_index}` : undefined}
     />
   );
-  return (
+  const body = (
     <Pressable
       onPress={() => onPress(row)}
       style={[styles.row, selected && { backgroundColor: c.selection }]}
@@ -614,6 +652,13 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
       ) : null}
     </Pressable>
   );
+  if (!divider) return body;
+  return (
+    <View>
+      <TorahDivider divider={divider} palette={c} fontSize={typo.fontSize} />
+      {body}
+    </View>
+  );
 });
 
 const styles = StyleSheet.create({
@@ -647,6 +692,22 @@ const styles = StyleSheet.create({
   // Start-side (right) margin: small, muted sans-serif digits-as-letters, like a printed Chumash.
   verseNum: { textAlign: 'center', fontWeight: '600', includeFontPadding: false, fontVariant: ['tabular-nums'] },
   message: { textAlign: 'center', marginTop: spacing.xl, fontSize: 16 },
+  // Parsha / aliyah dividers: centered, hairline rules, no effect on the verse rows below.
+  dividerBox: { paddingTop: spacing.sm, paddingBottom: 2, gap: 4 },
+  dividerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm },
+  dividerRule: { flex: 1, height: StyleSheet.hairlineWidth, maxWidth: 140 },
+  parshaText: { fontWeight: '700', textAlign: 'center', writingDirection: 'rtl', letterSpacing: 0.3 },
+  aliyahRule: { width: 28, height: StyleSheet.hairlineWidth },
+  aliyahText: {
+    fontWeight: '600',
+    textAlign: 'center',
+    writingDirection: 'rtl',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
+    borderRadius: 9,
+    borderWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
   end: { textAlign: 'center', paddingVertical: spacing.xl * 2, fontSize: 14 },
   breadcrumb: {
     position: 'absolute',

@@ -20,7 +20,7 @@
  */
 'use strict';
 
-const { normalizeHebrew, extractRefKey, aliasKey, decodeEntities, stripHtml } = require('./hebrew');
+const { normalizeHebrew, extractRefKey, aliasKey, decodeEntities, stripHtml, intToHebrew } = require('./hebrew');
 
 const plainHeadingText = (html) => decodeEntities(stripHtml(String(html || ''))).replace(/\s+/g, ' ').trim();
 
@@ -296,21 +296,6 @@ function inlineUnits(contentLines, unit, opts) {
     if (key) out.set(key, { start: l.line, end: l.line });
   });
   return out;
-}
-
-const ONES = ['', 'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט'];
-const TENS = ['', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ'];
-function intToHebrew(n) {
-  if (n <= 0 || n >= 500) return null;
-  let v = n;
-  let out = '';
-  if (v >= 400) { out += 'ת'; v -= 400; }
-  if (v >= 300) { out += 'ש'; v -= 300; }
-  if (v >= 200) { out += 'ר'; v -= 200; }
-  if (v >= 100) { out += 'ק'; v -= 100; }
-  if (v === 15) return out + 'טו';
-  if (v === 16) return out + 'טז';
-  return out + TENS[Math.floor(v / 10)] + ONES[v % 10];
 }
 
 /**

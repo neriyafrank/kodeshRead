@@ -4,6 +4,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import type { JumpResult } from '../../shared/quickJump';
 import { SearchIcon } from '../components/Icons';
+import { DailyLearningCard } from '../components/learning/DailyLearning';
 import { JobStatus } from '../components/library/JobStatus';
 import { OnboardingCard } from '../components/library/OnboardingCard';
 import { ResumeCards } from '../components/library/ResumeCard';
@@ -11,6 +12,7 @@ import { LibraryColumns } from '../components/LibraryColumns';
 import { QuickJumpBar } from '../components/QuickJumpBar';
 import { useLibrary } from '../db/LibraryContext';
 import { useLibrarySettings } from '../state/libraryStore';
+import { useOpenLearningTarget } from '../services/dailyLearningNav';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
 
@@ -34,6 +36,7 @@ export default function LibraryScreen() {
   );
 
   const onJump = useCallback((r: JumpResult) => openBook(r.bookId, r.bookTitle, r.targetLine, !r.suggestion), [openBook]);
+  const openLearningTarget = useOpenLearningTarget();
 
   return (
     <View style={s.screen}>
@@ -71,6 +74,7 @@ export default function LibraryScreen() {
       <JobStatus compact onPress={() => router.navigate('/library-manager')} />
       <ResumeCards />
       <QuickJumpBar onJump={onJump} />
+      {core || userBookCount > 0 ? <DailyLearningCard onOpen={(t) => openLearningTarget(t) && router.navigate('/reader')} /> : null}
       <View style={s.divider} />
       <View style={s.tree}>
         <LibraryColumns

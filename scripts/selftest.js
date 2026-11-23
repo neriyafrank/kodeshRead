@@ -22,6 +22,11 @@
  * 8. Reading typography (shared/typography.js): bundled Taamey Frank CLM (GPOS mark / mkmk),
  *    vocalization-aware line height, margin verse numbers, font / theme persistence (zustand
  *    persist round trip + migrations) and the theme palettes (Dark charcoal, contrast).
+ * 9. Torah study: the 54 parshiot + aliyot dataset (shared/torahParshiot.js) validated against
+ *    the Masoretic chapter / verse counts, hebcal's parsha list and the real sample Chumash text;
+ *    the offline daily-learning schedule (shared/dailyLearning.js: @hebcal/core + @hebcal/learning,
+ *    ארץ ישראל / חו"ל) on fixed dates, mapped onto real Otzaria paths (otzaria_index_only.txt) and
+ *    resolved to exact lines in the sample library (missing books reported, never thrown).
  */
 'use strict';
 
@@ -699,6 +704,8 @@ async function main() {
   await coreFinalizeTests();
   // 8. Reading typography, fonts and themes.
   await typographyTests();
+  // 9. Parshiot / aliyot and the daily learning schedule.
+  await torahStudyTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -3305,5 +3312,329 @@ async function typographyTests() {
     assert.deepStrictEqual(typo.THEMES, ['light', 'sepia', 'dark']);
     // The active verse uses the palette's selection colour.
     assert.ok(/selected && \{ backgroundColor: c\.selection \}/.test(read('src/components/reader/BookReader.tsx')));
+  });
+}
+
+/** Parshiot & aliyot (shared/torahParshiot.js) and daily learning (shared/dailyLearning.js). */
+async function torahStudyTests() {
+  const tp = require('../shared/torahParshiot');
+  const dl = require('../shared/dailyLearning');
+  const { intToHebrew, formatHebrewNumeral } = require('../shared/hebrew');
+  const R = (chapter, verse) => ({ chapter, verse });
+  const valid = (book, r) => r.chapter >= 1 && r.chapter <= tp.CHAPTER_VERSES[book].length && r.verse >= 1 && r.verse <= tp.CHAPTER_VERSES[book][r.chapter - 1];
+  const next = (book, r) => (r.verse < tp.CHAPTER_VERSES[book][r.chapter - 1] ? R(r.chapter, r.verse + 1) : R(r.chapter + 1, 1));
+
+  await check('hebrew numerals: intToHebrew / formatHebrewNumeral', () => {
+    assert.deepStrictEqual([1, 10, 14, 15, 16, 32, 67, 150, 499].map(intToHebrew), ['א', 'י', 'יד', 'טו', 'טז', 'לב', 'סז', 'קנ', 'תצט']);
+    assert.strictEqual(intToHebrew(0), null);
+    assert.deepStrictEqual([13, 5, 787, 15, 20].map(formatHebrewNumeral), ['י"ג', "ה'", 'תשפ"ז', 'ט"ו', "כ'"]);
+  });
+
+  await check('parshiot: 54 parshiot in Torah order, matching hebcal\'s Sedra list', () => {
+    assert.strictEqual(tp.PARSHIOT.length, 54);
+    const { parshiot } = require('@hebcal/core/dist/esm/sedra');
+    assert.deepStrictEqual(tp.PARSHIOT.map((p) => p.en), parshiot, 'same order and names as @hebcal/core (Sedra.lookup().num = index + 1)');
+    assert.deepStrictEqual(tp.CHUMASH_BOOKS.map((b) => tp.parshiotOfBook(b).length), [12, 11, 10, 10, 11]);
+    assert.strictEqual(new Set(tp.PARSHIOT.map((p) => p.name)).size, 54, 'unique Hebrew names');
+    assert.strictEqual(tp.PARSHIOT[7].title, 'פרשת וישלח');
+    assert.strictEqual(tp.PARSHIOT[53].name, 'וזאת הברכה');
+    assert.strictEqual(tp.findParsha('Vayishlach'), tp.PARSHIOT[7]);
+    assert.strictEqual(tp.findParsha('פרשת בלק').book, 'במדבר');
+    assert.strictEqual(tp.parshaByNumber(8).name, 'וישלח');
+  });
+
+  await check('parshiot: chapter / verse table (Hebrew chapter numbering)', () => {
+    // Numbered verses of the printed Hebrew chapters (= hebcal / Leningrad). The traditional tally
+    // of 5,845 pesukim counts two of them differently (e.g. the half-verse במדבר כה יט).
+    const totals = tp.CHUMASH_BOOKS.map((b) => tp.CHAPTER_VERSES[b].reduce((a, v) => a + v, 0));
+    assert.deepStrictEqual(totals, [1533, 1210, 859, 1289, 956]);
+    assert.deepStrictEqual([tp.CHAPTER_VERSES['בראשית'][31], tp.CHAPTER_VERSES['במדבר'][24], tp.CHAPTER_VERSES['במדבר'][25]], [33, 19, 65]);
+    assert.deepStrictEqual(tp.CHUMASH_BOOKS.map((b) => tp.CHAPTER_VERSES[b].length), [50, 40, 27, 36, 34]);
+  });
+
+  await check('parshiot: every aliyah valid, ordered, inside its parsha; parshiot tile each book', () => {
+    const problems = [];
+    for (const book of tp.CHUMASH_BOOKS) {
+      const list = tp.parshiotOfBook(book);
+      let expect = R(1, 1);
+      for (const p of list) {
+        if (tp.cmpRef(p.start, expect) !== 0) problems.push(`${p.name}: starts ${JSON.stringify(p.start)}, previous ended before ${JSON.stringify(expect)}`);
+        if (!valid(book, p.start) || !valid(book, p.end)) problems.push(`${p.name}: invalid range`);
+        assert.deepStrictEqual(p.aliyot.map((a) => a.name), ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שביעי'], p.name);
+        if (tp.cmpRef(p.aliyot[0].start, p.start) !== 0) problems.push(`${p.name}: ראשון is not the parsha start`);
+        for (let i = 0; i < p.aliyot.length; i++) {
+          const a = p.aliyot[i];
+          if (!valid(book, a.start)) problems.push(`${p.name} ${a.name}: ${JSON.stringify(a.start)} not a verse of ${book}`);
+          if (i && tp.cmpRef(p.aliyot[i - 1].start, a.start) >= 0) problems.push(`${p.name} ${a.name}: not after ${p.aliyot[i - 1].name}`);
+          if (tp.cmpRef(a.start, p.end) > 0) problems.push(`${p.name} ${a.name}: after the parsha end`);
+        }
+        if (p.maftir) {
+          assert.strictEqual(p.maftir.name, 'מפטיר');
+          const seventh = p.aliyot[6].start;
+          if (!valid(book, p.maftir.start) || tp.cmpRef(p.maftir.start, seventh) < 0 || tp.cmpRef(p.maftir.start, p.end) > 0) problems.push(`${p.name} מפטיר out of the שביעי..end range`);
+          // The maftir repeats the end of the parsha: it starts inside שביעי (equal only in עקב / נצבים).
+          if (tp.cmpRef(p.maftir.start, seventh) === 0 && !['עקב', 'נצבים'].includes(p.name)) problems.push(`${p.name}: maftir == shevi'i`);
+        } else if (p.name !== 'וזאת הברכה') problems.push(`${p.name}: no maftir`);
+        expect = next(book, p.end);
+      }
+      const last = tp.CHAPTER_VERSES[book];
+      if (tp.cmpRef(list[list.length - 1].end, R(last.length, last[last.length - 1])) !== 0) problems.push(`${book}: last parsha does not end the book`);
+    }
+    assert.deepStrictEqual(problems, []);
+  });
+
+  await check('parshiot: known coordinates (וישלח שני = בראשית לב יד, ...)', () => {
+    const at = (name, i) => {
+      const p = tp.findParsha(name);
+      return [p.book, ...Object.values(tp.readingsOf(p)[i].start)].join(' ');
+    };
+    assert.strictEqual(at('וישלח', 0), 'בראשית 32 4');
+    assert.strictEqual(at('וישלח', 1), 'בראשית 32 14');
+    assert.strictEqual(at('וישלח', 7), 'בראשית 36 40');
+    assert.strictEqual(at('בראשית', 5), 'בראשית 4 23');
+    assert.strictEqual(at('לך לך', 6), 'בראשית 17 7');
+    assert.strictEqual(at('יתרו', 3), 'שמות 19 1');
+    assert.strictEqual(at('כי תשא', 1), 'שמות 31 18');
+    assert.strictEqual(at('אחרי מות', 0), 'ויקרא 16 1');
+    assert.strictEqual(at('נשא', 4), 'במדבר 7 1');
+    assert.strictEqual(at('פינחס', 7), 'במדבר 29 35');
+    assert.strictEqual(at('בלק', 2), 'במדבר 22 21');
+    assert.strictEqual(at('ואתחנן', 5), 'דברים 6 4');
+    assert.strictEqual(at('האזינו', 7), 'דברים 32 48');
+    assert.strictEqual(at('וזאת הברכה', 6), 'דברים 34 1');
+    assert.strictEqual(tp.findParsha('וזאת הברכה').maftir, null, 'its maftir is read from Numbers');
+    assert.strictEqual(tp.parshaAt('בראשית', R(32, 14)).name, 'וישלח');
+    assert.strictEqual(tp.parshaAt('בראשית', R(32, 3)).name, 'ויצא');
+    assert.strictEqual(tp.parshaAt('ויקרא', R(26, 2)).name, 'בהר');
+    assert.strictEqual(tp.parshaAt('במדבר', R(30, 1)).name, 'פינחס');
+    assert.strictEqual(tp.findParsha('פינחס').end.chapter, 30);
+    assert.strictEqual(tp.refLabel(R(32, 14)), 'לב, יד');
+    assert.strictEqual(tp.fullRefLabel('בראשית', R(32, 14)), 'בראשית ל"ב י"ד');
+  });
+
+  await check('parshiot: divider points (ראשון implied by the parsha; shared shevi\'i / maftir)', () => {
+    const gen = tp.bookDividers('בראשית');
+    assert.strictEqual(gen.length, 12 * 8);
+    assert.deepStrictEqual(gen[0], { chapter: 1, verse: 1, parsha: 'פרשת בראשית', parshaIndex: 0, aliyot: [] });
+    assert.deepStrictEqual(gen.find((d) => d.chapter === 32 && d.verse === 14).aliyot, ['שני']);
+    for (let i = 1; i < gen.length; i++) assert.ok(tp.cmpRef(gen[i - 1], gen[i]) < 0, 'sorted, one point per verse');
+    const deut = tp.bookDividers('דברים');
+    assert.deepStrictEqual(deut.find((d) => d.chapter === 11 && d.verse === 22).aliyot, ['שביעי', 'מפטיר'], 'עקב');
+    assert.deepStrictEqual(deut.find((d) => d.chapter === 30 && d.verse === 15).aliyot, ['שביעי', 'מפטיר'], 'נצבים');
+    assert.strictEqual(deut.length, 11 * 8 - 2 - 1, 'two shared points, no maftir in וזאת הברכה');
+  });
+
+  await check('parshiot: chumashBookOf only for the Torah books themselves', () => {
+    assert.strictEqual(tp.chumashBookOf('בראשית', 'תנך/תורה'), 'בראשית');
+    assert.strictEqual(tp.chumashBookOf('דברים', 'הספרים שלי/תנך'), 'דברים');
+    assert.strictEqual(tp.chumashBookOf('שמות', ''), 'שמות');
+    assert.strictEqual(tp.chumashBookOf('רש"י על בראשית', 'תנך/מפרשים'), null);
+    assert.strictEqual(tp.chumashBookOf('בראשית', 'תנך/מפרשים/ראשונים'), null);
+    assert.strictEqual(tp.chumashBookOf('בראשית', 'מדרש/מדרש רבה'), null);
+    assert.strictEqual(tp.chumashBookOf('יהושע', 'תנך/נביאים'), null);
+  });
+
+  const dbFile = path.join(ROOT, 'assets/db/library.db');
+  if (fs.existsSync(dbFile)) {
+    const db = openDb(dbFile);
+    const bookId = async (title) => (await db.all('SELECT id FROM books WHERE title = ?', [title]))[0].id;
+    const gen = await bookId('בראשית');
+    const num = await bookId('במדבר');
+    const genLines = await tp.chumashVerseLines(db, gen);
+    const numLines = await tp.chumashVerseLines(db, num);
+    const counts = (lines, chapters) => Array.from({ length: chapters }, (_, c) => {
+      let v = 0;
+      while (lines.has(`${c + 1}:${v + 1}`)) v++;
+      return v;
+    });
+
+    await check('parshiot × sample Chumash: every verse found; aliyot land on their exact verse lines', async () => {
+      assert.strictEqual(genLines.size, 1533);
+      assert.deepStrictEqual(counts(genLines, 50), tp.CHAPTER_VERSES['בראשית'], 'Otzaria בראשית verse counts');
+      // Otzaria numbers "ויהי אחרי המגפה" (Leningrad 25:19) as 26:1: the only difference, and no
+      // aliyah starts there.
+      const nc = counts(numLines, 36);
+      const diff = nc.map((v, i) => (v === tp.CHAPTER_VERSES['במדבר'][i] ? null : `${i + 1}:${v}`)).filter(Boolean);
+      assert.deepStrictEqual(diff, ['25:18']);
+      for (const [book, id, lines] of [['בראשית', gen, genLines], ['במדבר', num, numLines]]) {
+        for (const p of tp.parshiotWithLines(book, lines)) {
+          for (const r of p.readings) {
+            assert.ok(r.line != null, `${p.name} ${r.name} resolved`);
+            const [row] = await db.all('SELECT clean_text, toc_path FROM paragraphs WHERE book_id = ? AND line_index = ?', [id, r.line]);
+            assert.ok(row.clean_text.startsWith(`(${intToHebrew(r.start.verse)})`), `${p.name} ${r.name}: line ${r.line} is verse ${r.start.verse} (${row.clean_text.slice(0, 12)})`);
+            assert.ok(row.toc_path.endsWith(`פרק ${intToHebrew(r.start.chapter)}`), `${p.name} ${r.name}: in chapter ${r.start.chapter} (${row.toc_path})`);
+          }
+        }
+      }
+      const vayishlach2 = tp.lineOfVerse(genLines, R(32, 14));
+      const [row] = await db.all('SELECT clean_text FROM paragraphs WHERE book_id = ? AND line_index = ?', [gen, vayishlach2]);
+      assert.ok(row.clean_text.startsWith('(יד) וילנ שמ בלילה ההוא'), row.clean_text);
+      // Same line as the Quick Jump resolver.
+      const index = await loadBookIndex(db);
+      const [jump] = await resolveReference(db, index, 'בראשית לב יד');
+      assert.strictEqual(jump.targetLine, vayishlach2);
+      const dividers = tp.dividerLines('בראשית', genLines);
+      assert.strictEqual(dividers.size, 96);
+      assert.strictEqual(dividers.get(vayishlach2).aliyot[0], 'שני');
+      assert.strictEqual(dividers.get(tp.lineOfVerse(genLines, R(32, 4))).parsha, 'פרשת וישלח');
+      const resolved = tp.parshiotWithLines('במדבר', numLines);
+      assert.strictEqual(tp.parshaForLine(resolved, tp.lineOfVerse(numLines, R(27, 15))).name, 'פינחס');
+      assert.strictEqual(tp.parshaForLine(tp.parshaForLine(resolved, tp.lineOfVerse(numLines, R(27, 15))).readings, tp.lineOfVerse(numLines, R(27, 15))).name, 'רביעי');
+    });
+
+    await check('parshiot: a chapter without "(א)" markers falls back to one verse per line', async () => {
+      const { DatabaseSync } = require('node:sqlite');
+      const m = new DatabaseSync(':memory:');
+      m.exec(`CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, total_lines INTEGER, file_path TEXT);
+        CREATE TABLE toc_nodes (id INTEGER PRIMARY KEY, book_id INTEGER, parent_id INTEGER, level INTEGER, title TEXT, ref_key TEXT, start_line INTEGER);
+        CREATE TABLE paragraphs (id INTEGER PRIMARY KEY, book_id INTEGER, line_index INTEGER, clean_text TEXT, is_heading INTEGER);
+        INSERT INTO books VALUES (1, 'דברים', 7, 'תנך/תורה/דברים.txt');
+        INSERT INTO toc_nodes VALUES (1, 1, NULL, 2, 'פרק א', 'א', 2), (2, 1, NULL, 2, 'פרק ב', 'ב', 5);
+        INSERT INTO paragraphs (book_id, line_index, clean_text, is_heading) VALUES (1, 1, 'דברים', 1), (1, 2, 'פרק א', 1), (1, 3, 'אלה הדברים', 0), (1, 4, 'אחד עשר יומ', 0), (1, 5, 'פרק ב', 1), (1, 6, '(א) ונפנ', 0), (1, 7, '(ב) ויאמר', 0);`);
+      const a = { all: async (sql, params) => m.prepare(sql).all(...(params || [])) };
+      const lines = await tp.chumashVerseLines(a, 1);
+      assert.deepStrictEqual([...lines.entries()].sort(), [['1:1', 3], ['1:2', 4], ['2:1', 6], ['2:2', 7]]);
+      m.close();
+    });
+
+    await check('daily learning: resolution against the sample library (missing books reported, not thrown)', async () => {
+      const r = await dl.resolveDailyLearning(db, dl.computeDailyLearning(new Date(2026, 10, 23), { il: true }));
+      const parasha = r.items.find((i) => i.key === 'parasha');
+      assert.ok(parasha.available && parasha.targets[0].available);
+      assert.strictEqual(parasha.targets[0].bookId, gen);
+      assert.strictEqual(parasha.targets[0].line, tp.lineOfVerse(genLines, R(32, 14)), 'וישלח שני -> בראשית לב יד');
+      assert.ok(parasha.targets[0].exact);
+      for (const key of ['dafYomi', 'mishna', 'rambam1', 'rambam3']) {
+        const it = r.items.find((i) => i.key === key);
+        assert.ok(it && !it.available && it.targets.every((t) => !t.available && t.bookId == null), `${key} unavailable in the sample`);
+      }
+      // Daf Yomi in a tractate the sample has: שבת נו (1 May 2020), daf heading "דף נו."
+      const shabbat = await dl.resolveDailyLearning(db, dl.computeDailyLearning(new Date(2020, 4, 1)));
+      const daf = shabbat.items.find((i) => i.key === 'dafYomi');
+      assert.strictEqual(daf.title, 'שבת דף נו');
+      const index = await loadBookIndex(db);
+      const [jump] = await resolveReference(db, index, 'שבת נו.');
+      assert.ok(daf.targets[0].available && daf.targets[0].exact);
+      assert.strictEqual(daf.targets[0].line, jump.targetLine);
+      const [h] = await db.all('SELECT display_text FROM paragraphs WHERE book_id = ? AND line_index = ?', [daf.targets[0].bookId, daf.targets[0].line]);
+      assert.strictEqual(h.display_text.replace(/<[^>]+>/g, ''), 'דף נו.');
+      // Shabbat: shevi'i + the whole parsha.
+      const sat = await dl.resolveDailyLearning(db, dl.computeDailyLearning(new Date(2026, 10, 28)));
+      const sp = sat.items.find((i) => i.key === 'parasha');
+      assert.deepStrictEqual(sp.targets.map((t) => [t.label, t.line]), [['שביעי', tp.lineOfVerse(genLines, R(36, 20))], ['כל הפרשה', tp.lineOfVerse(genLines, R(32, 4))]]);
+    });
+    db.close();
+  }
+
+  await check('daily learning: fixed date, ארץ ישראל (יום ב׳, י"ג בכסלו תשפ"ז)', () => {
+    const s = dl.computeDailyLearning(new Date(2026, 10, 23, 15, 30), { il: true });
+    assert.deepStrictEqual(s.errors, []);
+    assert.strictEqual(s.dateKey, '2026-11-23');
+    assert.strictEqual(s.hebrewDate, 'י"ג בכסלו תשפ"ז');
+    assert.strictEqual(s.weekday, 1);
+    const by = Object.fromEntries(s.items.map((i) => [i.key, i]));
+    assert.deepStrictEqual(Object.keys(by), ['parasha', 'dafYomi', 'mishna', 'rambam1', 'rambam3']);
+    assert.strictEqual(by.parasha.title, 'וישלח · שני');
+    assert.deepStrictEqual(by.parasha.targets.map((t) => [t.path, t.loc, t.ref]), [['תנך/תורה/בראשית', { kind: 'verse', chapter: 32, verse: 14 }, 'בראשית ל"ב י"ד']]);
+    assert.strictEqual(by.dafYomi.title, 'ערכין דף ו');
+    assert.deepStrictEqual(by.dafYomi.targets.map((t) => [t.path, t.loc]), [['תלמוד בבלי/סדר קדשים/ערכין', { kind: 'daf', daf: 6, amud: 'א' }]]);
+    assert.strictEqual(by.mishna.title, 'נגעים ג, א-ב');
+    assert.deepStrictEqual(by.mishna.targets.map((t) => [t.path, t.loc]), [['משנה/סדר טהרות/משנה נגעים', { kind: 'chapter', chapter: 3, sub: 1 }]]);
+    assert.strictEqual(by.rambam1.title, 'הלכות מאכלות אסורות פרק יג');
+    assert.deepStrictEqual(by.rambam1.targets.map((t) => [t.path, t.loc]), [['הלכה/משנה תורה/ספר קדושה/משנה תורה, הלכות מאכלות אסורות', { kind: 'chapter', chapter: 13 }]]);
+    assert.strictEqual(by.rambam3.title, 'הלכות שאלה ופיקדון ו-ח');
+    assert.deepStrictEqual(by.rambam3.targets.map((t) => [t.path, t.loc]), [['הלכה/משנה תורה/ספר משפטים/משנה תורה, הלכות שאלה ופיקדון', { kind: 'chapter', chapter: 6 }]]);
+  });
+
+  await check('daily learning: ארץ ישראל vs חו"ל, doubled parshiot, Shabbat, Sukkot, special dapim', () => {
+    const title = (d, il, key = 'parasha') => dl.computeDailyLearning(d, { il }).items.find((i) => i.key === key).title;
+    // Shavuot II fell on Shabbat 23 May 2026: the Diaspora is a week behind until they re-align.
+    assert.strictEqual(title(new Date(2026, 4, 25), true), 'בהעלותך · שני');
+    assert.strictEqual(title(new Date(2026, 4, 25), false), 'נשא · שני');
+    const il = dl.computeDailyLearning(new Date(2026, 4, 25), { il: true }).items[0];
+    const di = dl.computeDailyLearning(new Date(2026, 4, 25), { il: false }).items[0];
+    assert.deepStrictEqual([il.targets[0].loc, di.targets[0].loc], [{ kind: 'verse', chapter: 8, verse: 15 }, { kind: 'verse', chapter: 4, verse: 38 }]);
+    assert.strictEqual(dl.computeDailyLearning(new Date(2026, 4, 25)).il, true, 'ארץ ישראל by default');
+    // ויקהל-פקודי (5786): both parshiot's aliyah of the day.
+    const vp = dl.computeDailyLearning(new Date(2026, 2, 10), { il: true }).items[0];
+    assert.strictEqual(vp.title, 'ויקהל-פקודי · שלישי');
+    assert.deepStrictEqual(vp.targets.map((t) => [t.label, t.loc.chapter, t.loc.verse]), [['ויקהל · שלישי', 35, 30], ['פקודי · שלישי', 39, 22]]);
+    // Shabbat: שביעי and the whole parsha.
+    assert.strictEqual(title(new Date(2026, 10, 28), true), 'וישלח · שביעי וכל הפרשה');
+    // Sukkot week: וזאת הברכה (then בראשית after Simchat Torah).
+    assert.strictEqual(title(new Date(2026, 9, 1), true), 'וזאת הברכה · חמישי');
+    assert.strictEqual(title(new Date(2026, 9, 5), true).split(' · ')[0], 'בראשית');
+    // Pesach week (no regular parsha on Shabbat Chol HaMoed): the next regular parsha.
+    assert.ok(!/Pesach|פסח/.test(title(new Date(2027, 3, 26), true)));
+    // Shekalim: the Yerushalmi, at the halacha the daf starts in.
+    const shek = dl.computeDailyLearning(new Date(2021, 2, 25)).items.find((i) => i.key === 'dafYomi');
+    assert.strictEqual(shek.title, 'שקלים דף ד');
+    assert.deepStrictEqual(shek.targets.map((t) => [t.path, t.loc]), [['תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שקלים', { kind: 'chapter', chapter: 1, sub: 4 }]]);
+    const midot = dl.computeDailyLearning(new Date(2027, 2, 24)).items.find((i) => i.key === 'dafYomi');
+    assert.deepStrictEqual([midot.title, midot.targets[0].path, midot.targets[0].loc.kind], ['מדות דף לד', 'משנה/סדר קדשים/משנה מדות', 'start']);
+    // Rambam introduction sections (string "perek" ranges) open their book.
+    const intro = dl.computeDailyLearning(new Date(2024, 3, 22)).items.find((i) => i.key === 'rambam1');
+    assert.ok(intro.title && intro.targets.length === 1, intro.title);
+  });
+
+  await check('daily learning: every hebcal tractate / section maps onto a real Otzaria book (otzaria_index_only.txt)', () => {
+    const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+    if (!fs.existsSync(indexPath)) return;
+    const real = new Set(fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, '')));
+    const bavli = Object.keys(require('@hebcal/learning/bavli.json').default);
+    const mishnayot = Object.keys(require('@hebcal/learning/mishnayot.json').default);
+    const mt = Object.keys(require('@hebcal/learning/mishnehTorah.json').default);
+    assert.deepStrictEqual(bavli.filter((k) => !dl.BAVLI[k]), [], 'Daf Yomi tractates');
+    assert.deepStrictEqual(mishnayot.filter((k) => !dl.MISHNA[k]), [], 'Mishna Yomit tractates');
+    assert.deepStrictEqual(mt.filter((k) => !dl.RAMBAM[k]), [], 'Mishneh Torah sections');
+    const missing = [
+      ...bavli.map((k) => `${dl.BAVLI[k][0]}/${dl.BAVLI[k][1]}`),
+      ...mishnayot.map((k) => `משנה/${dl.SEDARIM[dl.MISHNA[k][0]]}/משנה ${dl.MISHNA[k][1]}`),
+      ...mt.map((k) => `הלכה/משנה תורה/${dl.RAMBAM[k][0]}/משנה תורה, ${dl.RAMBAM[k][1]}`),
+      ...tp.CHUMASH_BOOKS.map((b) => `תנך/תורה/${b}`),
+    ].filter((p) => !real.has(p));
+    assert.deepStrictEqual(missing, []);
+    assert.strictEqual(Object.keys(dl.SHEKALIM_DAF).length, 21, 'Shekalim dapim ב-כב');
+  });
+
+  await check('daily learning: 3 years × ארץ ישראל / חו"ל: no errors, all 5 cycles, all targets real Otzaria paths', () => {
+    const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+    const real = fs.existsSync(indexPath) ? new Set(fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''))) : null;
+    const bad = [];
+    let days = 0;
+    let differ = 0;
+    const t0 = Date.now();
+    for (let i = 0; i < 3 * 365; i++) {
+      const d = new Date(2025, 0, 1 + i);
+      const both = [true, false].map((il) => dl.computeDailyLearning(d, { il }));
+      for (const s of both) {
+        if (s.errors.length || s.items.length !== 5) bad.push(`${s.dateKey}: ${s.errors.join('; ') || s.items.length + ' items'}`);
+        const p = s.items[0];
+        if (p.key !== 'parasha' || !p.targets.length) bad.push(`${s.dateKey}: no parsha`);
+        const expectAliyah = dl.WEEKDAY_ALIYAH[s.weekday];
+        if (!p.title.includes(expectAliyah)) bad.push(`${s.dateKey}: ${p.title} lacks ${expectAliyah}`);
+        for (const it of s.items) for (const t of it.targets) if (real && !real.has(t.path)) bad.push(`${s.dateKey} ${it.key}: ${t.path}`);
+      }
+      if (both[0].items[0].title !== both[1].items[0].title) differ++;
+      days++;
+    }
+    assert.deepStrictEqual(bad.slice(0, 10), []);
+    assert.ok(differ > 0 && differ < 120, `ארץ ישראל and חו"ל differ on some weeks only (${differ} days)`);
+    console.log(`  daily learning: ${days} days × 2 locations in ${Date.now() - t0}ms (${differ} days with a different parsha abroad)`);
+  });
+
+  await check('daily learning: library book lookup by file path, below a top folder, or by title in its corpus', async () => {
+    const { DatabaseSync } = require('node:sqlite');
+    const m = new DatabaseSync(':memory:');
+    m.exec(`CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT, total_lines INTEGER, file_path TEXT UNIQUE);
+      INSERT INTO books VALUES (1, 'בראשית', 10, 'תנך/תורה/בראשית.txt'),
+        (2, 'שבת', 10, 'אוצריא/תלמוד בבלי/סדר מועד/שבת.txt'),
+        (3, 'רש"י על ברכות', 10, 'תלמוד בבלי/מפרשים/ברכות.txt'),
+        (4, 'ברכות', 10, 'תלמוד בבלי/ברכות.txt'),
+        (5, 'שבת', 10, 'משנה/סדר מועד/שבת.txt');`);
+    const a = { all: async (sql, params) => m.prepare(sql).all(...(params || [])) };
+    const found = await dl.findLibraryBooks(a, ['תנך/תורה/בראשית', 'תלמוד בבלי/סדר מועד/שבת', 'תלמוד בבלי/סדר זרעים/ברכות', 'משנה/סדר טהרות/משנה נגעים']);
+    assert.deepStrictEqual(Object.fromEntries([...found].map(([k, v]) => [k, v.id])), { 'תנך/תורה/בראשית': 1, 'תלמוד בבלי/סדר מועד/שבת': 2, 'תלמוד בבלי/סדר זרעים/ברכות': 4 });
+    m.close();
   });
 }

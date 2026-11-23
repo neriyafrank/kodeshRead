@@ -14,6 +14,10 @@ export function generateBookAliases(categoryPath: string[] | string, bookTitle: 
 export function acronyms(phrase: string): string[];
 export function aliasKey(s: string): string;
 export function hebrewNumeralToInt(s: string): number | null;
+/** 1..499 -> plain Hebrew numeral ('טו', 'קנז'); null outside that range. */
+export function intToHebrew(n: number): string | null;
+/** Printed form with gershayim / geresh: 13 -> 'י"ג', 5 -> "ה'". */
+export function formatHebrewNumeral(n: number): string;
 export interface VocalizationOptions {
   showNikkud?: boolean;
   /** Older spelling of showNikkud. */

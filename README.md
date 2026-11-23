@@ -89,6 +89,32 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
   * It uses the active theme (Light / Sepia / Dark), font, size, line height and niqqud
     setting.
 
+* **Parshiot & aliyot** (`shared/torahParshiot.js`): Otzaria's Chumash files have only `פרק`
+  headings, so the 54 parshiot with their aliyot (ראשון … שביעי, מפטיר) are a static dataset
+  (Hebrew chapter / verse numbering, cross-checked against hebcal's aliyot and Sedra list and the
+  real text in the self-test).
+  * In בראשית … דברים the reader draws subtle centered dividers above the verse each parsha
+    (**פרשת וישלח**) and aliyah (**שני** … **מפטיר**) starts at. They are decoration only: stored
+    lines, line indices and commentary links are unchanged.
+  * The TOC drawer of a Chumash book has a **פרקים | פרשות** switch (remembered). In פרשות mode the
+    right column lists the book's parshiot and the selected parsha opens its aliyot to the left
+    (with their verse, e.g. `לב, יד`). It opens on the parsha / aliyah you are reading, and a tap
+    jumps to the exact verse.
+* **לימוד יומי** (`shared/dailyLearning.js`, `src/services/dailyLearningNav.ts`): today's Hebrew
+  date (`י"ג בכסלו תשפ"ז`) and study cycles, computed on the device with `@hebcal/core` /
+  `@hebcal/learning` (no network):
+  פרשת השבוע with today's aliyah (Sunday = ראשון … Shabbat = שביעי and the whole parsha; doubled
+  weeks give both parshiot; Sukkot week = וזאת הברכה), דף היומי (Shekalim -> the Yerushalmi halacha),
+  משנה יומית, and רמב"ם יומי in the 1-chapter and 3-chapter tracks. A **ארץ ישראל / חו"ל** switch
+  (default ארץ ישראל, persisted) picks the parsha schedule.
+  * Every item maps to the real Otzaria book (`תנך/תורה/בראשית`, `תלמוד בבלי/סדר קדשים/ערכין`,
+    `משנה/סדר טהרות/משנה נגעים`, `הלכה/משנה תורה/ספר קדושה/משנה תורה, הלכות מאכלות אסורות`, …) and
+    is resolved to its line (chapter / verse, daf, mishnah, perek) through the TOC headings. A book
+    missing from the library (the sample has no Mishnah or Rambam) is shown greyed out as
+    "לא נמצא בספרייה".
+  * One tap opens it from the collapsible **לימוד יומי** block at the top of the TOC drawer (from
+    any book) or from the **לימוד יומי** bar on the Library screen.
+
 ## Quick start
 
 Requires **Node ≥ 22.13** (the DB build script uses the built-in `node:sqlite`).

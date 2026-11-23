@@ -8,6 +8,10 @@
  * כהה themes persisted across reloads and applied to reader, commentary drawer, TOC and library
  * (web preview). With --shots, tanach-light.png / tanach-dark.png show Genesis 1 with
  * cantillation and niqqud in both themes (device scale 2).
+ * Torah study: inline parsha / aliyah dividers in a Chumash book (none elsewhere), the TOC's
+ * פרקים | פרשות switch (parshiot column + aliyot column, synced to the reading position, exact
+ * verse jumps, persisted mode) and opening today's aliyah from the TOC's "לימוד יומי" block
+ * ("today" is pinned to 2026-11-23 = י"ג בכסלו תשפ"ז, וישלח · שני).
  *
  *   npm run web                          # terminal 1 (Metro on :8081, sample DB)
  *   npm run e2e:reader [-- --shots=DIR]  # terminal 2
@@ -35,6 +39,10 @@ try {
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   // The top-most instance (expo-router web can keep a hidden copy of a screen underneath).
+  // Deterministic "today" for the daily-learning schedule (src/services/dailyLearningNav.ts).
+  await page.addInitScript(() => {
+    globalThis.__KODESHREAD_TODAY__ = '2026-11-23';
+  });
   const tid = (id) => page.locator(`[data-testid="${id}"]`).last();
   const all = (prefix) => page.locator(`[data-testid^="${prefix}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
@@ -66,7 +74,7 @@ try {
           const r = document.createRange();
           r.selectNodeContents(el);
           const t = r.getBoundingClientRect();
-          const box = el.closest('[data-testid^="toc-node-"], [data-testid^="toc-verse-"], [data-testid^="toc-result-"], [data-testid="toc-open-section"]').getBoundingClientRect();
+          const box = el.closest('[data-testid^="toc-node-"], [data-testid^="toc-verse-"], [data-testid^="toc-result-"], [data-testid="toc-open-section"], [data-testid^="toc-parsha-"], [data-testid^="toc-aliyah-"]').getBoundingClientRect();
           const chev = el.parentElement.querySelector('[data-testid="toc-chevron"]');
           return { text: el.innerText.trim(), align: cs.textAlign, dir: cs.direction, right: box.right - t.right, left: t.left - box.left, chevronLeft: chev ? chev.getBoundingClientRect().right <= t.left + 1 : true };
         });
@@ -273,6 +281,89 @@ try {
     await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק כז'));
     step('TOC filter: כ"ה / 25 / "כז טו" (chapter + verse)');
 
+    // --- Torah: פרקים | פרשות in the Chumash TOC, inline parsha / aliyah dividers --------------
+    /** Text of the verse-number margin of the row a divider sits above. */
+    const dividerInfo = (kind) =>
+      page.evaluate((k) => {
+        const els = [...document.querySelectorAll(`[data-testid^="${k}-divider-"]`)].filter((e) => e.getBoundingClientRect().height > 0);
+        return els.map((e) => {
+          const line = e.dataset.testid.split('-').pop();
+          const num = document.querySelector(`[data-testid="verse-num-${line}"]`);
+          const para = document.querySelector(`[data-testid="para-${line}"]`);
+          const r = e.getBoundingClientRect();
+          return { line: Number(line), text: e.innerText.trim(), verse: num ? num.innerText.trim() : null, above: para ? r.bottom <= para.getBoundingClientRect().top + 1 : false, top: r.top };
+        });
+      }, kind);
+    await openTools();
+    await tid('toc-button').click();
+    await tid('toc-mode-chapters').waitFor();
+    assert.strictEqual(await tid('toc-mode-chapters').getAttribute('aria-checked'), 'true', 'chapters mode by default');
+    const [mc, mp] = [await tid('toc-mode-chapters').boundingBox(), await tid('toc-mode-parshiot').boundingBox()];
+    assert.ok(mc.x > mp.x, 'RTL: פרקים on the right, פרשות on the left');
+    await tid('toc-mode-parshiot').click();
+    await tid('toc-pcol-1').waitFor();
+    await page.waitForTimeout(450);
+    const psel = async (col) => (await page.locator(`[data-testid="toc-pcol-${col}"] [aria-selected="true"] [data-testid="toc-label"]`).last().innerText()).trim();
+    // במדבר כז טו: פרשת פינחס (כה י – ל א), aliyah רביעי (כז ו).
+    assert.strictEqual(await psel(0), 'פינחס', 'current parsha pre-selected');
+    assert.strictEqual(await psel(1), 'רביעי', 'current aliyah pre-selected');
+    const parshaNames = (await page.locator('[data-testid="toc-pcol-0"] [data-testid="toc-label"]').allInnerTexts()).map((t) => t.trim());
+    assert.deepStrictEqual(parshaNames, ['במדבר', 'נשא', 'בהעלותך', 'שלח', 'קרח', 'חקת', 'בלק', 'פינחס', 'מטות', 'מסעי']);
+    const aliyot = (await page.locator('[data-testid="toc-pcol-1"] [data-testid="toc-label"]').allInnerTexts()).map((t) => t.trim());
+    assert.deepStrictEqual(aliyot, ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שביעי', 'מפטיר']);
+    const [p0, p1] = [await tid('toc-pcol-0').boundingBox(), await tid('toc-pcol-1').boundingBox()];
+    assert.ok(p1.x < p0.x, 'aliyot open to the LEFT of the parshiot');
+    const pw = await tocWidth();
+    assert.ok(Math.abs(p0.width + p1.width - pw) <= 2 && pw <= 400 * 0.85, `drawer fits its two columns (${Math.round(p0.width)} + ${Math.round(p1.width)} = ${Math.round(pw)})`);
+    const pn = await assertRightAligned('phone, פרשות');
+    await shot('r5b-toc-parshiot');
+    // Another parsha, then an aliyah: exact verse, with its divider right above it.
+    await tid('toc-parsha-39').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="toc-parsha-open"]')].some((e) => e.innerText.includes('פרשת בלק')));
+    await tid('toc-aliyah-39-2').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-pcol-0"]'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק כב'));
+    await page.waitForTimeout(500);
+    let dv = (await dividerInfo('aliyah')).find((d) => d.text === 'שלישי');
+    assert.ok(dv && dv.verse === 'כא' && dv.above, `"שלישי" divider above במדבר כב כא: ${JSON.stringify(await dividerInfo('aliyah'))}`);
+    const crumbY = (await tid('reader-breadcrumb').boundingBox()).y + 40;
+    assert.ok(dv.top >= crumbY - 4 && dv.top < crumbY + 120, `the jump lands the aliyah at the reading line (${Math.round(dv.top)} vs ${Math.round(crumbY)})`);
+    await shot('r5c-aliyah-divider');
+    // "לתחילת פרשת בלק": the parsha divider above כב ב (פרשות mode is remembered).
+    await openTools();
+    await tid('toc-button').click();
+    await tid('toc-pcol-1').waitFor();
+    assert.strictEqual(await psel(0), 'בלק');
+    assert.strictEqual(await psel(1), 'שלישי');
+    await tid('toc-parsha-open').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-pcol-0"]'));
+    await page.waitForTimeout(500);
+    dv = (await dividerInfo('parsha')).find((d) => d.text === 'פרשת בלק');
+    assert.ok(dv && dv.verse === 'ב' && dv.above, `"פרשת בלק" divider above במדבר כב ב: ${JSON.stringify(await dividerInfo('parsha'))}`);
+    assert.ok((await crumb()).includes('פרק כב'));
+    // Dividers are decoration: the verses around it keep their stored lines (כב א = L-1, כב ג = L+1).
+    const around = await page.evaluate((l) => [l - 1, l + 1].map((n) => [...document.querySelectorAll(`[data-testid="verse-num-${n}"]`)].pop()?.innerText.trim() ?? null), dv.line);
+    assert.deepStrictEqual(around, ['א', 'ג'], 'neighbouring verses keep their line indices');
+    await shot('r5d-parsha-divider');
+    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.tocMode), 'parshiot', 'TOC mode persisted');
+    await openTools();
+    await tid('toc-button').click();
+    await tid('toc-mode-chapters').click();
+    await tid('toc-col-0').waitFor();
+    assert.ok((await sel(0)).startsWith('פרק'), 'back to chapters');
+    await tid('toc-close').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
+    // Not a Chumash (שבת): no switch, no dividers.
+    const shabbatId = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.find((t) => t.bookTitle === 'שבת').bookId);
+    await tid(`tab-${shabbatId}`).click();
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await openToc(0);
+    assert.strictEqual(await all('toc-mode-parshiot').count(), 0, 'no פרשות switch outside the Chumash');
+    assert.strictEqual(await all('torah-divider-').count(), 0, 'no dividers outside the Chumash');
+    await tid('toc-close').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
+    step(`Chumash TOC: פרקים | פרשות (פינחס › רביעי pre-selected, ${pn} labels flush right); בלק › שלישי and לתחילת פרשת בלק land on their verses under inline dividers; none in שבת`);
+
     // --- close all with confirmation ----------------------------------------------------------
     await tid('tabs-counter').click();
     await tid('tabs-close-all').click();
@@ -280,6 +371,58 @@ try {
     await tid('tabs-close-all-confirm').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.length === 0);
     step('switcher: close all (with confirmation)');
+
+    // --- "לימוד יומי" from the TOC drawer -------------------------------------------------------
+    await tid('reader-back').click();
+    await tid('quick-jump-input').waitFor();
+    await tid('quick-jump-input').fill('שבת ב.');
+    await page.locator('[data-testid="quick-jump-result"]', { hasText: 'שבת' }).first().click();
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await openToc(0);
+    assert.strictEqual(await tid('toc-daily-toggle').getAttribute('aria-expanded'), 'false', 'daily learning folded by default');
+    assert.ok((await tid('toc-daily-toggle').innerText()).includes('י"ג בכסלו תשפ"ז'), 'the folded header shows the Hebrew date');
+    await tid('toc-daily-toggle').click();
+    await tid('daily-item-parasha').waitFor();
+    await page.waitForTimeout(400);
+    assert.strictEqual((await tid('daily-hebrew-date').innerText()).trim(), 'י"ג בכסלו תשפ"ז');
+    assert.strictEqual((await tid('daily-title-parasha').innerText()).trim(), 'וישלח · שני');
+    for (const [key, title] of [['dafYomi', 'ערכין דף ו'], ['mishna', 'נגעים ג, א-ב'], ['rambam1', 'הלכות מאכלות אסורות פרק יג'], ['rambam3', 'הלכות שאלה ופיקדון ו-ח']]) {
+      assert.strictEqual((await tid(`daily-title-${key}`).innerText()).trim(), title, key);
+      assert.strictEqual(await tid(`daily-item-${key}`).getAttribute('aria-disabled'), 'true', `${key}: not in the sample library`);
+      assert.ok((await tid(`daily-item-${key}`).innerText()).includes('לא נמצא בספרייה'));
+    }
+    const dailyAlign = await page.evaluate(() =>
+      ['daily-hebrew-date', 'daily-title-parasha'].map((id) => {
+        const el = [...document.querySelectorAll(`[data-testid="${id}"]`)].pop();
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        return { align: getComputedStyle(el).textAlign, gap: el.getBoundingClientRect().right - r.getBoundingClientRect().right };
+      }),
+    );
+    assert.ok(dailyAlign.every((a) => a.align === 'right' && a.gap <= 2), `daily labels right-aligned ${JSON.stringify(dailyAlign)}`);
+    assert.ok((await tocWidth()) >= 260, 'the drawer widens for the daily rows');
+    await shot('r5e-toc-daily');
+    await tid('daily-item-parasha').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('בראשית') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק לב'), null, { timeout: 20000 });
+    await page.waitForTimeout(500);
+    dv = (await dividerInfo('aliyah')).find((d) => d.text === 'שני');
+    assert.ok(dv && dv.verse === 'יד' && dv.above, `today's aliyah: "שני" above בראשית לב יד: ${JSON.stringify(await dividerInfo('aliyah'))}`);
+    assert.deepStrictEqual(await tabsInStore(), ['שבת', 'בראשית'], 'opened in its own tab');
+    await shot('r5f-daily-opened');
+    // ארץ ישראל / חו"ל is a persisted setting (same parsha this week).
+    await openToc(0);
+    await tid('daily-loc-diaspora').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.il === false);
+    assert.strictEqual((await tid('daily-title-parasha').innerText()).trim(), 'וישלח · שני');
+    await tid('daily-loc-il').click();
+    await tid('toc-daily-toggle').click();
+    await tid('toc-close').click();
+    await tid('tabs-counter').click();
+    await tid('tabs-close-all').click();
+    await tid('tabs-close-all-confirm').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.length === 0);
+    step('TOC "לימוד יומי": י"ג בכסלו תשפ"ז, וישלח · שני opens בראשית לב יד in a new tab; missing books greyed; ארץ ישראל / חו"ל persisted');
 
     // --- commentary favorites follow the commentator across books / tabs ---------------------
     const drawerNames = () => page.locator('[data-testid="commentary-group-name"]').allInnerTexts();

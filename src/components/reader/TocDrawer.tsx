@@ -23,10 +23,18 @@
  *
  * All labels sit flush against the right edge (`alignRight`, src/lib/direction.ts) with the
  * sub-level arrow "‹" at the left edge.
+ *
+ * Chumash books (בראשית..דברים) get a compact פרקים | פרשות switch (persisted): in פרשות mode the
+ * right column lists the book's parshiot and the selected parsha opens its aliyot (ראשון..מפטיר)
+ * to the left, each jumping to its exact verse (shared/torahParshiot.js).
+ *
+ * A collapsible "לימוד יומי" block at the top opens today's parsha / aliyah, Daf Yomi, Mishnah
+ * Yomit or Rambam in one tap from any book (src/components/learning/DailyLearning.tsx).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type ScrollViewInstance } from 'react-native';
 
+import type { ResolvedTarget } from '../../../shared/dailyLearning';
 import { normalizeHebrew } from '../../../shared/hebrew';
 import { inlineUnitWord } from '../../../shared/refAlign';
 import {
@@ -44,7 +52,11 @@ import {
   type InlineVerse,
   type TocTree,
 } from '../../../shared/tocColumns';
+import { parshaForLine, type ChumashBook, type ResolvedParsha } from '../../../shared/torahParshiot';
 import { useLibrary } from '../../db/LibraryContext';
+import { useChumashBook, useResolvedParshiot } from '../../services/parshiotNav';
+import { useLearning } from '../../state/learningStore';
+import { DailyLearningSection } from '../learning/DailyLearning';
 import { LEFT_CHEVRON, alignRight, inputAlignRight, nativeDir, setWebDir } from '../../lib/direction';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 import { SideDrawer } from '../Overlay';
@@ -67,6 +79,8 @@ interface Props {
   onSelect: (line: number) => void;
   /** Wide screens: render as a panel beside the text (stays open after a jump). */
   docked?: boolean;
+  /** Opens a "לימוד יומי" target (any book) in a tab; enables the daily-learning block. */
+  onOpenTarget?: (t: ResolvedTarget) => void;
 }
 
 const ROW_H = 44;
@@ -83,6 +97,9 @@ const CHEVRON_SPACE = 14;
 const HEAD_FONT = 13;
 const HEAD_CHROME = spacing.md * 2 + 4;
 const DIRECT_CHROME = spacing.sm * 2 + spacing.md * 2 + 6;
+/** The open "לימוד יומי" block needs this much room for its rows. */
+const DAILY_MIN_WIDTH = 270;
+const REF_FONT = 12;
 
 export function TocDrawer({ visible, docked, onClose, ...rest }: Props) {
   const s = useThemedStyles(createStyles);
@@ -109,9 +126,19 @@ export function TocDrawer({ visible, docked, onClose, ...rest }: Props) {
 
 type PanelProps = Omit<Props, 'visible'> & { cap: number; onFitWidth: (w: number) => void };
 
-function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFitWidth, docked }: PanelProps) {
+function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFitWidth, docked, onOpenTarget }: PanelProps) {
   const s = useThemedStyles(createStyles);
   const { adapter } = useLibrary();
+  const chumash = useChumashBook(bookId, bookTitle);
+  const tocMode = useLearning((x) => x.tocMode);
+  const setTocMode = useLearning((x) => x.setTocMode);
+  const dailyOpen = useLearning((x) => x.tocDailyOpen) && !!onOpenTarget;
+  const minPanel = dailyOpen ? DAILY_MIN_WIDTH : 0;
+  const parshiotMode = !!chumash && tocMode === 'parshiot';
+  const jump = (line: number) => {
+    onSelect(line);
+    if (!docked) onClose();
+  };
   const [data, setData] = useState<{ bookId: number; tree: TocTree<TocNode>; total: number } | null>(null);
 
   useEffect(() => {
@@ -141,7 +168,35 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
           <Text style={s.closeText}>✕</Text>
         </Pressable>
       </View>
-      {!ready ? (
+      {onOpenTarget ? <DailyLearningSection onOpen={onOpenTarget} /> : null}
+      {chumash ? (
+        <View style={s.modeRow} accessibilityRole="radiogroup" accessibilityLabel="תצוגת תוכן העניינים">
+          {(
+            [
+              ['chapters', 'פרקים'],
+              ['parshiot', 'פרשות'],
+            ] as const
+          ).map(([mode, label]) => {
+            const on = (mode === 'parshiot') === parshiotMode;
+            return (
+              <Pressable
+                key={mode}
+                onPress={() => setTocMode(mode)}
+                style={[s.modeBtn, on && s.modeBtnOn]}
+                accessibilityRole="radio"
+                aria-checked={on}
+                accessibilityState={{ selected: on }}
+                testID={`toc-mode-${mode}`}
+              >
+                <Text style={[s.modeText, on && s.modeTextOn]}>{label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+      {parshiotMode && chumash ? (
+        <ParshiotColumnsView key={`p${bookId}`} bookId={bookId} book={chumash} currentLine={currentLine} cap={cap} minPanel={minPanel} onFitWidth={onFitWidth} onJump={jump} />
+      ) : !ready ? (
         <ActivityIndicator style={{ marginTop: spacing.xl }} color={s.palette.accent} />
       ) : !ready.tree.roots.length ? (
         <Text style={s.empty}>אין תוכן עניינים לספר זה</Text>
@@ -153,11 +208,9 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
           total={ready.total}
           currentLine={currentLine}
           cap={cap}
+          minPanel={minPanel}
           onFitWidth={onFitWidth}
-          onJump={(line) => {
-            onSelect(line);
-            if (!docked) onClose();
-          }}
+          onJump={jump}
         />
       )}
     </View>
@@ -171,6 +224,8 @@ interface ColumnsProps {
   currentLine: number;
   /** Widest the panel may get (px). */
   cap: number;
+  /** Narrowest the panel may get (px), e.g. while the daily-learning block is open. */
+  minPanel: number;
   /**
    * Reports the width the open columns (or filter results) need; the drawer sizes itself from it.
    * The columns derive the same clamped width in their own render: waiting for it to come back
@@ -182,7 +237,7 @@ interface ColumnsProps {
 }
 
 /** Mounted per open, so its initial selection reflects the current reading position. */
-function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJump }: ColumnsProps) {
+function TocColumnsView({ bookId, tree, total, currentLine, cap, minPanel, onFitWidth, onJump }: ColumnsProps) {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const { adapter, bookIndex } = useLibrary();
@@ -244,7 +299,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
   // Display order is LTR with the deepest column first (at the left edge).
   const displayWidths = useMemo(() => [...(verseList ? [verseWidth] : []), ...nodeWidths.slice().reverse()], [verseList, verseWidth, nodeWidths]);
   const columnsWidth = displayWidths.reduce((a, b) => a + b, 0);
-  const width = tocPanelWidth([columnsWidth], { min: MIN_PANEL_WIDTH, cap });
+  const width = tocPanelWidth([columnsWidth], { min: Math.max(MIN_PANEL_WIDTH, minPanel), cap });
   // A panel wider than the columns (its minimum width): the deepest column takes the slack.
   const slack = Math.max(0, width - columnsWidth);
   const widthAt = (displayIndex: number) => displayWidths[displayIndex] + (displayIndex === 0 ? slack : 0);
@@ -391,7 +446,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
     const directW = showDirect && direct ? tocColumnWidth([`מעבר: ${direct.title}`], { fontSize: ROW_FONT, chrome: DIRECT_CHROME, max: Infinity }) : 0;
     return Math.max(rows, directW);
   }, [query, results, tree, showDirect, direct]);
-  const fit = query.trim() ? filterWidth : columnsWidth;
+  const fit = Math.max(query.trim() ? filterWidth : columnsWidth, minPanel);
   useEffect(() => {
     if (fit > 0) onFitWidth(fit);
   }, [fit, onFitWidth]);
@@ -454,6 +509,153 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
   );
 }
 
+interface ParshiotProps {
+  bookId: number;
+  book: ChumashBook;
+  currentLine: number;
+  cap: number;
+  minPanel: number;
+  onFitWidth: (width: number) => void;
+  onJump: (line: number) => void;
+}
+
+/**
+ * פרשות mode: [ aliyot of the selected parsha ] [ parshiot of the book ] (RTL, like the chapter
+ * columns). Opens on the parsha (and aliyah) of the reading position.
+ */
+function ParshiotColumnsView({ bookId, book, currentLine, cap, minPanel, onFitWidth, onJump }: ParshiotProps) {
+  const s = useThemedStyles(createStyles);
+  const parshiot = useResolvedParshiot(bookId, book);
+  const [picked, setPicked] = useState<number | null>(null);
+  const scrollRef = useRef<ScrollViewInstance | null>(null);
+  const listRef = useRef<ScrollViewInstance | null>(null);
+  const listScrolled = useRef(false);
+  const current = parshiot ? parshaForLine(parshiot, currentLine) : null;
+  const selected: ResolvedParsha | null = parshiot ? (parshiot.find((p) => p.index === picked) ?? current ?? parshiot.find((p) => p.line != null) ?? null) : null;
+  const currentReading = selected && current && selected.index === current.index ? parshaForLine(selected.readings, currentLine) : null;
+
+  const parshaWidth = useMemo(
+    () => (parshiot ? tocColumnWidth(parshiot.map((p) => p.name), { fontSize: ROW_FONT, chrome: ROW_CHROME, branch: true, branchSpace: CHEVRON_SPACE }) : 0),
+    [parshiot],
+  );
+  const aliyahWidth = useMemo(
+    () =>
+      selected
+        ? tocColumnWidth(
+            selected.readings.map((r) => r.name),
+            { fontSize: ROW_FONT, chrome: ROW_CHROME + 16 + Math.max(...selected.readings.map((r) => r.label.length)) * REF_FONT * 0.5, header: `לתחילת ${selected.title}`, headerFontSize: HEAD_FONT, headerChrome: HEAD_CHROME },
+          )
+        : 0,
+    [selected],
+  );
+  const columnsWidth = parshaWidth + aliyahWidth;
+  const width = tocPanelWidth([columnsWidth], { min: Math.max(MIN_PANEL_WIDTH, minPanel), cap });
+  const slack = Math.max(0, width - columnsWidth);
+  const fit = Math.max(columnsWidth, minPanel);
+  useEffect(() => {
+    if (fit > 0) onFitWidth(fit);
+  }, [fit, onFitWidth]);
+  useEffect(() => {
+    const t = setTimeout(() => scrollRef.current?.scrollTo({ x: 0, animated: true }), 30);
+    return () => clearTimeout(t);
+  }, [selected?.index]);
+
+  if (!parshiot) return <ActivityIndicator style={{ marginTop: spacing.xl }} color={s.palette.accent} />;
+  const selectedIndex = selected ? Math.max(0, parshiot.indexOf(selected)) : 0;
+  return (
+    <ScrollView
+      ref={(n) => {
+        scrollRef.current = n;
+        setWebDir(n, 'ltr');
+      }}
+      horizontal
+      style={nativeDir('ltr')}
+      showsHorizontalScrollIndicator={columnsWidth > width}
+      contentContainerStyle={[s.columns, nativeDir('ltr'), { minWidth: width }]}
+      testID="toc-parshiot"
+    >
+      {/* Aliyot first: LTR order puts them at the left edge, the parshiot at the right. */}
+      {selected ? (
+        <View key={`a${selected.index}`} ref={(n) => setWebDir(n, 'rtl')} style={[s.column, nativeDir('rtl'), { width: aliyahWidth + slack }]} testID="toc-pcol-1">
+          <Pressable
+            onPress={() => selected.line != null && onJump(selected.line)}
+            disabled={selected.line == null}
+            style={({ pressed }) => [s.colHead, pressed && s.pressed]}
+            testID="toc-parsha-open"
+          >
+            <Text style={s.colHeadText} numberOfLines={1} testID="toc-col-head">
+              לתחילת {selected.title}
+            </Text>
+          </Pressable>
+          <ScrollView>
+            {selected.readings.map((r) => {
+              const active = currentReading === r;
+              const missing = r.line == null;
+              return (
+                <Pressable
+                  key={r.index}
+                  onPress={() => r.line != null && onJump(r.line)}
+                  disabled={missing}
+                  style={({ pressed }) => [s.row, active && s.rowActive, pressed && s.pressed, missing && s.rowMissing]}
+                  aria-selected={active}
+                  accessibilityRole="link"
+                  accessibilityLabel={`${r.name}, ${r.label}`}
+                  testID={`toc-aliyah-${selected.index}-${r.index}`}
+                >
+                  {active ? <View style={s.activeBar} /> : null}
+                  <Text style={[s.nodeTitle, active && s.nodeActive]} numberOfLines={1} testID="toc-label">
+                    {r.name}
+                  </Text>
+                  <Text style={s.refText} numberOfLines={1}>
+                    {r.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
+      <View ref={(n) => setWebDir(n, 'rtl')} style={[s.column, nativeDir('rtl'), { width: parshaWidth + (selected ? 0 : slack) }]} testID="toc-pcol-0">
+        {/* At most 12 rows: a plain ScrollView (a FlatList's initialScrollIndex leaves the rows above
+            it unrendered when the whole list fits), brought to the current parsha once laid out. */}
+        <ScrollView
+          ref={listRef}
+          onLayout={() => {
+            if (listScrolled.current) return;
+            listScrolled.current = true;
+            listRef.current?.scrollTo({ y: Math.max(0, (selectedIndex - 2) * ROW_H), animated: false });
+          }}
+        >
+          {parshiot.map((item) => {
+            const active = item === selected;
+            const missing = item.line == null;
+            return (
+              <Pressable
+                key={item.index}
+                onPress={() => setPicked(item.index)}
+                disabled={missing}
+                style={({ pressed }) => [s.row, active && s.rowActive, pressed && s.pressed, missing && s.rowMissing]}
+                aria-selected={active}
+                accessibilityRole="button"
+                accessibilityLabel={item.title}
+                testID={`toc-parsha-${item.index}`}
+              >
+                {active ? <View style={s.activeBar} /> : null}
+                <Text style={[s.nodeTitle, active && s.nodeActive]} numberOfLines={1} testID="toc-label">
+                  {item.name}
+                </Text>
+                <Text style={[s.chevron, active && s.nodeActive]} testID="toc-chevron">
+                  {LEFT_CHEVRON}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      </View>
+    </ScrollView>
+  );
+}
+
 const createStyles = (c: Palette) => ({
   palette: c,
   ...StyleSheet.create({
@@ -505,6 +707,23 @@ const createStyles = (c: Palette) => ({
     nodeTitle: { flex: 1, minWidth: 0, fontSize: ROW_FONT, color: c.text, ...alignRight },
     nodeActive: { color: c.accent, fontWeight: '700' },
     chevron: { fontSize: 17, color: c.textMuted, width: CHEVRON_SPACE - 4, textAlign: 'center' },
+    rowMissing: { opacity: 0.4 },
+    // Verse reference of an aliyah ("לב, יד"), at the row's left edge.
+    refText: { fontSize: REF_FONT, color: c.textMuted, fontVariant: ['tabular-nums'] },
+    // פרקים | פרשות (RTL: פרקים on the right).
+    modeRow: {
+      flexDirection: 'row',
+      marginHorizontal: spacing.sm,
+      marginTop: spacing.sm,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.border,
+      overflow: 'hidden',
+    },
+    modeBtn: { flex: 1, alignItems: 'center', paddingVertical: 6, backgroundColor: c.surface },
+    modeBtnOn: { backgroundColor: c.accent },
+    modeText: { fontSize: 14, fontWeight: '600', color: c.textMuted },
+    modeTextOn: { color: c.surface },
     direct: { margin: spacing.sm, padding: spacing.md, borderRadius: radius.md, backgroundColor: c.accent },
     directText: { color: c.surface, fontSize: ROW_FONT, fontWeight: '700', ...alignRight },
   }),

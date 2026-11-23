@@ -22,6 +22,7 @@ import { TabStrip } from '../components/reader/TabStrip';
 import { TabSwitcher } from '../components/reader/TabSwitcher';
 import { TocDrawer } from '../components/reader/TocDrawer';
 import { VocalizationToggles } from '../components/reader/VocalizationToggles';
+import { useOpenLearningTarget } from '../services/dailyLearningNav';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
 
@@ -31,6 +32,7 @@ export default function ReaderWorkspace() {
   const router = useRouter();
   const activeTab = useTabs(selectActiveTab);
   const requestJump = useTabs((x) => x.requestJump);
+  const openLearningTarget = useOpenLearningTarget();
   const [tocOpen, setTocOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -115,6 +117,7 @@ export default function ReaderWorkspace() {
               currentLine={activeTab.currentLineIndex}
               onClose={() => setTocOpen(false)}
               onSelect={(line) => requestJump(activeTab.tabId, line, true)}
+              onOpenTarget={openLearningTarget}
             />
           ) : null}
           <View style={s.flex}>
@@ -140,6 +143,9 @@ export default function ReaderWorkspace() {
           onSelect={(line) => {
             setTocOpen(false);
             requestJump(activeTab.tabId, line, true);
+          }}
+          onOpenTarget={(t) => {
+            if (openLearningTarget(t)) setTocOpen(false);
           }}
         />
       ) : null}

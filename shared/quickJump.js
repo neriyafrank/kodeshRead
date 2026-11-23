@@ -376,4 +376,4 @@ async function resolveReference(db, index, input, opts) {
   return results;
 }
 
-module.exports = { loadBookIndex, resolveReference, tokenize, parseLocation, lookupBook, rawTokens };
+module.exports = { loadBookIndex, resolveReference, resolveInBook, tokenize, parseLocation, lookupBook, rawTokens };
