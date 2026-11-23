@@ -177,8 +177,13 @@ The search scope picker's book filter is abbreviation-aware too.
   header), and the drawer is the sum of the open columns (`tocPanelWidth`: at least 200 px, at most
   85% of a phone screen / 42% of a tablet screen, beyond which the columns scroll), so a one-level book
   gets one slim column and opening a verse column widens it only by that column. Labels are flush right
-  with the `‹` sub-level arrow on the left (`alignRight` in `src/lib/direction.ts`: React Native's native
-  text resolves `textAlign: 'right'` to the END edge in an RTL app, i.e. the left, so native uses `'left'`).
+  with the `‹` sub-level arrow on the left.
+- **Right alignment (forced RTL):** never write a raw `textAlign: 'right'` in `src/` (a self-test enforces
+  it). React Native's native `<Text>` resolves `'right'` to the END edge in an RTL app, i.e. the LEFT on
+  Android, so `<Text>` styles spread `alignRight` (`'left'` on native, `'right'` on web) from
+  `src/lib/direction.ts`. `<TextInput>` is not mirrored on Android (`'right'` = Gravity.RIGHT), so inputs
+  spread `inputAlignRight`. Centered messages, justified body text and the LTR URL input keep their own
+  alignment.
 
 ## Commentaries: Otzaria reference alignment
 

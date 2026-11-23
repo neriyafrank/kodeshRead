@@ -9,6 +9,7 @@ import { FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-na
 
 import { filterTabs, tabLocation } from '../../../shared/tabs';
 import { useLibrary } from '../../db/LibraryContext';
+import { alignRight, inputAlignRight } from '../../lib/direction';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 import { BottomSheet } from '../Overlay';
@@ -152,8 +153,7 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.background,
       fontSize: 16,
       color: c.text,
-      writingDirection: 'rtl',
-      textAlign: 'right',
+      ...inputAlignRight,
     },
     list: { flexGrow: 0 },
     empty: { textAlign: 'center', color: c.textMuted, padding: spacing.xl },
@@ -174,7 +174,7 @@ const createStyles = (c: Palette) =>
     cardTop: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
     cardTitle: { flexShrink: 1, fontSize: 16, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
     badge: { fontSize: 11, color: c.textMuted, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 1, maxWidth: 120 },
-    where: { fontSize: 13, color: c.textMuted, marginTop: 2, writingDirection: 'rtl', textAlign: 'right' },
+    where: { fontSize: 13, color: c.textMuted, marginTop: 2, ...alignRight },
     close: { padding: spacing.sm },
     closeText: { fontSize: 20, color: c.textMuted },
   });

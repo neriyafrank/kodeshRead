@@ -170,6 +170,20 @@ try {
     const cards = async () => (await all('tab-card-').allInnerTexts()).filter((t) => t.trim() !== '×').map((t) => t.split('\n')[0]);
     assert.strictEqual((await cards())[0], 'תענית', 'most recent first');
     assert.strictEqual((await cards()).length, 5);
+    // Right-aligned Hebrew: the filter input and every tab card / tab pill label.
+    const aligns = await page.evaluate(() => {
+      const top = (sel) => [...document.querySelectorAll(sel)].pop();
+      const leafTexts = (root) => [...root.querySelectorAll('div, span')].filter((e) => !e.children.length && /[א-ת]/.test(e.innerText || '') && e.getBoundingClientRect().height > 0);
+      const sheetCards = [...document.querySelectorAll('[data-testid^="tab-card-"]')].filter((e) => !/close/.test(e.dataset.testid));
+      return {
+        filter: getComputedStyle(top('[data-testid="tabs-filter"]')).textAlign,
+        cards: sheetCards.flatMap(leafTexts).map((e) => getComputedStyle(e).textAlign),
+        strip: leafTexts(top('[data-testid="tab-strip"]')).map((e) => getComputedStyle(e).textAlign),
+      };
+    });
+    assert.strictEqual(aligns.filter, 'right', 'tabs filter input right-aligned');
+    assert.ok(aligns.strip.length >= 5 && aligns.strip.every((a) => a === 'right'), `tab strip labels right-aligned (${aligns.strip})`);
+    assert.ok(aligns.cards.length >= 5 && aligns.cards.filter((a) => a === 'right').length >= 5, `switcher card locations right-aligned (${aligns.cards})`);
     await tid('tabs-filter').fill('ר"ה');
     await page.waitForFunction(() => document.querySelectorAll('[data-testid^="tab-card-close-"]').length === 1);
     assert.deepStrictEqual(await cards(), ['ראש השנה'], 'abbreviation filter');

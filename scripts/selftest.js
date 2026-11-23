@@ -763,6 +763,26 @@ async function refAlignTests() {
     assert.strictEqual(toc.verseForLine(verses, 6).key, 'ב');
     assert.strictEqual(toc.verseForLine(verses, 2), null);
   });
+  await check('RTL: no raw textAlign right/left in src/ (alignRight / inputAlignRight instead)', () => {
+    // Android mirrors textAlign 'right' on <Text> to the LEFT in the forced-RTL app, while
+    // <TextInput> takes it literally: src/lib/direction.ts resolves both per platform.
+    const ALLOWED = [/library-manager\.tsx: .*writingDirection: 'ltr'/]; // the LTR URL input
+    const offenders = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const f = path.join(dir, e.name);
+        if (e.isDirectory()) walk(f);
+        else if (/\.(tsx?|jsx?)$/.test(e.name) && !f.endsWith(path.join('lib', 'direction.ts'))) {
+          fs.readFileSync(f, 'utf8').split('\n').forEach((line, i) => {
+            const where = `${path.relative(ROOT, f)}: ${line.trim()}`;
+            if (/textAlign:\s*'(right|left)'/.test(line) && !ALLOWED.some((re) => re.test(where))) offenders.push(`${path.relative(ROOT, f)}:${i + 1}`);
+          });
+        }
+      }
+    };
+    walk(path.join(ROOT, 'src'));
+    assert.deepStrictEqual(offenders, [], 'use alignRight (Text) / inputAlignRight (TextInput) from src/lib/direction.ts');
+  });
   await check('TOC columns: fit-to-content widths (slim for short labels, wider for long ones, clamped)', () => {
     const toc = require('../shared/tocColumns');
     const { intToHebrewNumeral } = require('../shared/hebrewTorahDict');

@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent, type ScrollViewInstance } from 'react-native';
 
 import { tabSubtitle } from '../../../shared/tabs';
-import { nativeDir, setWebDir } from '../../lib/direction';
+import { alignRight, nativeDir, setWebDir } from '../../lib/direction';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 import { BottomSheet } from '../Overlay';
@@ -178,9 +178,9 @@ const createStyles = (c: Palette) =>
     },
     tabActive: { backgroundColor: c.accentSoft, borderColor: c.accent, borderWidth: 1.5 },
     tabBody: { flexShrink: 1, justifyContent: 'center' },
-    tabTitle: { fontSize: 13, color: c.textMuted, fontWeight: '600', writingDirection: 'rtl', textAlign: 'right' },
+    tabTitle: { fontSize: 13, color: c.textMuted, fontWeight: '600', ...alignRight },
     tabTitleActive: { color: c.text, fontWeight: '700' },
-    tabSection: { fontSize: 11, color: c.textMuted, writingDirection: 'rtl', textAlign: 'right' },
+    tabSection: { fontSize: 11, color: c.textMuted, ...alignRight },
     tabSectionActive: { color: c.accent },
     close: { paddingHorizontal: 6, paddingVertical: 4 },
     closeText: { fontSize: 17, lineHeight: 18, color: c.textMuted },

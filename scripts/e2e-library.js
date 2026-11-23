@@ -102,6 +102,22 @@ try {
     assert.ok(c1.width >= 400 * 0.42 && c1.width <= 400 * 0.52, `phone: ~2 columns (${c1.width}px)`);
     const crumbs = await tid('library-breadcrumb').innerText();
     assert.ok(crumbs.includes('תנך') && crumbs.includes(subName), `breadcrumb: ${crumbs}`);
+    // Column titles and folder / book names: flush right (text-align + rendered text position).
+    const colText = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid^="library-column-"]')].flatMap((col) => {
+        const cb = col.getBoundingClientRect();
+        return [...col.querySelectorAll('div, span')]
+          .filter((e) => !e.children.length && /[א-ת]{2}/.test(e.innerText || '') && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 60)
+          .map((e) => {
+            const r = document.createRange();
+            r.selectNodeContents(e);
+            const t = r.getBoundingClientRect();
+            return { text: e.innerText.trim(), align: getComputedStyle(e).textAlign, gapRight: cb.right - t.right, gapLeft: t.left - cb.left };
+          });
+      }),
+    );
+    assert.ok(colText.length >= 3, `column labels found (${colText.length})`);
+    for (const t of colText) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft, `"${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
     await shot('columns');
     step(`columns open right-to-left: תנך ‹ ${subName} (${Math.round(c1.width)}px each)`);
 

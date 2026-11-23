@@ -293,6 +293,12 @@ try {
       );
       assert.deepStrictEqual(await groupNames(), expected, `filter "${q}"`);
     };
+    const commentaryAligns = await page.evaluate(() => ({
+      filter: getComputedStyle(document.querySelector('[data-testid="commentary-filter"]')).textAlign,
+      block: [...document.querySelectorAll('[data-testid="commentary-block"]')].map((e) => getComputedStyle(e).textAlign),
+    }));
+    assert.strictEqual(commentaryAligns.filter, 'right', 'commentator filter input right-aligned');
+    assert.ok(commentaryAligns.block.length && commentaryAligns.block.every((a) => a === 'right'), `block breadcrumbs right-aligned (${commentaryAligns.block})`);
     await filterTo('אב"ע', ['אבן עזרא']);
     // A narrow filter opens what it found.
     await card('אבן עזרא').locator('[data-testid="commentary-entry"]').first().waitFor();

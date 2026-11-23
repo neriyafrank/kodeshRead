@@ -19,7 +19,7 @@ import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, V
 
 import { loadCatalog } from '../../shared/sources';
 import { useLibrary } from '../db/LibraryContext';
-import { LEFT_CHEVRON, nativeDir, setWebDir } from '../lib/direction';
+import { LEFT_CHEVRON, alignRight, nativeDir, setWebDir } from '../lib/direction';
 import { useLibraryUi } from '../state/libraryStore';
 import { BookIcon, FolderIcon } from './Icons';
 import { spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
@@ -266,8 +266,7 @@ const createStyles = (c: Palette) =>
       paddingHorizontal: spacing.md,
       paddingVertical: 6,
       backgroundColor: c.surfaceMuted,
-      textAlign: 'right',
-      writingDirection: 'rtl',
+      ...alignRight,
     },
     row: {
       flexDirection: 'row',
@@ -283,12 +282,12 @@ const createStyles = (c: Palette) =>
     rowActive: { backgroundColor: c.accentSoft },
     activeBar: { position: 'absolute', start: 0, top: 0, bottom: 0, width: 3, backgroundColor: c.accent },
     pressed: { opacity: 0.7 },
-    catName: { flex: 1, fontSize: 16, fontWeight: '600', color: c.text, textAlign: 'right', writingDirection: 'rtl' },
+    catName: { flex: 1, fontSize: 16, fontWeight: '600', color: c.text, ...alignRight },
     catRoot: { fontSize: 17, fontWeight: '700' },
     catNameActive: { color: c.accent },
     count: { fontSize: 12, color: c.textMuted },
     chevron: { fontSize: 18, color: c.textMuted, width: 12, textAlign: 'center' },
-    bookTitle: { flex: 1, fontSize: 16, color: c.text, textAlign: 'right', writingDirection: 'rtl' },
+    bookTitle: { flex: 1, fontSize: 16, color: c.text, ...alignRight },
     emptyCol: { padding: spacing.lg, color: c.textMuted, fontSize: 13, textAlign: 'center' },
     empty: { textAlign: 'center', color: c.textMuted, marginTop: spacing.xl },
     crumbBar: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },

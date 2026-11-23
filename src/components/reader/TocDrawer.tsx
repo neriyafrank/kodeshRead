@@ -45,7 +45,7 @@ import {
   type TocTree,
 } from '../../../shared/tocColumns';
 import { useLibrary } from '../../db/LibraryContext';
-import { LEFT_CHEVRON, alignRight, nativeDir, setWebDir } from '../../lib/direction';
+import { LEFT_CHEVRON, alignRight, inputAlignRight, nativeDir, setWebDir } from '../../lib/direction';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 import { SideDrawer } from '../Overlay';
 
@@ -482,7 +482,7 @@ const createStyles = (c: Palette) => ({
       backgroundColor: c.background,
       fontSize: 15,
       color: c.text,
-      ...alignRight,
+      ...inputAlignRight,
     },
     columns: { flexDirection: 'row', justifyContent: 'flex-end', flexGrow: 1 },
     column: { borderStartWidth: StyleSheet.hairlineWidth, borderStartColor: c.border },

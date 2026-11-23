@@ -49,7 +49,7 @@ import { defaultExpandedKeys, filterCommentaries, rankCommentaries, type Ranked 
 import { prepareDisplayText } from '../../../shared/reader';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
-import { nativeDir, setWebDir } from '../../lib/direction';
+import { alignRight, inputAlignRight, nativeDir, setWebDir } from '../../lib/direction';
 import { useCommentaryPrefs } from '../../state/commentaryStore';
 import { COMMENTARY_RATIO, useSettings } from '../../state/settingsStore';
 import { radius, spacing, useAppTheme, type Palette } from '../../theme';
@@ -575,8 +575,8 @@ const createStyles = (c: Palette) =>
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.border,
     },
-    kicker: { fontSize: 15, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
-    where: { fontSize: 12, color: c.textMuted, writingDirection: 'rtl' },
+    kicker: { fontSize: 15, fontWeight: '700', color: c.text, ...alignRight },
+    where: { fontSize: 12, color: c.textMuted, ...alignRight },
     followBtn: {
       paddingHorizontal: spacing.sm,
       height: 28,
@@ -611,7 +611,7 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.surfaceMuted,
       gap: spacing.xs,
     },
-    filterInput: { flex: 1, fontSize: 14, color: c.text, paddingVertical: 0, height: 32, writingDirection: 'rtl', textAlign: 'right' },
+    filterInput: { flex: 1, fontSize: 14, color: c.text, paddingVertical: 0, height: 32, ...inputAlignRight },
     clearText: { fontSize: 13, color: c.textMuted, paddingHorizontal: 2 },
     toggleAll: { height: 32, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRadius: radius.md, backgroundColor: c.accentSoft },
     toggleAllText: { fontSize: 12, fontWeight: '700', color: c.accent },
@@ -667,10 +667,10 @@ const createStyles = (c: Palette) =>
     },
     pinBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
     pinText: { fontSize: 19, color: c.textMuted },
-    blockPath: { fontSize: 12, color: c.textMuted, writingDirection: 'rtl', paddingHorizontal: spacing.md, paddingTop: spacing.sm },
+    blockPath: { fontSize: 12, color: c.textMuted, ...alignRight, paddingHorizontal: spacing.md, paddingTop: spacing.sm },
     entry: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs + 2, gap: 2 },
     entryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs },
-    entryPath: { flex: 1, fontSize: 12, color: c.textMuted, writingDirection: 'rtl' },
+    entryPath: { flex: 1, fontSize: 12, color: c.textMuted, ...alignRight },
     entryOpen: { paddingHorizontal: 4, paddingTop: 2 },
     entryOpenText: { fontSize: 13, color: c.accent, opacity: 0.7 },
     openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 3, borderRadius: radius.sm, backgroundColor: c.accentSoft },
