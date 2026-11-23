@@ -21,6 +21,13 @@
  *                       (default dir: dist/). Upload both files to a GitHub Release.
  *   --release-url=<url> absolute download URL of the .gz to put in the manifest (optional;
  *                       by default the app resolves "file" relative to the manifest URL)
+ *   --scope=<name>      classical_full | all. Walks the books of an Otzaria checkout (the `אוצריא`
+ *                       folder is found below --source) and drops the `links/` folder; classical_full
+ *                       also drops every `מחברי זמננו` (contemporary authors) folder. Used by the
+ *                       cloud build (.github/workflows/build-library.yml).
+ *   --lean              strip the ingestion-only tables (book_units, import_queue) before VACUUM, as
+ *                       --release does, but without writing the .gz (the cloud build zips and splits
+ *                       the DB itself: scripts/cloud-release.js).
  *
  * The parsing / indexing logic lives in shared/indexer.js and is the same code the app
  * runs on the device (src/services/localIndexer.ts).
@@ -37,6 +44,7 @@ const zlib = require('zlib');
 const { pipeline } = require('stream/promises');
 const indexer = require('../shared/indexer');
 const { aliasKey } = require('../shared/hebrew');
+const libraryScope = require('../shared/libraryScope');
 
 const { SCHEMA_VERSION } = indexer;
 const ROOT = path.resolve(__dirname, '..');
@@ -47,7 +55,7 @@ const MANIFEST_FORMAT = 1;
 // CLI
 // ---------------------------------------------------------------------------
 function parseArgs(argv) {
-  const args = { source: 'sample', out: path.join(ROOT, 'assets/db/library.db'), links: undefined, ifMissing: false, release: null, releaseUrl: null };
+  const args = { source: 'sample', out: path.join(ROOT, 'assets/db/library.db'), links: undefined, ifMissing: false, release: null, releaseUrl: null, scope: null, lean: false };
   for (const a of argv) {
     const m = /^--([^=]+)(?:=(.*))?$/.exec(a);
     if (!m) continue;
@@ -58,6 +66,8 @@ function parseArgs(argv) {
     else if (k === 'if-missing') args.ifMissing = true;
     else if (k === 'release') args.release = path.resolve(v || path.join(ROOT, 'dist'));
     else if (k === 'release-url') args.releaseUrl = v;
+    else if (k === 'scope') args.scope = libraryScope.assertScope(v);
+    else if (k === 'lean') args.lean = true;
     else if (k === 'help') args.help = true;
     else throw new Error(`Unknown option --${k}`);
   }
@@ -237,13 +247,22 @@ async function main() {
   await indexer.ensureSchema(db, { kind: 'core' });
 
   const overrides = loadAliasOverrides(args.sourceDir);
-  const hash = crypto.createHash('sha1').update(`v${SCHEMA_VERSION}|${args.source}|`);
+  const hash = crypto.createHash('sha1').update(`v${SCHEMA_VERSION}|${args.source}|${args.scope || ''}|`);
   for (const f of ['shared/hebrew.js', 'shared/indexer.js', 'shared/refAlign.js', 'shared/pairing.js']) hash.update(fs.readFileSync(path.join(ROOT, f)));
   hash.update(fs.readFileSync(__filename));
   hash.update(JSON.stringify(overrides));
 
-  const tree = await indexer.scanBooks(nodeFs, args.sourceDir);
-  const bookStats = await indexer.indexBooks(db, nodeFs, {
+  // Cloud builds: walk only the books folder, minus the folders the scope leaves out.
+  let fsa = nodeFs;
+  let booksDir = args.sourceDir;
+  if (args.scope) {
+    booksDir = libraryScope.findBooksRoot(fs, path, args.sourceDir);
+    fsa = libraryScope.scopedFs(nodeFs, args.scope);
+    console.log(`[build-db] scope ${args.scope}: books folder ${path.relative(args.sourceDir, booksDir) || '.'}`);
+  }
+  const tree = await indexer.scanBooks(fsa, booksDir);
+  if (args.scope) console.log(`[build-db] scope ${args.scope}: ${fsa.stats.excluded} folder(s) left out (${[...fsa.stats.excludedNames].slice(0, 8).join(', ') || 'none'}), ${tree.files.length} book file(s) kept`);
+  const bookStats = await indexer.indexBooks(db, fsa, {
     files: tree.files,
     dirs: tree.dirs,
     idBase: 0,
@@ -283,7 +302,7 @@ async function main() {
     toc_nodes: counts.tocNodes,
   });
   // book_units / import_queue only serve ingestion: the downloadable release ships without them.
-  if (args.release) raw.exec('DELETE FROM book_units; DELETE FROM import_queue;');
+  if (args.release || args.lean) raw.exec('DELETE FROM book_units; DELETE FROM import_queue;');
   raw.exec('PRAGMA optimize; VACUUM;');
   raw.close();
 

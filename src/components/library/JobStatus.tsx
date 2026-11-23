@@ -1,6 +1,7 @@
 /** Live progress of the running library job (bar + stage + detail + cancel) and its result. */
 import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { isolateLtr } from '../../lib/direction';
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 import { ErrorDetails } from './ErrorDetails';
@@ -43,7 +44,7 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
           <Text style={s.bannerText} numberOfLines={1}>
             {job.stage}
             {pct}
-            {job.detail ? ` · ${job.detail}` : ''}
+            {job.detail ? ` · ${isolateLtr(job.detail)}` : ''}
           </Text>
           <ProgressBar fraction={job.fraction} />
         </Pressable>
@@ -70,7 +71,7 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
         <ProgressBar fraction={job.fraction} />
         {job.detail ? (
           <Text style={s.detail} numberOfLines={2}>
-            {job.detail}
+            {isolateLtr(job.detail)}
           </Text>
         ) : null}
         {job.resumable ? <Text style={s.hint}>ההתקדמות נשמרת אחרי כל ספר — אפשר להשהות ולהמשיך גם אחרי סגירת האפליקציה.</Text> : null}

@@ -464,6 +464,32 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
   closed or reset automatically.
 * Upgrading from a pre-M5 build: the old copied `library.db` is adopted as `core_library.db`.
 
+## Cloud library (GitHub Actions, multi-part release)
+
+No PC needed: the **Build cloud library** workflow (`.github/workflows/build-library.yml`, *Run workflow*) indexes
+the Otzaria library on a GitHub runner and publishes it to the `library-latest` release.
+
+Inputs: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`) and `library_scope`
+(`classical_full` default: every folder except the contemporary authors' `מחברי זמננו`; or `all`).
+
+Pipeline (each step deletes its input first, so the runner never holds two multi-GB copies; 35 GB free are enforced):
+`scripts/ci/fetch-otzaria-source.sh` (release zip(s) of the source repo, else the repository tarball streamed into `tar`)
+→ `build-db.js --scope=… --lean` → source deleted → `cloud-release.js validate` (`PRAGMA integrity_check`, books /
+paragraphs / `paragraphs_fts` / `ref_links` non-empty) → `core_library.db.zip` (deflate) → DB deleted → 1.5 GB parts
+`core_library.db.zip.part-01…` (under GitHub's 2 GB per-file limit) → zip deleted → `library-manifest.json`
+(`sourceRepo, scope, version, builtAt, bookCount, paragraphCount, uncompressedDbBytes, totalZipBytes, fullZipSha256,
+parts[{name,sizeBytes,sha256}]`) → release upload (old manifest removed first, new manifest last).
+
+In the app: *ניהול ספרייה ועדכונים* → **הורד ספרייה מוכנה מהענן**. The card shows books, size, parts and build date, warns
+when free storage is below zip + extracted DB + 500 MB, and downloads the parts one by one
+(`חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%`). Valid parts already on disk (size + SHA-256) are skipped after a dropped
+connection or restart; parts are appended into one zip in 1 MB chunks (each deleted once appended), verified against
+`fullZipSha256`, streamed into `core_library.db.tmp`, checked (`PRAGMA quick_check` + meta) and installed with the
+awaited `File.move()` swap. Logic: `shared/multipart.js` (self-tested), UI `src/components/library/CloudLibraryCard.tsx`.
+
+`paragraphs_fts` is already an FTS5 *external-content* table (`content='paragraphs_fts_source'`), so paragraph text is
+stored once; `npm test` asserts it returns the same rows as a duplicated-content table at ~1/4 of the FTS storage.
+
 ## Publishing a library release
 
 Build the full library on a PC (Node ≥ 22.13) and upload two files to a GitHub Release.

@@ -51,3 +51,9 @@ export const alignRight = (Platform.OS === 'web' ? { textAlign: 'right', writing
  * would put the text on the LEFT of an input.
  */
 export const inputAlignRight = { textAlign: 'right', writingDirection: 'rtl' } as const;
+
+/**
+ * Wraps each number (with its unit / percent sign) in an LTR isolate so "1.4 GB / 3.2 GB · 44%" keeps
+ * its order inside a Hebrew line instead of being reshuffled by the bidi algorithm.
+ */
+export const isolateLtr = (text: string) => text.replace(/\d[\d.,]*(?: ?(?:GB|MB|KB|%))?/g, (m) => `\u2066${m}\u2069`);

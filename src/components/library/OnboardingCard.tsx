@@ -5,7 +5,6 @@ import { useRouter } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { isWeb } from '../../db/library';
-import { useLibraryActions } from '../../services/libraryActions';
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { useLibrarySettings } from '../../state/libraryStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
@@ -13,14 +12,12 @@ import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
   const s = useThemedStyles(createStyles);
   const router = useRouter();
-  const actions = useLibraryActions();
   const busy = useLibraryJobs((x) => !!x.job);
   const dismiss = useLibrarySettings((x) => x.dismissOnboarding);
 
-  const download = () => {
-    router.navigate('/library-manager');
-    void actions.downloadCore();
-  };
+  // The multi-GB cloud library starts from the manager's cloud card, after it showed the size, the
+  // build date and the free-storage check.
+  const download = () => router.navigate('/library-manager');
 
   return (
     <View style={s.card} testID="onboarding-card">
@@ -35,9 +32,9 @@ export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
       <Text style={s.body}>
         הספרייה אינה כלולה בהתקנה כדי שהאפליקציה תישאר קלה. בחרו איך להביא ספרים — אפשר תמיד לשנות בהמשך ממסך ״ניהול ספרייה ועדכונים״.
       </Text>
-      <Pressable onPress={download} disabled={busy || isWeb} style={({ pressed }) => [s.primary, (busy || isWeb) && s.disabled, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-download">
+      <Pressable onPress={download} disabled={busy} style={({ pressed }) => [s.primary, busy && s.disabled, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-download">
         <Text style={s.primaryText}>☁︎  הורד ספרייה מוכנה מהענן</Text>
-        <Text style={s.hint}>ספריית אוצריא המלאה, מאונדקסת לחיפוש — קובץ דחוס אחד</Text>
+        <Text style={s.hint}>ספריית אוצריא מאונדקסת לחיפוש — מורדת בחלקים, אפשר להמשיך אחרי הפסקה</Text>
       </Pressable>
       <Pressable onPress={() => router.navigate('/library-manager')} style={({ pressed }) => [s.secondary, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-import">
         <Text style={s.secondaryText}>📁  ייבא ספרים מהמכשיר</Text>

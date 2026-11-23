@@ -95,6 +95,15 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `bookIdsCondition`) is one `book_id IN (...)` condition in FTS5 and the web fallback; chips: `ScopeChips.tsx`.
 > Daf/amud spellings (`דף ב, א`, `דף ב - עמוד ב`, `ע"ב`, `דף ב עמוד א.`) normalize in `refAlign.unitLabels`.
 
+> **Cloud library (multi-part release):** `.github/workflows/build-library.yml` (workflow_dispatch: `source_repo`,
+> `library_scope` = `classical_full` | `all`) builds `core_library.db` on a runner (`scripts/ci/fetch-otzaria-source.sh`,
+> `build-db.js --scope --lean`, `scripts/cloud-release.js validate|manifest`), zips it, splits it into 1.5 GB
+> `core_library.db.zip.part-NN` and publishes them with `library-manifest.json` to the `library-latest` release. The app
+> side is `shared/multipart.js` (manifest validation, resumable part download, streaming assembly, extraction;
+> pure, io-injected) + `src/services/cloudLibrary.ts` + `CloudLibraryCard.tsx`. `paragraphs_fts` was already an
+> external-content table (no duplicated text). Scope filter: `shared/libraryScope.js`. Self-tested (section 12) and
+> covered by `e2e:library` (mocked 2-chunk release over in-memory storage).
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

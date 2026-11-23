@@ -11,6 +11,11 @@
  * card, personal library untouched) and restoring it on reload. Downloading, verifying
  * and indexing are covered in Node by `npm test`.
  *
+ * Cloud library (multi-part release `library-latest`): the browser has no file system, so the test
+ * mocks library-manifest.json and two tiny zip chunks (page.route) and runs the real pipeline over
+ * in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): the "הורד ספרייה מוכנה מהענן" card, the
+ * low-storage warning, "חלק 2 מתוך 2 · … · 50%" progress while part 2 is in flight, and the install.
+ *
  * Also the Library screen's "לימוד יומי" bar ("today" pinned to 2026-05-25, the week after a
  * Shabbat Shavuot: ארץ ישראל reads בהעלותך, חו"ל still נשא): Hebrew date, the persisted ארץ
  * ישראל / חו"ל switch changing the parsha, missing books greyed, and a tap opening the aliyah.
@@ -18,6 +23,8 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
+const { zipSync } = require('fflate');
 
 const BASE = process.env.E2E_URL || 'http://localhost:8081';
 const shotsArg = process.argv.find((a) => a.startsWith('--shots='));
@@ -39,6 +46,39 @@ try {
   page.on('dialog', (d) => d.accept());
   await page.addInitScript(() => {
     globalThis.__KODESHREAD_TODAY__ = '2026-05-25';
+    globalThis.__KODESHREAD_E2E_CLOUD__ = true;
+    const free = Number(sessionStorage.getItem('e2e.freeBytes'));
+    if (free) globalThis.__KODESHREAD_FREE_BYTES__ = free;
+  });
+
+  // --- mocked multi-part cloud release (2 small chunks of a real zip of a fake SQLite file) ---
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  const fakeDb = Buffer.concat([Buffer.from('SQLite format 3\0'), crypto.randomBytes(48 * 1024)]);
+  const zip = Buffer.from(zipSync({ 'core_library.db': new Uint8Array(fakeDb) }, { level: 6 }));
+  const half = Math.ceil(zip.length / 2);
+  const chunks = [zip.subarray(0, half), zip.subarray(half)];
+  const cloudManifest = {
+    sourceRepo: 'Sivan22/otzaria-library',
+    scope: 'classical_full',
+    version: 'cloud-e2e-1',
+    builtAt: '2026-11-20T10:00:00.000Z',
+    bookCount: 7674,
+    paragraphCount: 1234567,
+    uncompressedDbBytes: fakeDb.length,
+    totalZipBytes: zip.length,
+    fullZipSha256: sha(zip),
+    parts: chunks.map((c, i) => ({ name: `core_library.db.zip.part-0${i + 1}`, sizeBytes: c.length, sha256: sha(c) })),
+  };
+  const cloudRequests = [];
+  await page.route('**/releases/download/library-latest/**', async (route) => {
+    const name = decodeURIComponent(route.request().url().split('/').pop());
+    const cors = { 'access-control-allow-origin': '*' };
+    if (name === 'library-manifest.json') return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(cloudManifest) });
+    const i = cloudManifest.parts.findIndex((p) => p.name === name);
+    if (i < 0) return route.fulfill({ status: 404, headers: cors, body: '' });
+    cloudRequests.push(name);
+    if (i === 1) await new Promise((r) => setTimeout(r, 2500)); // part 2 is "in flight" while the test reads the progress
+    return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body: chunks[i] });
   });
   const tid = (id) => page.locator(`[data-testid="${id}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
@@ -66,6 +106,52 @@ try {
     assert.strictEqual(await tid('import-files').getAttribute('aria-disabled'), 'true', 'import disabled on web');
     await shot('manager');
     step('manager shows installed core library + release URL');
+
+    // --- Cloud library card (multi-part release) -------------------------------------------------
+    await tid('cloud-library-card').waitFor();
+    await tid('cloud-info').waitFor();
+    const cloudInfo = (await tid('cloud-info').innerText()).replace(/[\u2066-\u2069]/g, ''); // bidi isolates are invisible
+    assert.ok(/ספרים\s*7,674/.test(cloudInfo), cloudInfo);
+    assert.ok(/2 חלקים/.test((await tid('cloud-size').innerText()).replace(/[\u2066-\u2069]/g, '')), await tid('cloud-size').innerText());
+    assert.ok(/נבנתה/.test(cloudInfo) && /cloud-e2e-1/.test(cloudInfo) && /ספרות קלאסית/.test(cloudInfo), cloudInfo);
+    assert.ok((await tid('cloud-download').innerText()).includes('הורד ספרייה מוכנה מהענן'));
+    assert.notStrictEqual(await tid('cloud-download').getAttribute('aria-disabled'), 'true', 'enabled in the e2e preview');
+    assert.strictEqual(await tid('cloud-storage-warning').count(), 0, 'no warning while the storage is unknown');
+    const cloudAlign = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="cloud-library-card"]');
+      const card = el.getBoundingClientRect();
+      return [...el.querySelectorAll('div')]
+        .filter((e) => !e.children.length && /[א-ת]{3}/.test(e.innerText || '') && e.getBoundingClientRect().width > 120)
+        .map((e) => {
+          const r = document.createRange();
+          r.selectNodeContents(e);
+          return { text: e.innerText.trim().slice(0, 24), align: getComputedStyle(e).textAlign, gapRight: card.right - r.getBoundingClientRect().right, gapLeft: r.getBoundingClientRect().left - card.left };
+        });
+    });
+    assert.ok(cloudAlign.length >= 3, `cloud card labels (${cloudAlign.length})`);
+    for (const t of cloudAlign) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft + 1, `"${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
+    await shot('cloud-card');
+    step('cloud card: manifest read (books, size, parts, build date), RTL right-aligned');
+
+    // Download: part 1 completes, part 2 is in flight (progress), then assembly, extraction, install.
+    await tid('cloud-download').last().click();
+    await tid('job-status').waitFor();
+    await page.waitForFunction(
+      () => /חלק 2 מתוך 2 · \d+ (KB|MB) \/ \d+ (KB|MB) · \d+%/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[⁦-⁩]/g, '')),
+      null,
+      { timeout: 15000 },
+    );
+    const progressText = await tid('job-status').innerText();
+    assert.ok(/מוריד/.test(progressText), progressText);
+    await shot('cloud-progress');
+    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02'], 'parts are fetched sequentially');
+    await tid('job-result').waitFor({ timeout: 30000 });
+    const cloudDone = await tid('job-result').innerText();
+    assert.ok(cloudDone.includes('הותקנה מהענן') && cloudDone.includes('cloud-e2e-1') && cloudDone.includes('7,674'), cloudDone);
+    assert.strictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), 'cloud-e2e-1', 'the staged library reached the install step');
+    await shot('cloud-installed');
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    step('cloud download: חלק 1 → חלק 2 מתוך 2 progress, assemble + extract, install');
 
     // Failure card: the exact sub-step + native error, and "copy error details".
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
@@ -103,6 +189,12 @@ try {
     assert.ok((await tid('onboarding-import').innerText()).includes('ייבא ספרים מהמכשיר'));
     await shot('onboarding');
     step('onboarding card offers download / import');
+
+    await tid('onboarding-download').click();
+    await tid('cloud-library-card').waitFor();
+    step('onboarding "הורד ספרייה מוכנה מהענן" opens the manager with the cloud card (no blind multi-GB download)');
+    await page.goBack();
+    await tid('onboarding-card').waitFor();
 
     await tid('onboarding-import').click();
     await tid('library-manager').waitFor();
@@ -317,6 +409,60 @@ try {
     await page.waitForTimeout(300);
     assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()));
     step('טעמים / ניקוד toggles: independent, linked, persisted');
+
+    // --- Cloud card: storage warning + themes (reloads: after the remove-core flow, see the web-preview quirk above) ---
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await tid('open-library-manager').last().waitFor({ timeout: 180000 });
+    await tid('open-library-manager').last().click();
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
+    // Low free storage: warn clearly (zip + extracted DB + 500 MB), still allow "continue anyway".
+    const need = cloudManifest.totalZipBytes + cloudManifest.uncompressedDbBytes + 500 * 1024 * 1024;
+    await page.evaluate((v) => sessionStorage.setItem('e2e.freeBytes', String(v)), need - 1024);
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await tid('open-library-manager').last().click();
+    await tid('cloud-storage-warning').waitFor();
+    const warn = await tid('cloud-storage-warning').innerText();
+    assert.ok(/אין מספיק מקום פנוי/.test(warn) && /500 MB/.test(warn.replace(/[\u2066-\u2069]/g, '')), warn);
+    await shot('cloud-warning');
+    step('cloud card warns when free space < zip + DB + 500 MB');
+    await page.evaluate(() => sessionStorage.removeItem('e2e.freeBytes'));
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await tid('open-library-manager').last().click();
+    await tid('cloud-info').waitFor();
+    assert.strictEqual(await tid('cloud-storage-warning').count(), 0);
+
+    // Themes: the card follows the palette.
+    const cardBg = () => tid('cloud-library-card').last().evaluate((el) => getComputedStyle(el).backgroundColor);
+    const lightBg = await cardBg();
+    await page.evaluate(() => {
+      const k = 'kodeshread.appearance';
+      const v = JSON.parse(localStorage.getItem(k) || '{"state":{},"version":1}');
+      v.state.theme = 'dark';
+      localStorage.setItem(k, JSON.stringify(v));
+    });
+    await page.reload();
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
+    const darkBg = await cardBg();
+    assert.notStrictEqual(darkBg, lightBg, `card background follows the theme (${lightBg} / ${darkBg})`);
+    await shot('cloud-dark');
+    await page.evaluate(() => {
+      const k = 'kodeshread.appearance';
+      const v = JSON.parse(localStorage.getItem(k));
+      v.state.theme = 'sepia';
+      localStorage.setItem(k, JSON.stringify(v));
+    });
+    await page.reload();
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
+    assert.notStrictEqual(await cardBg(), lightBg, 'sepia differs from light');
+    await page.evaluate(() => {
+      const k = 'kodeshread.appearance';
+      const v = JSON.parse(localStorage.getItem(k));
+      v.state.theme = 'light';
+      localStorage.setItem(k, JSON.stringify(v));
+    });
+    await page.reload();
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
+    step('cloud card in בהיר / ספיה / כהה');
 
     // --- "לימוד יומי" bar ------------------------------------------------------------------------
     const last = (id) => tid(id).last();

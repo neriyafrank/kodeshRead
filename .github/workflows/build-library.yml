@@ -1,0 +1,153 @@
+name: Build cloud library
+
+# Indexes the Otzaria library into core_library.db in the cloud and publishes it as a multi-part
+# GitHub Release (`library-latest`) that the app downloads and installs on the phone
+# (Library manager -> "הורד ספרייה מוכנה מהענן").
+#
+#   source archive -> build-db.js -> (source deleted) -> validate -> core_library.db.zip
+#   -> (db deleted) -> 1.5 GB parts -> (zip deleted) -> library-manifest.json -> release
+#
+# GitHub Releases rejects files of 2 GB and more, hence the parts; every step deletes its input
+# before the next one starts, so the runner never holds two multi-GB copies.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: Otzaria library repository to index
+        type: choice
+        default: Sivan22/otzaria-library
+        options:
+          - Sivan22/otzaria-library
+          - Otzaria/otzaria-library
+      library_scope:
+        description: classical_full = classical Torah corpora without מחברי זמננו; all = every folder
+        type: choice
+        default: classical_full
+        options:
+          - classical_full
+          - all
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-cloud-library
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: library-latest
+  GH_TOKEN: ${{ github.token }}
+  # split -b 1500M = 1.5 GiB parts: strictly below GitHub's 2 GiB per-asset limit.
+  PART_SIZE: 1500M
+  WORK: /mnt/library-work
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h / /mnt
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/nonexistent}" /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell || true
+          sudo apt-get clean || true
+          docker system prune -af >/dev/null 2>&1 || true
+          sudo mkdir -p "$WORK" && sudo chown "$USER" "$WORK"
+          echo "--- after cleanup"
+          df -h / /mnt
+          free_root=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          free_work=$(df -BG --output=avail "$WORK" | tail -1 | tr -dc '0-9')
+          echo "free: / ${free_root} GB, $WORK ${free_work} GB"
+          if [ "$free_work" -lt 35 ]; then echo "::error::less than 35 GB free for the build"; exit 1; fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 # node:sqlite (FTS5) needs >= 22.13
+
+      - name: Fetch source (${{ inputs.source_repo }})
+        run: bash scripts/ci/fetch-otzaria-source.sh "${{ inputs.source_repo }}" "$WORK/src" "${{ inputs.library_scope }}"
+
+      - name: Index the library (core_library.db)
+        run: |
+          set -euo pipefail
+          node scripts/build-db.js --source="$WORK/src" --scope="${{ inputs.library_scope }}" --lean --out="$WORK/core_library.db"
+          # The text files and the downloaded archives are not needed any more.
+          rm -rf "$WORK/src"
+          df -h "$WORK" | tail -1
+
+      - name: Validate the database
+        run: node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
+
+      - name: Compress (deflate .zip)
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          zip -9 -q core_library.db.zip core_library.db
+          rm -f core_library.db core_library.db-journal core_library.db-wal core_library.db-shm
+          ls -l core_library.db.zip
+          unzip -tq core_library.db.zip
+
+      - name: Split into 1.5 GB parts
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          mkdir parts
+          # -d -a 2 --numeric-suffixes=1: core_library.db.zip.part-01, part-02, ...
+          split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1 core_library.db.zip parts/core_library.db.zip.part-
+          rm -f core_library.db.zip
+          ls -l parts
+          if find parts -type f -size +2000M | grep -q .; then echo "::error::a part is 2 GB or larger"; exit 1; fi
+
+      - name: Write library-manifest.json
+        run: |
+          set -euo pipefail
+          node scripts/cloud-release.js manifest --stats="$WORK/stats.json" --parts-dir="$WORK/parts" \
+            --source-repo="${{ inputs.source_repo }}" --scope="${{ inputs.library_scope }}" \
+            --out="$WORK/library-manifest.json"
+          cat "$WORK/library-manifest.json"
+
+      - name: Publish release ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          version=$(node -p "require('./library-manifest.json').version")
+          notes="Pre-indexed core library (${{ inputs.source_repo }}, scope ${{ inputs.library_scope }}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --notes "$notes" --latest=false
+            # Unpublish the old manifest first: no client pairs it with half-replaced parts.
+            gh release delete-asset "$RELEASE_TAG" library-manifest.json -y || true
+          else
+            gh release create "$RELEASE_TAG" --title "Cloud library (latest)" --notes "$notes" --latest=false --target "$GITHUB_SHA"
+          fi
+          for f in parts/core_library.db.zip.part-*; do
+            for attempt in 1 2 3; do
+              if gh release upload "$RELEASE_TAG" "$f" --clobber; then break; fi
+              [ "$attempt" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
+              sleep $((attempt * 20))
+            done
+          done
+          # Drop parts of an older, longer build.
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep '^core_library\.db\.zip\.part-' | while read -r a; do
+            [ -f "parts/$a" ] || gh release delete-asset "$RELEASE_TAG" "$a" -y
+          done
+          # The manifest goes last: it is what makes the new version visible to the app.
+          gh release upload "$RELEASE_TAG" library-manifest.json --clobber
+
+      - name: Summary
+        run: |
+          {
+            echo "### Cloud library published"
+            echo
+            echo "Release: \`${RELEASE_TAG}\` · source \`${{ inputs.source_repo }}\` · scope \`${{ inputs.library_scope }}\`"
+            echo
+            echo '```json'
+            node -e "const m=require('$WORK/library-manifest.json');console.log(JSON.stringify({version:m.version,books:m.bookCount,paragraphs:m.paragraphCount,zipMB:Math.round(m.totalZipBytes/1048576),dbMB:Math.round(m.uncompressedDbBytes/1048576),parts:m.parts.length},null,2))"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

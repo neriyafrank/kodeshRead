@@ -704,6 +704,8 @@ async function main() {
   // 4. Milestone 5: personal library + core/user router + release artifacts ---------
   await dualDbTests();
   await releaseTests();
+  // 12. Cloud library: external-content FTS parity, classical_full scope, multi-part download.
+  await cloudLibraryTests();
   await resumableIngestionTests();
   await refAlignTests();
   await otzariaSampleTests();
@@ -2521,6 +2523,376 @@ async function dualDbTests() {
   } finally {
     core.close();
     u.raw.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Cloud library (section 12): external-content FTS parity, the classical_full scope filter of
+ * build-db.js, the multi-part manifest / resumable download / streaming assembly, the CI manifest
+ * writer and the workflow file itself.
+ */
+async function cloudLibraryTests() {
+  const http = require('http');
+  const mp = require('../shared/multipart');
+  const libraryScope = require('../shared/libraryScope');
+  const cloudRelease = require('./cloud-release');
+  const { zipSync } = require('fflate');
+  const SAMPLE_DB = path.join(ROOT, 'assets/db/library.db');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-'));
+  const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+  const writable = (file) => {
+    const origEmit = process.emitWarning;
+    process.emitWarning = (w, ...r) => (String(w).includes('SQLite') ? undefined : origEmit.call(process, w, ...r));
+    const { DatabaseSync } = require('node:sqlite');
+    process.emitWarning = origEmit;
+    return new DatabaseSync(file);
+  };
+  try {
+    // --- external-content FTS --------------------------------------------------------------------
+    await check('fts: paragraphs_fts is an external-content table (no second copy of the text)', () => {
+      const src = writable(SAMPLE_DB);
+      try {
+        const ddl = src.prepare("SELECT sql FROM sqlite_master WHERE name = 'paragraphs_fts'").get().sql;
+        assert.ok(/content\s*=\s*'paragraphs_fts_source'/.test(ddl), ddl);
+        const shadows = src.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'paragraphs_fts\\_%' ESCAPE '\\' ORDER BY name").all().map((r) => r.name);
+        assert.ok(!shadows.includes('paragraphs_fts_content'), `no _content shadow table: ${shadows}`);
+        assert.ok(shadows.includes('paragraphs_fts_data') && shadows.includes('paragraphs_fts_docsize'), shadows.join(','));
+      } finally {
+        src.close();
+      }
+    });
+    await check('fts: external-content results are identical to a duplicated-content FTS5 table, and smaller', () => {
+      const copy = path.join(tmp, 'parity.db');
+      fs.copyFileSync(SAMPLE_DB, copy);
+      const db = writable(copy);
+      try {
+        db.exec('PRAGMA journal_mode = OFF');
+        db.exec(`CREATE VIRTUAL TABLE fts_dup USING fts5(clean_text, book_id UNINDEXED, category_path UNINDEXED, line_index UNINDEXED)`);
+        db.exec('INSERT INTO fts_dup(rowid, clean_text, book_id, category_path, line_index) SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source');
+        const words = db.prepare("SELECT clean_text FROM paragraphs ORDER BY id LIMIT 400").all().flatMap((r) => r.clean_text.split(/\s+/)).filter((w) => w.length > 2);
+        const probe = [...new Set(words)].slice(0, 60);
+        assert.ok(probe.length >= 30, `${probe.length} probe words`);
+        let hits = 0;
+        const queries = [...probe.map((w) => `"${w}"`), ...probe.slice(0, 20).map((w) => `"${w}"*`), `"${probe[0]}" "${probe[1]}"`, `"${probe[2]}" OR "${probe[3]}"`, `NEAR("${probe[4]}" "${probe[5]}", 5)`];
+        for (const q of queries) {
+          const a = db.prepare('SELECT rowid FROM paragraphs_fts WHERE paragraphs_fts MATCH ? ORDER BY rowid').all(q).map((r) => r.rowid);
+          const b = db.prepare('SELECT rowid FROM fts_dup WHERE fts_dup MATCH ? ORDER BY rowid').all(q).map((r) => r.rowid);
+          assert.deepStrictEqual(a, b, `query ${q}`);
+          hits += a.length;
+        }
+        assert.ok(hits > 50, `${hits} total hits`);
+        // The FTS5 consistency command compares the index with the content view.
+        db.exec("INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES('integrity-check', 1)");
+        const bytes = (t) => Number(db.prepare("SELECT SUM(pgsize) AS n FROM dbstat WHERE name LIKE ?").get(t).n || 0);
+        const ext = bytes('paragraphs_fts%');
+        const dup = bytes('fts_dup%');
+        assert.ok(ext > 0 && dup > ext, `external ${ext} < duplicated ${dup}`);
+        console.log(`  FTS5 storage: external-content ${(ext / 1024).toFixed(0)} KB vs duplicated ${(dup / 1024).toFixed(0)} KB; ${hits} hits identical`);
+      } finally {
+        db.close();
+      }
+    });
+
+    // --- scope filter -----------------------------------------------------------------------------
+    await check('scope: classical_full drops מחברי זמננו (and links), all keeps modern authors', () => {
+      assert.ok(libraryScope.isExcludedDir('classical_full', 'מחברי זמננו') && libraryScope.isExcludedDir('classical_full', 'מחברי זמנינו'));
+      assert.ok(!libraryScope.isExcludedDir('all', 'מחברי זמננו') && libraryScope.isExcludedDir('all', 'links'));
+      assert.ok(!libraryScope.isExcludedDir('classical_full', 'תנך') && !libraryScope.isExcludedDir('classical_full', 'ראשונים'));
+      assert.throws(() => libraryScope.assertScope('everything'), /--scope must be/);
+
+      const src = path.join(tmp, 'checkout');
+      const w = (rel, lines) => {
+        const f = path.join(src, ...rel.split('/'));
+        fs.mkdirSync(path.dirname(f), { recursive: true });
+        fs.writeFileSync(f, lines.join('\n'));
+      };
+      w('repo/אוצריא/תנך/בראשית.txt', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '(א) בראשית ברא אלהים']);
+      w('repo/אוצריא/תנך/מחברי זמננו/ביאור מודרני על בראשית.txt', ['<h1>ביאור מודרני על בראשית</h1>', '<h2>פרק א</h2>', 'הערה מודרנית']);
+      w('repo/אוצריא/תלמוד בבלי/מחברי זמנינו/חברותא על ברכות.txt', ['<h1>חברותא על ברכות</h1>', '<h2>דף ב.</h2>', 'חברותא']);
+      w('repo/אוצריא/תלמוד בבלי/ברכות.txt', ['<h1>ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי קורין']);
+      w('repo/links/ברכות.txt', ['<h1>קישורים</h1>', 'לא ספר']);
+      w('repo/README.txt', ['not a book']);
+      const build = (scope, out) =>
+        spawnSync(process.execPath, [path.join(ROOT, 'scripts/build-db.js'), `--source=${src}`, `--scope=${scope}`, '--lean', `--out=${out}`], { encoding: 'utf8' });
+      const titles = (file) => {
+        const db = writable(file);
+        try {
+          return db.prepare('SELECT title FROM books ORDER BY title').all().map((r) => r.title);
+        } finally {
+          db.close();
+        }
+      };
+      const classical = build('classical_full', path.join(tmp, 'classical.db'));
+      assert.strictEqual(classical.status, 0, classical.stderr + classical.stdout);
+      assert.ok(/left out/.test(classical.stdout), classical.stdout);
+      assert.deepStrictEqual(titles(path.join(tmp, 'classical.db')), ['בראשית', 'ברכות']);
+      const all = build('all', path.join(tmp, 'all.db'));
+      assert.strictEqual(all.status, 0, all.stderr);
+      assert.deepStrictEqual(titles(path.join(tmp, 'all.db')), ['ביאור מודרני על בראשית', 'בראשית', 'ברכות', 'חברותא על ברכות']);
+      // --lean ships without the ingestion-only tables' rows.
+      const db = writable(path.join(tmp, 'classical.db'));
+      try {
+        assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM book_units').get().n, 0);
+        assert.strictEqual(db.prepare('SELECT COUNT(*) AS n FROM import_queue').get().n, 0);
+      } finally {
+        db.close();
+      }
+      const bad = build('modern_only', path.join(tmp, 'bad.db'));
+      assert.notStrictEqual(bad.status, 0);
+      assert.ok(/--scope must be/.test(bad.stderr), bad.stderr);
+      // The CI validator refuses a library without commentary alignment (ref_links empty).
+      assert.throws(() => cloudRelease.validateDb(path.join(tmp, 'classical.db')), /ref_links is empty/);
+    });
+
+    // --- multi-part manifest, download, assembly -----------------------------------------------------
+    const dbBytes = fs.readFileSync(SAMPLE_DB);
+    const zipPath = path.join(tmp, 'core_library.db.zip');
+    const zipped = spawnSync('zip', ['-q', '-9', '-j', zipPath, SAMPLE_DB], { encoding: 'utf8' });
+    let zipBuf;
+    if (zipped.status === 0) {
+      // Info-ZIP (what the workflow runs) renames the entry to the DB's own name: normalise to core_library.db.
+      zipBuf = fs.readFileSync(zipPath);
+    } else {
+      zipBuf = Buffer.from(zipSync({ 'core_library.db': new Uint8Array(dbBytes) }, { level: 9 }));
+    }
+    const named = spawnSync('unzip', ['-l', zipPath], { encoding: 'utf8' });
+    if (zipped.status === 0 && named.status === 0 && !/library\.db/.test(named.stdout)) throw new Error('zip entry missing');
+    const partSize = Math.ceil(zipBuf.length / 3);
+    const slices = [0, 1, 2].map((i) => zipBuf.subarray(i * partSize, (i + 1) * partSize));
+    const partsDir = path.join(tmp, 'ci-parts');
+    fs.mkdirSync(partsDir);
+    slices.forEach((b, i) => fs.writeFileSync(path.join(partsDir, mp.partName(i + 1)), b));
+    const stats = { version: 'v-test', builtAt: '2026-01-01T00:00:00.000Z', bookCount: 15, paragraphCount: 9106, uncompressedDbBytes: dbBytes.length };
+    const manifest = await cloudRelease.buildManifest({ stats, partsDir, sourceRepo: 'Sivan22/otzaria-library', scope: 'classical_full' });
+
+    await check('multipart: CI manifest has the documented fields, ordered parts and the whole-zip hash', () => {
+      assert.deepStrictEqual(Object.keys(manifest), ['sourceRepo', 'scope', 'version', 'builtAt', 'bookCount', 'paragraphCount', 'uncompressedDbBytes', 'totalZipBytes', 'fullZipSha256', 'parts']);
+      assert.strictEqual(manifest.parts.length, 3);
+      assert.deepStrictEqual(manifest.parts.map((p) => p.name), ['core_library.db.zip.part-01', 'core_library.db.zip.part-02', 'core_library.db.zip.part-03']);
+      assert.strictEqual(manifest.totalZipBytes, zipBuf.length);
+      assert.strictEqual(manifest.fullZipSha256, sha(zipBuf));
+      manifest.parts.forEach((p, i) => assert.deepStrictEqual([p.sizeBytes, p.sha256], [slices[i].length, sha(slices[i])]));
+      assert.strictEqual(mp.validateCloudManifest(JSON.parse(JSON.stringify(manifest))).parts.length, 3);
+    });
+    await check('multipart: manifest validation rejects unusable manifests', () => {
+      const bad = (patch, re) => assert.throws(() => mp.validateCloudManifest({ ...manifest, ...patch }), re);
+      bad({ parts: [] }, /no "parts"/);
+      bad({ totalZipBytes: manifest.totalZipBytes + 1 }, /add up/);
+      bad({ fullZipSha256: 'xyz' }, /fullZipSha256/);
+      bad({ parts: [manifest.parts[1], manifest.parts[0], manifest.parts[2]] }, /out of order|unexpected name/);
+      bad({ parts: [{ ...manifest.parts[0], name: 'other.bin' }, ...manifest.parts.slice(1)] }, /unexpected name/);
+      bad({ parts: [{ ...manifest.parts[0], sizeBytes: 2 * 1024 ** 3 }, ...manifest.parts.slice(1)], totalZipBytes: 2 * 1024 ** 3 + manifest.parts[1].sizeBytes + manifest.parts[2].sizeBytes }, /2 GB/);
+      bad({ version: '' }, /version/);
+      assert.strictEqual(mp.partUrl('https://github.com/o/r/releases/download/library-latest/library-manifest.json?x=1', manifest.parts[1]), 'https://github.com/o/r/releases/download/library-latest/core_library.db.zip.part-02');
+      assert.strictEqual(mp.cloudManifestUrl('o/r'), 'https://github.com/o/r/releases/download/library-latest/library-manifest.json');
+    });
+    await check('multipart: free-space rule is zip + extracted DB + 500 MB, and the progress label', () => {
+      const m = { ...manifest, totalZipBytes: 3.2 * 1024 ** 3, uncompressedDbBytes: 7 * 1024 ** 3 };
+      const need = m.totalZipBytes + m.uncompressedDbBytes + 500 * 1024 * 1024;
+      assert.strictEqual(mp.requiredFreeBytes(m), need);
+      assert.strictEqual(mp.checkFreeSpace(m, need).ok, true);
+      assert.strictEqual(mp.checkFreeSpace(m, need - 1).ok, false);
+      assert.strictEqual(mp.checkFreeSpace(m, null).ok, true);
+      assert.strictEqual(mp.formatPartProgress({ partIndex: 2, partCount: 3, doneBytes: 1.4 * 1024 ** 3, totalBytes: 3.2 * 1024 ** 3 }), 'חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 43%');
+      assert.strictEqual(mp.formatPartProgress({ partIndex: 1, partCount: 1, doneBytes: 5 * 1024 ** 2, totalBytes: 10 * 1024 ** 2 }), 'חלק 1 מתוך 1 · 5 MB / 10 MB · 50%');
+    });
+
+    // A local "GitHub release": serves the parts, counts requests, can corrupt / drop a part once.
+    const hits = [];
+    const behaviour = { corruptOnce: new Set(), dropOnce: new Set() };
+    const server = http.createServer((req, res) => {
+      const name = decodeURIComponent(req.url.split('/').pop());
+      const i = manifest.parts.findIndex((p) => p.name === name);
+      if (i < 0) return res.writeHead(404).end();
+      hits.push(name);
+      let body = slices[i];
+      if (behaviour.corruptOnce.delete(name)) {
+        body = Buffer.from(body);
+        body[10] ^= 0xff;
+      }
+      res.writeHead(200, { 'content-length': body.length });
+      if (behaviour.dropOnce.delete(name)) {
+        res.write(body.subarray(0, Math.floor(body.length / 2)));
+        return setTimeout(() => res.destroy(), 10);
+      }
+      res.end(body);
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}/releases/download/library-latest/`;
+    const manifestUrl = base + 'library-manifest.json';
+
+    /** node:fs backend of the PartsIO contract. */
+    const fsIO = (dir) => {
+      const p = (n) => path.join(dir, n);
+      return {
+        size: (n) => (fs.existsSync(p(n)) ? fs.statSync(p(n)).size : null),
+        remove: (n) => fs.rmSync(p(n), { force: true }),
+        sha256: (n) => cloudRelease.sha256Files([p(n)]),
+        download: (url, n, onProgress) =>
+          new Promise((resolve, reject) => {
+            http.get(url, (res) => {
+              if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+              const out = fs.createWriteStream(p(n));
+              let got = 0;
+              res.on('data', (c) => onProgress((got += c.length), Number(res.headers['content-length'])));
+              res.on('aborted', () => out.destroy(new Error('connection dropped')));
+              res.on('error', reject);
+              res.pipe(out);
+              out.on('finish', () => (res.complete ? resolve() : reject(new Error('connection dropped'))));
+              out.on('error', reject);
+            }).on('error', reject);
+          }),
+        openRead: (n) => {
+          const fd = fs.openSync(p(n), 'r');
+          let at = 0;
+          return {
+            read: async (k) => {
+              const buf = Buffer.alloc(k);
+              const got = fs.readSync(fd, buf, 0, k, at);
+              at += got;
+              return buf.subarray(0, got);
+            },
+            close: () => fs.closeSync(fd),
+          };
+        },
+        openWrite: (n, append) => {
+          const fd = fs.openSync(p(n), append ? 'a' : 'w');
+          return { write: async (b) => void fs.writeSync(fd, b), close: () => fs.closeSync(fd) };
+        },
+      };
+    };
+    const fresh = (name) => {
+      const d = path.join(tmp, name);
+      fs.mkdirSync(d, { recursive: true });
+      return { dir: d, io: fsIO(d) };
+    };
+    try {
+      await check('multipart: download -> streaming assembly -> extraction is byte-exact; parts and zip are deleted', async () => {
+        hits.length = 0;
+        const { dir, io } = fresh('run-a');
+        const seen = [];
+        await mp.stageCloudLibrary(io, manifest, { manifestUrl, dbName: 'core_library.db.tmp', report: (r) => seen.push(r) });
+        assert.ok(fs.readFileSync(path.join(dir, 'core_library.db.tmp')).equals(dbBytes), 'extracted DB equals the original');
+        assert.deepStrictEqual(fs.readdirSync(dir), ['core_library.db.tmp'], 'no part and no zip left behind');
+        assert.deepStrictEqual(hits, manifest.parts.map((p) => p.name));
+        const labels = seen.map((r) => r.detail).filter((d) => /^חלק \d מתוך 3/.test(d || ''));
+        assert.ok(labels.some((d) => d.startsWith('חלק 1 מתוך 3')) && labels.some((d) => d.startsWith('חלק 3 מתוך 3')) && labels[labels.length - 1].endsWith('100%'), labels.join(' | '));
+        assert.ok(seen.some((r) => r.stage === 'מרכיב את החלקים…') && seen.some((r) => r.stage === 'מחלץ…'));
+      });
+      await check('multipart: valid parts on disk are skipped, a truncated one is re-downloaded (resume)', async () => {
+        hits.length = 0;
+        const { dir, io } = fresh('run-b');
+        fs.writeFileSync(path.join(dir, manifest.parts[0].name), slices[0]); // complete
+        fs.writeFileSync(path.join(dir, manifest.parts[1].name), slices[1].subarray(0, 100)); // connection dropped mid-part
+        const progress = [];
+        const r = await mp.downloadParts(io, manifest, { manifestUrl, onProgress: (p) => progress.push(p) });
+        assert.deepStrictEqual(r, { downloaded: 2, skipped: 1 });
+        assert.deepStrictEqual(hits, [manifest.parts[1].name, manifest.parts[2].name], 'part 1 was not requested again');
+        assert.ok(progress[0].skipped && progress[0].doneBytes === manifest.parts[0].sizeBytes);
+        // A second run finds everything valid and downloads nothing.
+        hits.length = 0;
+        assert.deepStrictEqual(await mp.downloadParts(io, manifest, { manifestUrl }), { downloaded: 0, skipped: 3 });
+        assert.strictEqual(hits.length, 0);
+      });
+      await check('multipart: a same-size corrupt part (bad SHA-256) is deleted and fetched again', async () => {
+        hits.length = 0;
+        const { dir, io } = fresh('run-c');
+        const bad = Buffer.from(slices[0]);
+        bad[5] ^= 0xff;
+        fs.writeFileSync(path.join(dir, manifest.parts[0].name), bad);
+        behaviour.corruptOnce.add(manifest.parts[1].name); // served corrupt once, then fine
+        const r = await mp.downloadParts(io, manifest, { manifestUrl });
+        assert.deepStrictEqual(r, { downloaded: 3, skipped: 0 });
+        assert.deepStrictEqual(hits, [manifest.parts[0].name, manifest.parts[1].name, manifest.parts[1].name, manifest.parts[2].name]);
+        for (const [i, p] of manifest.parts.entries()) assert.ok(fs.readFileSync(path.join(dir, p.name)).equals(slices[i]));
+      });
+      await check('multipart: a dropped connection is retried; retries exhausted -> readable error, parts kept', async () => {
+        const a = fresh('run-d');
+        behaviour.dropOnce.add(manifest.parts[2].name);
+        assert.deepStrictEqual(await mp.downloadParts(a.io, manifest, { manifestUrl }), { downloaded: 3, skipped: 0 });
+        const b = fresh('run-e');
+        behaviour.corruptOnce.add(manifest.parts[1].name);
+        await assert.rejects(() => mp.downloadParts(b.io, manifest, { manifestUrl, retries: 0 }), /פגום/);
+        assert.ok(fs.existsSync(path.join(b.dir, manifest.parts[0].name)), 'the good part 1 is kept for the next run');
+        assert.ok(!fs.existsSync(path.join(b.dir, manifest.parts[1].name)), 'the corrupt part is gone');
+        const c = fresh('run-f');
+        await assert.rejects(() => mp.downloadParts(c.io, { ...manifest, parts: [{ ...manifest.parts[0], name: 'core_library.db.zip.part-09' }, ...manifest.parts.slice(1)] }, { manifestUrl, retries: 1 }), /HTTP 404/);
+      });
+      await check('multipart: cancel stops between chunks of work; the next run resumes', async () => {
+        const { dir, io } = fresh('run-g');
+        let n = 0;
+        await assert.rejects(() => mp.downloadParts(io, manifest, { manifestUrl, isCancelled: () => ++n > 1 }), /cancelled/);
+        assert.ok(fs.existsSync(path.join(dir, manifest.parts[0].name)));
+        hits.length = 0;
+        assert.deepStrictEqual(await mp.downloadParts(io, manifest, { manifestUrl }), { downloaded: 2, skipped: 1 });
+      });
+      await check('multipart: assembly appends in 1 MB-or-smaller chunks (never one big buffer) and verifies the whole-zip SHA-256', async () => {
+        const { dir, io } = fresh('run-h');
+        manifest.parts.forEach((p, i) => fs.writeFileSync(path.join(dir, p.name), slices[i]));
+        const writes = [];
+        const spy = { ...io, openWrite: (n, a) => { const w = io.openWrite(n, a); return { write: (b) => { writes.push(b.length); return w.write(b); }, close: () => w.close() }; } };
+        await mp.assembleParts(spy, manifest, 'core_library.db.zip', { chunkSize: 4096 });
+        assert.ok(Math.max(...writes) <= 4096 && writes.length > 3, `max chunk ${Math.max(...writes)}, ${writes.length} writes`);
+        assert.ok(fs.readFileSync(path.join(dir, 'core_library.db.zip')).equals(zipBuf));
+        assert.deepStrictEqual(fs.readdirSync(dir), ['core_library.db.zip'], 'parts deleted after assembly');
+        // A wrong archive hash removes the zip.
+        const h = fresh('run-i');
+        manifest.parts.forEach((p, i) => fs.writeFileSync(path.join(h.dir, p.name), slices[i]));
+        await assert.rejects(() => mp.assembleParts(h.io, { ...manifest, fullZipSha256: '0'.repeat(64) }, 'core_library.db.zip'), /SHA-256/);
+        assert.ok(!fs.existsSync(path.join(h.dir, 'core_library.db.zip')));
+      });
+      await check('multipart: a wrong extracted size is rejected and the partial DB removed', async () => {
+        const { dir, io } = fresh('run-j');
+        fs.writeFileSync(path.join(dir, 'core_library.db.zip'), zipBuf);
+        await assert.rejects(() => mp.extractZip(io, { ...manifest, uncompressedDbBytes: dbBytes.length + 1 }, 'core_library.db.zip', 'core_library.db.tmp'), /שונה מהצפוי/);
+        assert.ok(!fs.existsSync(path.join(dir, 'core_library.db.tmp')));
+      });
+      await check('multipart: the in-memory backend (browser e2e) runs the same pipeline over fetch', async () => {
+        const io = mp.createMemoryIO();
+        await mp.stageCloudLibrary(io, manifest, { manifestUrl, dbName: 'core_library.db.tmp' });
+        assert.ok(Buffer.from(io.files.get('core_library.db.tmp')).equals(dbBytes));
+        assert.deepStrictEqual([...io.files.keys()], ['core_library.db.tmp']);
+      });
+    } finally {
+      server.close();
+    }
+
+    await check('cloud-release: validate accepts a real library (integrity, books, paragraphs, FTS, ref_links)', () => {
+      const s = cloudRelease.validateDb(SAMPLE_DB);
+      assert.ok(s.bookCount > 0 && s.paragraphCount > 0 && s.refLinkCount > 0 && s.version && s.uncompressedDbBytes === dbBytes.length);
+    });
+
+    await check('workflow: build-library.yml has the inputs and the streaming disk pipeline in order', () => {
+      const file = path.join(ROOT, '.github/workflows/build-library.yml');
+      const text = fs.readFileSync(file, 'utf8');
+      let doc;
+      try {
+        doc = require('js-yaml').load(text);
+      } catch (e) {
+        if (e.code === 'MODULE_NOT_FOUND') doc = null;
+        else throw e;
+      }
+      if (doc) {
+        const wd = (doc.on || doc.true).workflow_dispatch.inputs; // YAML 1.1 reads the key `on` as true
+        assert.deepStrictEqual(wd.source_repo.options, ['Sivan22/otzaria-library', 'Otzaria/otzaria-library']);
+        assert.strictEqual(wd.source_repo.default, 'Sivan22/otzaria-library');
+        assert.deepStrictEqual(wd.library_scope.options, ['classical_full', 'all']);
+        assert.strictEqual(wd.library_scope.default, 'classical_full');
+        assert.strictEqual(doc.permissions.contents, 'write');
+      }
+      const at = (needle) => {
+        const i = text.indexOf(needle);
+        assert.ok(i >= 0, `workflow lacks: ${needle}`);
+        return i;
+      };
+      assert.ok(text.includes('/usr/share/dotnet') && text.includes('/usr/local/lib/android') && text.includes('/opt/ghc'));
+      const order = ['Free disk space', 'fetch-otzaria-source.sh', 'scripts/build-db.js', 'rm -rf "$WORK/src"', 'cloud-release.js validate', 'zip -9', 'rm -f core_library.db core_library.db-journal', 'split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1', 'rm -f core_library.db.zip', 'cloud-release.js manifest', 'gh release upload "$RELEASE_TAG" library-manifest.json'].map(at);
+      assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), 'steps run in the documented order');
+      assert.ok(/PART_SIZE: 1500M/.test(text) && text.includes('RELEASE_TAG: library-latest') && text.includes('--scope="${{ inputs.library_scope }}"'));
+      assert.ok(text.includes('-lt 35'), '35 GB free-space guard');
+    });
+  } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }

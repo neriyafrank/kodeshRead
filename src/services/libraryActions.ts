@@ -21,6 +21,8 @@ import { useLibrary, useLibraryController } from '../db/LibraryContext';
 import { CORE_BUILD_DB } from '../db/library';
 import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
+import type { CloudManifest } from '../../shared/multipart';
+import { clearCloudParts, downloadAndStageCloud, isPreviewCloudDownload, stageCloudForPreview } from './cloudLibrary';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
 import * as importService from './importForegroundService';
 import {
@@ -244,6 +246,23 @@ export function useLibraryActions() {
           useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: null });
           await ctl.installCore();
           return `ספריית הליבה הותקנה (גרסה ${version})`;
+        }),
+
+      /**
+       * Multi-part cloud library (library-latest): resumable part download -> assemble -> extract ->
+       * validate -> atomic install (shared/multipart.js, src/services/cloudLibrary.ts).
+       */
+      downloadCloud: (manifest: CloudManifest, manifestUrl: string) =>
+        runJob('download', 'מתחיל הורדה…', async () => {
+          const preview = isPreviewCloudDownload();
+          const version = preview ? await stageCloudForPreview(manifest, manifestUrl) : await downloadAndStageCloud(manifest, manifestUrl);
+          useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: null });
+          if (preview) (globalThis as { __kodeshreadCloudInstalled?: string }).__kodeshreadCloudInstalled = version;
+          else {
+            await ctl.installCore();
+            clearCloudParts();
+          }
+          return `ספריית הליבה הותקנה מהענן (גרסה ${version}): ${manifest.bookCount.toLocaleString('he-IL')} ספרים`;
         }),
 
       /** Builds core_library.db on the device from a picked Otzaria folder (resumes the same folder). */

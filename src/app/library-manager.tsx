@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { USER_ROOT_NAME } from '../../shared/sources';
+import { CloudLibraryCard } from '../components/library/CloudLibraryCard';
 import { JobStatus } from '../components/library/JobStatus';
 import { PersonalBooks } from '../components/library/PersonalBooks';
 import { ResumeCards } from '../components/library/ResumeCard';
@@ -110,6 +111,9 @@ export default function LibraryManagerScreen() {
       <View style={s.resumeWrap}>
         <ResumeCards />
       </View>
+
+      {/* ---------------- cloud library (multi-part release) ---------------- */}
+      <CloudLibraryCard />
 
       {/* ---------------- core library ---------------- */}
       <Text style={s.sectionTitle}>ספריית הליבה</Text>
