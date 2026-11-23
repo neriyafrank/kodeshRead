@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * End-to-end check of the reader's tab management and the cascading-columns TOC (web preview).
+ * End-to-end check of the reader's tab management, the cascading-columns TOC, and commentary
+ * favorites (⭐) following a commentator across books and tabs (web preview).
  *
  *   npm run web                          # terminal 1 (Metro on :8081, sample DB)
  *   npm run e2e:reader [-- --shots=DIR]  # terminal 2
@@ -172,6 +173,49 @@ try {
     await tid('tabs-close-all-confirm').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.length === 0);
     step('switcher: close all (with confirmation)');
+
+    // --- commentary favorites follow the commentator across books / tabs ---------------------
+    const drawerNames = () => page.locator('[data-testid="commentary-group-name"]').allInnerTexts();
+    const openDrawer = async (minGroups) => {
+      await tid('para-3').waitFor({ timeout: 20000 });
+      if (!(await page.locator('[data-testid="commentary-pane"]').count())) await tid('para-3').click();
+      await page.waitForFunction((n) => document.querySelectorAll('[data-testid="commentary-group"]').length >= n, minGroups, { timeout: 10000 });
+    };
+    const pinOf = (name) =>
+      page.locator('[data-testid="commentary-group"]', { has: page.locator(`[data-testid="commentary-group-name"]:text-is('${name}')`) }).locator('[data-testid="commentary-pin"]');
+    await page.evaluate(() => localStorage.removeItem('kodeshread.commentary'));
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await tid('quick-jump-input').waitFor({ timeout: 180000 });
+    await tid('quick-jump-input').fill('בראשית א');
+    await page.locator('[data-testid="quick-jump-result"]', { hasText: 'בראשית' }).first().click();
+    await openDrawer(8);
+    assert.strictEqual((await drawerNames())[0], 'אונקלוס', 'Tanach: Onkelos heads the core list');
+    await pinOf('רמב"ן').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="commentary-group-name"]')?.innerText === 'רמב"ן');
+    // Another book (Bavli, its own Otzaria title "רש"י על שבת"): the ⭐ on רש"י follows the commentator.
+    await pinOf('רש"י').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].map((e) => e.innerText).slice(0, 2).join('|') === 'רמב"ן|רש"י');
+    await tid('reader-back').click();
+    await tid('quick-jump-input').fill('שבת ב.');
+    await page.locator('[data-testid="quick-jump-result"]', { hasText: 'שבת' }).first().click();
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await openDrawer(2);
+    assert.deepStrictEqual(await drawerNames(), ['רש"י', 'תוספות']);
+    assert.strictEqual(await pinOf('רש"י').getAttribute('aria-pressed'), 'true', 'רש"י is a favorite in שבת too');
+    assert.strictEqual(await pinOf('תוספות').getAttribute('aria-pressed'), 'false');
+    // Pin תוספות here too: favorites keep their pin order (רש"י was pinned first)...
+    await pinOf('תוספות').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-pin"][aria-pressed="true"]').length === 2);
+    assert.deepStrictEqual(await drawerNames(), ['רש"י', 'תוספות']);
+    await shot('r7-commentary-pins');
+    // ...and back in the בראשית tab the favorites still lead, in pin order.
+    await page.locator('[data-testid^="tab-"][aria-selected]', { hasText: 'בראשית' }).last().click();
+    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('בראשית'));
+    await openDrawer(8);
+    assert.deepStrictEqual((await drawerNames()).slice(0, 3), ['רמב"ן', 'רש"י', 'אונקלוס']);
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.commentary')).state.pinned), ['רמבנ', 'רשי', 'תוספות']);
+    await tid('commentary-close').click();
+    step('commentary ⭐ favorites persist and follow the commentator across books and tabs');
 
     // --- tablet: docked TOC stays open after a jump -------------------------------------------
     await page.setViewportSize({ width: 1180, height: 820 });

@@ -38,6 +38,7 @@ const release = require('../shared/release');
 const dict = require('../shared/hebrewTorahDict');
 const quickJump = require('../shared/quickJump');
 const refAlign = require('../shared/refAlign');
+const rank = require('../shared/commentaryRank');
 
 const ROOT = path.resolve(__dirname, '..');
 let failures = 0;
@@ -117,7 +118,10 @@ async function main() {
     const e = (book_id, book_title, line, link_type) => ({ book_id, book_title, line, link_type, display_text: '', toc_path: null, category_path: null });
     const g = commentary.groupLinkedEntries([e(9, 'אונקלוס על בראשית', 3, 'targum'), e(5, 'רש"י על בראשית', 4, 'commentary'), e(5, 'רש"י על בראשית', 3, 'commentary'), e(2, 'ברכות', 1, 'reference')]);
     assert.deepStrictEqual(g.map((x) => [x.name, x.entries.map((y) => y.line)]), [['רש"י', [3, 4]], ['אונקלוס', [3]], ['ברכות', [1]]]);
+    // Notes on a commentary keep their parent's name (they are not the parent).
+    assert.strictEqual(commentary.commentatorName('הערות על רשי על בראשית'), 'הערות על רשי');
   });
+  await commentaryRankTests();
 
   await check('reader: prepareDisplayText (BiDi RLM, safe HTML, niqqud)', () => {
     const RLM = reader.RLM;
@@ -483,10 +487,20 @@ async function main() {
       const rashi = groups[0].bookId;
       const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, rashi, groups[0].entries[0].line));
       assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries[0].line]), [['שבת', 3]]);
-      // Commentaries rank before translations (Onkelos is a targum).
+      // Grouping: commentaries before translations (Onkelos is a targum), then library order;
+      // each group carries its folder (corpus + era for the drawer's ranking).
       const bereshit = (await db.all("SELECT id FROM books WHERE title='בראשית'", []))[0].id;
       const bg = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db, bereshit, 3));
-      assert.deepStrictEqual(bg.map((g) => g.name), ['רש"י', 'אונקלוס']);
+      assert.strictEqual(bg.length, 8);
+      assert.strictEqual(bg[bg.length - 1].name, 'אונקלוס');
+      assert.strictEqual(bg.find((g) => g.name === 'רמב"ן').categoryPath, 'תנך/מפרשים/ראשונים');
+      // Drawer order (shared/commentaryRank.js): the Tanach core list, then ראשונים before אחרונים.
+      const ranked = rank.rankCommentaries(bg, { context: { title: 'בראשית' } });
+      assert.deepStrictEqual(
+        ranked.map((g) => [g.displayName, g.tier]),
+        [['אונקלוס', 'עיקריים'], ['רש"י', 'עיקריים'], ['רמב"ן', 'עיקריים'], ['אבן עזרא', 'עיקריים'], ['ספורנו', 'עיקריים'], ['מלבי"ם', 'עיקריים'], ['דעת זקנים', 'ראשונים'], ['גור אריה', 'אחרונים']],
+      );
+      assert.deepStrictEqual([...rank.defaultExpandedKeys(ranked)], ['אונקלוס', 'רשי', 'רמבנ']);
     });
     await check('sample: commentary books do not hijack Quick Jump', async () => {
       await expectJump(db, index, 'שבת ב.', 'שבת', await line('שבת', 'דף ב.'));
@@ -1796,7 +1810,7 @@ async function releaseTests() {
       assert.strictEqual(db.length, manifest.dbSize);
       assert.strictEqual(crypto.createHash('sha256').update(db).digest('hex'), manifest.dbSha256);
       const v = release.validateManifest(manifest, indexer.SCHEMA_VERSION);
-      assert.strictEqual(v.books, 9);
+      assert.strictEqual(v.books, fs.readdirSync(path.join(ROOT, 'raw_library', 'sample'), { recursive: true }).filter((f) => String(f).endsWith('.txt')).length);
       const meta = await indexer.readMeta(openDb(out));
       assert.strictEqual(meta.db_version, manifest.version);
     } finally {
@@ -2202,6 +2216,196 @@ async function otzariaIndexPipelineTests() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** shared/commentaryRank.js: corpus-aware priority, pins, era fallback, groups and the name filter. */
+async function commentaryRankTests() {
+  // Real Otzaria titles and folders (otzaria_index_only.txt): no gershayim in file titles.
+  const item = (bookTitle, categoryPath, linkType = 'commentary') => ({ bookId: bookTitle.length * 31 + categoryPath.length, bookTitle, categoryPath, linkType });
+  const names = (ranked) => ranked.map((r) => r.displayName);
+  const shuffle = (a) => a.map((x, i) => [((i * 7919) % 13) + i / 100, x]).sort((p, q) => p[0] - q[0]).map((p) => p[1]);
+
+  const TANACH = [
+    item('גור אריה על בראשית', 'תנך/אחרונים/גור אריה/תורה'),
+    item('הערות על מלבים על בראשית', 'תנך/אחרונים/מלבים/תורה'),
+    item('אור המאיר על בראשית', 'תנך/אחרונים/אור המאיר'),
+    item('דעת זקנים על בראשית', 'תנך/ראשונים/דעת זקנים/תורה'),
+    item('ר סעדיה גאון על בראשית', 'תנך/ראשונים/ר\' סעדיה גאון/תורה'),
+    item('מלבים על בראשית', 'תנך/אחרונים/מלבים/תורה'),
+    item('כלי יקר על בראשית', 'תנך/אחרונים/כלי יקר/תורה'),
+    item('אור החיים על בראשית', 'תנך/אחרונים/אור החיים/תורה'),
+    item('בעל הטורים על בראשית', 'תנך/ראשונים/בעל הטורים/תורה'),
+    item('ספורנו על בראשית', 'תנך/ראשונים/ספורנו/תורה'),
+    item('אבן עזרא על בראשית', 'תנך/ראשונים/אבן עזרא/תורה'),
+    item('רמבן על בראשית', 'תנך/ראשונים/רמבן/תורה'),
+    item('רשי על בראשית', 'תנך/ראשונים/רשי/תורה'),
+    item('תרגום יונתן על בראשית', 'תנך/תרגומים/תרגום יונתן/תורה', 'targum'),
+    item('תרגום אונקלוס על בראשית', 'תנך/תרגומים/תרגום אונקלוס/תורה', 'targum'),
+    item('ביאור מודרני על בראשית', 'תנך/מחברי זמננו/ביאור מודרני'),
+    item('תרגום ערבי על בראשית', 'תנך/תרגומים/תרגום ערבי', 'targum'),
+  ];
+  await check('commentary rank: Tanach core list first, in canonical order (any input order)', () => {
+    for (const input of [TANACH, shuffle(TANACH), TANACH.slice().reverse()]) {
+      const r = rank.rankCommentaries(input);
+      assert.strictEqual(r[0].corpus, 'tanach');
+      assert.deepStrictEqual(names(r), [
+        'אונקלוס', 'תרגום יונתן', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'אור החיים', 'כלי יקר', 'בעל הטורים', 'מלבי"ם',
+        // era fallback: תרגומים -> ראשונים -> אחרונים -> מחברי זמננו, alphabetical inside a tier
+        'תרגום ערבי', 'דעת זקנים', 'ר סעדיה גאון', 'אור המאיר', 'גור אריה', 'הערות על מלבים', 'ביאור מודרני',
+      ]);
+      assert.deepStrictEqual(r.map((x) => x.tier).slice(9), ['עיקריים', 'תרגומים', 'ראשונים', 'ראשונים', 'אחרונים', 'אחרונים', 'אחרונים', 'נוספים']);
+    }
+  });
+  await check('commentary rank: pinned favorites override everything, in pin order', () => {
+    const r = rank.rankCommentaries(TANACH, { pinned: ['גור אריה', rank.commentatorKey('אבן עזרא')] });
+    assert.deepStrictEqual(names(r).slice(0, 4), ['גור אריה', 'אבן עזרא', 'אונקלוס', 'תרגום יונתן']);
+    assert.ok(r[0].pinned && r[1].pinned && !r[2].pinned);
+    assert.strictEqual(r[0].tier, 'אחרונים', 'a pinned commentary keeps its own tier badge');
+    // Keys are canonical for core commentators: a ⭐ on רש"י holds for "רשי על שבת" too.
+    assert.strictEqual(rank.commentatorKey('רש"י'), 'רשי');
+    const b = rank.rankCommentaries([item('תוספות על שבת', 'תלמוד בבלי/ראשונים/תוספות/סדר מועד'), item('רשי על שבת', 'תלמוד בבלי/ראשונים/רשי/סדר מועד')], { pinned: ['תוספות'] });
+    assert.deepStrictEqual(names(b), ['תוספות', 'רש"י']);
+    // Default expansion: favorites + the top 3 others; short lists open entirely.
+    const d = rank.defaultExpandedKeys(r);
+    assert.deepStrictEqual([...d], ['גור אריה', 'אבנ עזרא', 'אונקלוס', 'תרגומ יונתנ', 'רשי']);
+    assert.strictEqual(rank.defaultExpandedKeys(b).size, 2);
+  });
+
+  await check('commentary rank: Bavli (רש"י, תוספות, ראשונים before אחרונים, notes and look-alikes are not core)', () => {
+    const r = rank.rankCommentaries(shuffle([
+      item('בן יהוידע על שבת', 'תלמוד בבלי/אחרונים/בן יהוידע'),
+      item('רשימות שיעורים על שבת', 'תלמוד בבלי/מחברי זמננו/רשימות שיעורים/סדר מועד'),
+      item('חברותא על שבת', 'תלמוד בבלי/מחברי זמננו/ביאור חברותא'),
+      item('הערות על חברותא על שבת', 'תלמוד בבלי/מחברי זמננו/הערות על ביאור חברותא'),
+      item('ביאור שטיינזלץ על שבת', 'תלמוד בבלי/מחברי זמננו/ביאור שטיינזלץ/סדר מועד'),
+      item('פני יהושע על שבת', 'תלמוד בבלי/אחרונים/פני יהושע'),
+      item('חכמת שלמה על שבת', 'תלמוד בבלי/אחרונים/חכמת שלמה/סדר מועד'),
+      item('פסקי תוספות על שבת', 'תלמוד בבלי/ראשונים/פסקי תוספות/סדר מועד'),
+      item('רשבא על שבת', 'תלמוד בבלי/ראשונים/רשבא/סדר מועד'),
+      item('רן על שבת', 'תלמוד בבלי/ראשונים/ריף/מפרשים/רן'),
+      item('גליון השס על שבת', 'תלמוד בבלי/אחרונים/גליון השס/סדר מועד'),
+      item('תוספות על שבת', 'תלמוד בבלי/ראשונים/תוספות/סדר מועד'),
+      item('רשי על שבת', 'תלמוד בבלי/ראשונים/רשי/סדר מועד'),
+      item('ריטבא על שבת', 'תלמוד בבלי/ראשונים/ריטבא/סדר מועד'),
+      item('מאירי על שבת', 'תלמוד בבלי/ראשונים/מאירי/סדר מועד'),
+      item('יד רמה על שבת', 'תלמוד בבלי/ראשונים/יד רמה'),
+    ]));
+    assert.strictEqual(r[0].corpus, 'bavli');
+    assert.deepStrictEqual(names(r), [
+      'רש"י', 'תוספות', 'ר"ן', 'רשב"א', 'ריטב"א', 'מאירי', 'חכמת שלמה', 'פני יהושע', 'שטיינזלץ', 'חברותא',
+      'יד רמה', 'פסקי תוספות', 'בן יהוידע', 'גליון השס', 'הערות על חברותא', 'רשימות שיעורים',
+    ]);
+    assert.ok(!r.find((x) => x.displayName === 'פסקי תוספות').core);
+  });
+
+  await check('commentary rank: Mishnah (ברטנורא, תוי"ט, רמב"ם; "יכין <מסכת>" without על)', () => {
+    const r = rank.rankCommentaries(shuffle([
+      item('הון עשיר על משנה ברכות', 'משנה/אחרונים/הון עשיר/סדר זרעים'),
+      item('תוספות רבי עקיבא איגר על משנה ברכות', 'משנה/אחרונים/תוספות רבי עקיבא איגר/סדר זרעים'),
+      item('מלאכת שלמה על משנה ברכות', 'משנה/אחרונים/מלאכת שלמה/סדר זרעים'),
+      item('יכין ברכות', 'משנה/אחרונים/יכין/סדר זרעים'),
+      item('בועז על משנה ברכות', 'משנה/אחרונים/בועז/סדר זרעים'),
+      item('רמבם על משנה ברכות', 'משנה/ראשונים/רמבם/סדר זרעים'),
+      item('עיקר תוספות יום טוב על משנה ברכות', 'משנה/אחרונים/עיקר תוספות יום טוב/סדר זרעים'),
+      item('תוספות יום טוב על משנה ברכות', 'משנה/אחרונים/תוספות יום טוב/סדר זרעים'),
+      item('ברטנורא על משנה ברכות', 'משנה/ראשונים/ברטנורא/סדר זרעים'),
+      item('משנת ארץ ישראל על משנה ברכות', 'משנה/מחברי זמננו/משנת ארץ ישראל/סדר זרעים'),
+    ]));
+    assert.strictEqual(r[0].corpus, 'mishna');
+    assert.deepStrictEqual(names(r), ['ברטנורא', 'תוספות יום טוב', 'עיקר תוספות יום טוב', 'רמב"ם', 'יכין', 'בועז', 'מלאכת שלמה', 'הון עשיר', 'תוספות רבי עקיבא איגר', 'משנת ארץ ישראל']);
+  });
+
+  await check('commentary rank: Rambam and Yerushalmi core lists', () => {
+    const ram = rank.rankCommentaries(shuffle([
+      item('אבן האזל על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/אבן האזל/ספר זמנים'),
+      item('אור שמח על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/אור שמח/ספר זמנים'),
+      item('כסף משנה על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/כסף משנה/ספר זמנים'),
+      item('מגיד משנה על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים'),
+      item('השגות הראבד על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/השגות הראבד/ספר זמנים'),
+      item('משנה למלך על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/משנה למלך/ספר זמנים'),
+      item('לחם משנה על משנה תורה, הלכות שבת', 'הלכה/משנה תורה/מפרשים/לחם משנה/ספר זמנים'),
+    ]));
+    assert.strictEqual(ram[0].corpus, 'rambam');
+    assert.deepStrictEqual(names(ram), ['השגות הראב"ד', 'מגיד משנה', 'כסף משנה', 'לחם משנה', 'משנה למלך', 'אור שמח', 'אבן האזל']);
+    const yer = rank.rankCommentaries([
+      item('נועם ירושלמי על ברכות', 'תלמוד ירושלמי/מפרשים/נועם ירושלמי/סדר זרעים'),
+      item('מראה הפנים על תלמוד ירושלמי ברכות', 'תלמוד ירושלמי/מפרשים/מראה הפנים על תלמוד ירושלמי/סדר זרעים'),
+      item('פני משה על תלמוד ירושלמי ברכות', 'תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי/סדר זרעים'),
+    ]);
+    assert.strictEqual(yer[0].corpus, 'yerushalmi');
+    assert.deepStrictEqual(names(yer), ['פני משה', 'מראה הפנים', 'נועם ירושלמי']);
+  });
+
+  const SA = [
+    item('אשל אברהם על שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/אשל אברהם'),
+    item('באר היטב אורח חיים', 'הלכה/שולחן ערוך/מפרשים/באר היטב'),
+    item('ביאור הגרא על שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/ביאור הגרא'),
+    item('טורי זהב על שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/טורי זהב'),
+    item('מגן אברהם', 'הלכה/שולחן ערוך/מפרשים/מגן אברהם'),
+    item('משנה ברורה', 'הלכה/שולחן ערוך/מפרשים/משנה ברורה'),
+    item('דגול מרבבה על שלחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/דגול מרבבה'),
+    item('כף החיים על שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/כף החיים'),
+    item('אליה רבה על שלחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/אליה רבה'),
+    item('שערי תשובה על שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/שערי תשובה'),
+    item('הגהות רבי עקיבא איגר על שלחן ערוך אורח חיים', 'הלכה/שולחן ערוך/מפרשים/הגהות רבי עקיבא איגר'),
+  ];
+  await check('commentary rank: Shulchan Aruch (משנה ברורה first, series titles, Tur list)', () => {
+    const r = rank.rankCommentaries(shuffle(SA));
+    assert.strictEqual(r[0].corpus, 'shulchan_aruch');
+    assert.deepStrictEqual(names(r), ['משנה ברורה', 'מגן אברהם', 'טורי זהב', 'באר היטב', 'ביאור הגר"א', 'כף החיים', 'הגהות רבי עקיבא איגר', 'שערי תשובה', 'אליה רבה', 'אשל אברהם', 'דגול מרבבה']);
+    assert.ok(r.slice(0, 9).every((x) => x.core && x.tier === 'עיקריים') && r.slice(9).every((x) => !x.core && x.tier === 'נוספים'));
+    const tur = rank.rankCommentaries(['פרישה', 'בח', 'דרכי משה', 'בית יוסף', 'דרישה'].map((t) => item(t, 'הלכה/טור/מפרשים')));
+    assert.deepStrictEqual(names(tur), ['בית יוסף', 'דרכי משה', 'ב"ח', 'פרישה', 'דרישה']);
+  });
+
+  await check('commentary rank: corpus detection, base text first, unknown corpus', () => {
+    assert.strictEqual(rank.detectCorpus('תנך/תורה', 'בראשית'), 'tanach');
+    assert.strictEqual(rank.detectCorpus('הלכה/משנה תורה/ספר זמנים', 'משנה תורה, הלכות שבת'), 'rambam');
+    assert.strictEqual(rank.detectCorpus(null, 'שולחן ערוך, אורח חיים'), 'shulchan_aruch');
+    assert.strictEqual(rank.detectCorpus('משנה/סדר זרעים', 'משנה ברכות'), 'mishna');
+    assert.strictEqual(rank.detectCorpus('תלמוד ירושלמי/סדר זרעים', 'תלמוד ירושלמי ברכות'), 'yerushalmi');
+    assert.strictEqual(rank.detectCorpus('תלמוד בבלי/סדר מועד', 'שבת'), 'bavli');
+    assert.strictEqual(rank.eraOf('תלמוד בבלי/ראשונים/ריף/מפרשים/רן'), 'rishonim');
+    assert.strictEqual(rank.eraOf('תנך/מפרשים', 'targum'), 'targum');
+    // The reading book's corpus wins over the votes of its links.
+    assert.strictEqual(rank.inferCorpus([item('רשי על שבת', 'תלמוד בבלי/ראשונים/רשי')], { title: 'משנה תורה, הלכות שבת' }), 'rambam');
+    // From inside a commentary, its base text (link_type 'source') is the main link.
+    const fromComm = rank.rankCommentaries([item('תוספות על שבת', 'תלמוד בבלי/ראשונים/תוספות', 'commentary'), item('שבת', 'תלמוד בבלי/סדר מועד', 'source')]);
+    assert.deepStrictEqual(fromComm.map((x) => [x.displayName, x.tier]), [['שבת', 'מקור'], ['תוספות', 'עיקריים']]);
+    // No corpus folders at all: every core list is consulted (best position; ties alphabetical).
+    const loose = rank.rankCommentaries([item('ספר אחר', ''), item('רשי על בראשית', ''), item('משנה ברורה', ''), item('כסף משנה', '')]);
+    assert.deepStrictEqual(names(loose), ['משנה ברורה', 'רש"י', 'כסף משנה', 'ספר אחר']);
+    assert.ok(loose.slice(0, 3).every((x) => x.core) && loose[0].corpus === null);
+  });
+
+  await check('commentary rank: name filter understands Hebrew + Torah abbreviations', () => {
+    const t = rank.rankCommentaries(TANACH);
+    const f = (ranked, q) => names(rank.filterCommentaries(ranked, { query: q }));
+    assert.deepStrictEqual(f(t, 'אב"ע'), ['אבן עזרא']);
+    assert.deepStrictEqual(f(t, 'אבן עז'), ['אבן עזרא']);
+    assert.deepStrictEqual(f(t, 'רש'), ['רש"י']);
+    assert.deepStrictEqual(f(t, 'רמב"ן'), ['רמב"ן']);
+    assert.deepStrictEqual(f(t, 'מלבים'), ['מלבי"ם', 'הערות על מלבים']);
+    assert.deepStrictEqual(f(t, 'אונק'), ['אונקלוס']);
+    assert.deepStrictEqual(f(t, 'תוס'), []);
+    assert.strictEqual(f(t, '').length, TANACH.length);
+    const sa = rank.rankCommentaries(SA);
+    assert.deepStrictEqual(f(sa, 'מ"ב'), ['משנה ברורה']);
+    assert.deepStrictEqual(f(sa, 'ט"ז'), ['טורי זהב']);
+    assert.deepStrictEqual(f(sa, 'מג"א'), ['מגן אברהם']);
+    assert.deepStrictEqual(f(sa, 'באה"ט'), ['באר היטב']);
+    assert.deepStrictEqual(f(sa, 'רעק"א'), ['הגהות רבי עקיבא איגר']);
+    const bavli = rank.rankCommentaries([item('תוספות על שבת', 'תלמוד בבלי/ראשונים/תוספות'), item('רשי על שבת', 'תלמוד בבלי/ראשונים/רשי'), item('רשבא על שבת', 'תלמוד בבלי/ראשונים/רשבא')]);
+    assert.deepStrictEqual(f(bavli, "תוס'"), ['תוספות']);
+    assert.deepStrictEqual(f(bavli, 'רש'), ['רש"י', 'רשב"א']);
+    // View chips: core only / favorites only.
+    const pinnedT = rank.rankCommentaries(TANACH, { pinned: ['גור אריה'] });
+    assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'pinned' })), ['גור אריה']);
+    assert.ok(rank.filterCommentaries(pinnedT, { view: 'core' }).every((x) => x.core));
+    assert.strictEqual(rank.filterCommentaries(pinnedT, { view: 'core' }).length, 10);
+    // Word starts only: "רמ" is not the folded final mem of "הטורים".
+    assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'core', query: 'רמ' })), ['רמב"ן']);
+  });
 }
 
 /** The Android foreground-service config plugin + native module wiring. */

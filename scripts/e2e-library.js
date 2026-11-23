@@ -47,7 +47,10 @@ try {
     await tid('open-library-manager').click();
     await tid('core-info').waitFor();
     const stats = await tid('core-info').innerText();
-    assert.ok(/ספרים\s*9/.test(stats), `core stats: ${stats}`);
+    const sampleBooks = require('fs')
+      .readdirSync(require('path').join(__dirname, '..', 'raw_library', 'sample'), { recursive: true })
+      .filter((f) => String(f).endsWith('.txt')).length;
+    assert.ok(new RegExp(`ספרים\\s*${sampleBooks}\\b`).test(stats), `core stats (${sampleBooks} sample books): ${stats}`);
     assert.ok(/sample/.test(stats), 'source shown');
     const url = await tid('manifest-url').inputValue();
     assert.ok(/releases\/latest\/download\/manifest\.json$/.test(url), url);

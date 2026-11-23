@@ -486,6 +486,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
       {selected && areaHeight > 0 ? (
         <CommentaryPane
           bookId={bookId}
+          bookTitle={tab.bookTitle}
           line={selected.line}
           tocPath={selected.tocPath}
           areaHeight={areaHeight}

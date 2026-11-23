@@ -199,11 +199,12 @@ const typeRank = (t) => (t && TYPE_RANK[t] !== undefined ? TYPE_RANK[t] : 3);
 
 /**
  * Short commentator name for a group header: "רש"י על שבת" -> "רש"י",
- * "תוספות על שבת" -> "תוספות"; titles without " על " are kept whole.
+ * "תוספות על שבת" -> "תוספות"; notes on a commentary keep their parent ("הערות על רשי על
+ * בראשית" -> "הערות על רשי"); titles without " על " are kept whole.
  */
 function commentatorName(title) {
   const t = String(title || '').trim();
-  const i = t.indexOf(' על ');
+  const i = t.lastIndexOf(' על ');
   return i > 0 ? t.slice(0, i) : t;
 }
 
@@ -211,14 +212,24 @@ function commentatorName(title) {
  * Groups linked entries by commentator book (one group per book, entries by line),
  * commentaries before translations before cross-references, then in library order.
  * A group built from an aligned unit carries `block` ({ refKey, start, end }): the
- * whole range to open / highlight in the commentary book.
+ * whole range to open / highlight in the commentary book. The drawer re-orders groups by
+ * commentator priority (shared/commentaryRank.js).
  */
 function groupLinkedEntries(entries) {
   const groups = new Map();
   for (const e of entries) {
     let g = groups.get(e.book_id);
     if (!g) {
-      g = { bookId: e.book_id, bookTitle: e.book_title, name: commentatorName(e.book_title), linkType: e.link_type || null, rank: typeRank(e.link_type), entries: [], block: null };
+      g = {
+        bookId: e.book_id,
+        bookTitle: e.book_title,
+        name: commentatorName(e.book_title),
+        categoryPath: e.category_path || null,
+        linkType: e.link_type || null,
+        rank: typeRank(e.link_type),
+        entries: [],
+        block: null,
+      };
       groups.set(e.book_id, g);
     }
     g.rank = Math.min(g.rank, typeRank(e.link_type));

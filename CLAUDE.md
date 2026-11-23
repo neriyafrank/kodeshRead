@@ -31,6 +31,12 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > notification; JS wrapper `src/services/importForegroundService.ts`, no-op on web). Kill/resume is self-tested
 > at every 9th SQL statement in `scripts/selftest.js`.
 
+> **Commentary drawer priority & accordion:** `shared/commentaryRank.js` orders linked commentaries
+> (⭐ pins from `src/state/commentaryStore.ts` -> base text -> per-corpus canonical core lists -> Otzaria era
+> folders תרגומים/ראשונים/אחרונים/מחברי זמננו -> alphabetical), assigns tier badges, picks the default-open
+> cards (pins + top 3) and filters by name with Torah abbreviations. `CommentaryPane.tsx` renders collapsible
+> cards with a sticky filter / chips / pill-strip header. Regression-tested in `scripts/selftest.js`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

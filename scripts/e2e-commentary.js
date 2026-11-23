@@ -8,6 +8,11 @@
  * Opens שבת ב. via Quick Jump, checks the link-count badges, opens the drawer from a
  * paragraph, verifies grouping (רש"י / תוספות), the theme, resizing, prev/next sync,
  * and opening a commentary at its line in a tab.
+ *
+ * Then בראשית א (8 commentators in the sample: core, ראשונים, אחרונים): priority order and
+ * tier badges, smart default expansion (top 3), expanding / collapsing cards, open-all /
+ * collapse-all, the commentator pill strip (1-tap jump), the name filter with abbreviations
+ * (אב"ע / מלבים / רש / תוס), view chips, and pinning a favorite (persisted across reloads).
  */
 'use strict';
 
@@ -171,6 +176,131 @@ try {
     assert.ok(lit >= 3, `whole unit highlighted (${lit} rows)`);
     await shot('5-block-open');
     step(`"פתח בספר" opens the base unit and highlights the block (${lit} rows)`);
+
+    // --- many commentators: priority, accordion, pills, filter, favorites (בראשית א) ----------
+    const openBereshit = async () => {
+      await page.goto(BASE + '/', { timeout: 180000 });
+      await tid('quick-jump-input').last().waitFor({ timeout: 180000 });
+      await tid('quick-jump-input').last().fill('בראשית א');
+      await page.locator('[data-testid="quick-jump-result"]', { hasText: 'בראשית' }).last().click();
+      await tid('para-3').last().waitFor({ timeout: 20000 });
+      await tid('para-3').last().click();
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length >= 8, null, { timeout: 10000 });
+    };
+    const groupNames = () => tid('commentary-group-name').allInnerTexts();
+    const expandedFlags = () => tid('commentary-group-header').evaluateAll((els) => els.map((e) => e.getAttribute('aria-expanded') === 'true'));
+    const card = (name) => page.locator('[data-testid="commentary-group"]', { has: page.locator(`[data-testid="commentary-group-name"]:text-is('${name}')`) });
+    const PRIORITY = ['אונקלוס', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'מלבי"ם', 'דעת זקנים', 'גור אריה'];
+
+    await page.evaluate(() => localStorage.removeItem('kodeshread.commentary'));
+    await openBereshit();
+    assert.deepStrictEqual(await groupNames(), PRIORITY, 'Tanach core list first, then ראשונים before אחרונים');
+    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'ראשונים', 'אחרונים']);
+    // Otzaria titles without gershayim are shown in their canonical spelling ("מלבים" -> מלבי"ם).
+    step('priority order + tier badges (8 commentators)');
+
+    // Smart default: only the top 3 open; the rest are one-line headers without text.
+    assert.deepStrictEqual(await expandedFlags(), [true, true, true, false, false, false, false, false]);
+    assert.strictEqual(await card('גור אריה').locator('[data-testid^="commentary-entry"]').count(), 0);
+    assert.ok((await card('רש"י').locator('[data-testid^="commentary-entry"]').count()) >= 5);
+    const collapsedH = (await card('גור אריה').boundingBox()).height;
+    assert.ok(collapsedH < 60, `collapsed card is a single line (${collapsedH}px)`);
+    await shot('6-many-collapsed');
+    step('smart default expansion: top 3 open, others collapsed to one line');
+
+    // Expand / collapse a card.
+    await card('גור אריה').locator('[data-testid="commentary-group-header"]').click();
+    await card('גור אריה').locator('[data-testid="commentary-entry"]').first().waitFor();
+    assert.ok((await card('גור אריה').innerText()).includes('לא היה צריך להתחיל את התורה'));
+    await card('גור אריה').locator('[data-testid="commentary-group-header"]').click();
+    await page.waitForFunction(() => {
+      const c = [...document.querySelectorAll('[data-testid="commentary-group"]')].find((e) => e.innerText.includes('גור אריה'));
+      return c && !c.querySelector('[data-testid^="commentary-entry"]');
+    });
+    // The choice sticks when the drawer moves to another verse of the chapter.
+    await card('ספורנו').locator('[data-testid="commentary-group-header"]').click();
+    await tid('para-4').last().click();
+    await page.waitForTimeout(400);
+    assert.deepStrictEqual(await expandedFlags(), [true, true, true, false, true, false, false, false], 'user-opened ספורנו stays open on the next verse');
+    step('cards expand / collapse; user choices persist across verses');
+
+    // Open all / collapse all.
+    assert.strictEqual((await tid('commentary-toggle-all').innerText()).trim(), 'פתח הכל');
+    await tid('commentary-toggle-all').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-header"]')].every((e) => e.getAttribute('aria-expanded') === 'true'));
+    assert.strictEqual((await tid('commentary-toggle-all').innerText()).trim(), 'כווץ הכל');
+    await tid('commentary-toggle-all').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-header"]')].every((e) => e.getAttribute('aria-expanded') === 'false'));
+    assert.strictEqual(await tid('commentary-entry').count(), 0);
+    step('פתח הכל / כווץ הכל');
+
+    // Commentator pills: priority order right-to-left; a tap opens that card and scrolls to it.
+    const pills = await tid('commentary-pill').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })).sort((a, b) => b.x - a.x).map((p) => p.t));
+    assert.deepStrictEqual(pills, PRIORITY, 'pills right-to-left in priority order');
+    const pillBox = await page.locator('[data-testid="commentary-pill"]', { hasText: 'אונקלוס' }).boundingBox();
+    assert.ok(pillBox.x + pillBox.width <= 401 && pillBox.x > 200, `top-priority pill visible at the right edge (${pillBox.x})`);
+    await page.locator('[data-testid="commentary-pill"]', { hasText: 'גור אריה' }).click();
+    await card('גור אריה').locator('[data-testid="commentary-entry"]').first().waitFor();
+    await page.waitForTimeout(500);
+    const listBox = await tid('commentary-list').boundingBox();
+    const target = await card('גור אריה').boundingBox();
+    assert.ok(target.y >= listBox.y - 2 && target.y < listBox.y + listBox.height / 2, `jumped to גור אריה (card ${target.y}, list ${listBox.y})`);
+    await shot('7-pill-jump');
+    step('pill strip: 1-tap jump scrolls to the commentator and opens it');
+
+    // Name filter: Hebrew + Torah abbreviations.
+    const filterTo = async (q, expected) => {
+      await tid('commentary-filter').fill(q);
+      await page.waitForFunction(
+        (n) => document.querySelectorAll('[data-testid="commentary-group"]').length === n || (n === 0 && !!document.querySelector('[data-testid="commentary-filter-reset"]')),
+        expected.length,
+      );
+      assert.deepStrictEqual(await groupNames(), expected, `filter "${q}"`);
+    };
+    await filterTo('אב"ע', ['אבן עזרא']);
+    // A narrow filter opens what it found.
+    await card('אבן עזרא').locator('[data-testid="commentary-entry"]').first().waitFor();
+    await shot('8-filter');
+    await filterTo('מלבים', ['מלבי"ם']);
+    await filterTo('רש', ['רש"י']);
+    await filterTo('רמ', ['רמב"ן']);
+    await filterTo('תוס', []);
+    await tid('commentary-filter-reset').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
+    assert.strictEqual(await tid('commentary-filter').inputValue(), '');
+    step('filter by name / abbreviation (אב"ע, מלבים, רש, רמ; none for תוס)');
+
+    // View chips.
+    assert.ok((await tid('commentary-chip-all').innerText()).includes('8'));
+    await tid('commentary-chip-core').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 6);
+    assert.deepStrictEqual(await groupNames(), PRIORITY.slice(0, 6));
+    await tid('commentary-chip-all').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
+    assert.strictEqual(await tid('commentary-chip-pinned').count(), 0, 'no favorites chip before pinning');
+    step('chips: הכל · 8 / עיקריים · 6');
+
+    // Pin a favorite: it jumps to the very top (over the core list) and gets its own chip.
+    await card('גור אריה').locator('[data-testid="commentary-pin"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="commentary-group-name"]')?.innerText === 'גור אריה');
+    assert.deepStrictEqual(await groupNames(), ['גור אריה', ...PRIORITY.slice(0, 7)]);
+    assert.strictEqual(await card('גור אריה').locator('[data-testid="commentary-pin"]').getAttribute('aria-pressed'), 'true');
+    assert.ok((await tid('commentary-chip-pinned').innerText()).includes('1'));
+    await tid('commentary-chip-pinned').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 1);
+    await tid('commentary-chip-all').click();
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.commentary')).state.pinned), ['גור אריה']);
+    await shot('9-pinned');
+
+    // Persisted: after a reload the favorite is still first, and open by default with the top 3.
+    await openBereshit();
+    assert.deepStrictEqual(await groupNames(), ['גור אריה', ...PRIORITY.slice(0, 7)]);
+    assert.deepStrictEqual(await expandedFlags(), [true, true, true, true, false, false, false, false], 'favorite + top 3 open by default');
+    // Unpin: back to its era place.
+    await card('גור אריה').locator('[data-testid="commentary-pin"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="commentary-group-name"]')?.innerText === 'אונקלוס');
+    assert.deepStrictEqual(await groupNames(), PRIORITY);
+    step('pin ⭐ a favorite: pinned to the top, persisted across reloads, unpin restores');
 
     const real = errors.filter((e) => !/favicon|DevTools|Download the React DevTools/.test(e));
     assert.deepStrictEqual(real, [], 'console errors');

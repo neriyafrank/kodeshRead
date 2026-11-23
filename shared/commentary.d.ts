@@ -41,6 +41,8 @@ export interface CommentaryGroup {
   bookTitle: string;
   /** Short commentator name ("רש"י" for "רש"י על שבת"). */
   name: string;
+  /** Library folder of the linked book ("תנך/ראשונים/רמבן/תורה"): corpus + era for ranking. */
+  categoryPath: string | null;
   linkType: string | null;
   rank: number;
   entries: LinkedEntry[];

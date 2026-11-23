@@ -50,9 +50,22 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
   * Tapping such a paragraph (or its badge) opens a drawer docked under the text as a split
     view, so the text stays scrollable. Tapping another paragraph re-syncs it; tapping the
     selected paragraph again closes it. Paragraphs without links do nothing while it is closed.
-  * Entries are grouped by commentator book (רש"י, תוספות, …; commentaries first, then
-    translations such as אונקלוס, then cross-references). Groups collapse, and every entry has
-    a **פתח ↗** button that opens that book at that exact line in a tab and highlights it.
+  * Built for passages with 40–100+ commentaries: one collapsible card per commentator book,
+    ordered by `shared/commentaryRank.js` — ⭐ favorites first (pinned with the card's star,
+    persisted, keyed by commentator so a ⭐ on רש"י holds in every book), then the base text (from
+    inside a commentary), then the corpus' canonical core list (תנ"ך: אונקלוס, תרגום יונתן, רש"י,
+    רמב"ן, אבן עזרא, …; בבלי: רש"י, תוספות, …; משנה, ירושלמי, משנה תורה, שולחן ערוך, טור), then by
+    Otzaria era folder (תרגומים → ראשונים → אחרונים → מחברי זמננו) and alphabetically. Each card shows
+    a tier badge (עיקריים / תרגומים / ראשונים / אחרונים / נוספים / מקור) and canonical spelling
+    (Otzaria's `רשי`, `מלבים` → רש"י, מלבי"ם).
+  * Only favorites + the top 3 open by default; the rest are one-line headers. Cards you open or
+    close keep that state as the drawer moves between verses.
+  * A sticky tools header (from 4 commentators): a **חפש פרשן…** filter that understands Torah
+    abbreviations (`מ"ב`, `אב"ע`, `תוס'`, `רש`), view chips **הכל** / **עיקריים** / **מועדפים ⭐**,
+    **פתח הכל / כווץ הכל**, and a horizontal RTL strip of commentator pills in priority order — one
+    tap scrolls to that commentator and opens it.
+  * **פתח בספר ↗** on a card opens the commentary at its whole block (highlighted); the small ↗
+    beside each paragraph opens that exact line in a tab.
   * Drag the grabber to resize (or tap it to toggle short/tall; the size persists). Use → / ←
     to step to the previous or next paragraph with commentaries (the text scrolls along), and
     **סנכרון** to make the drawer follow the reading line while you scroll.
@@ -108,8 +121,11 @@ Layout: `raw_library/<source>/<Category>/<SubCategory>/<Book>.txt`. Headings use
     and a **WARNING** listing unmatched book names with counts. The sample deliberately
     contains one: a תוספות cross-reference to `ברכות`, which is not in the sample library.
 
-The sample library includes four small commentary books with links: רש"י and תוספות on
-שבת ב (JSON, Otzaria format) and רש"י and אונקלוס on בראשית א (JSON and CSV).
+The sample library includes small commentary books with links: רש"י and תוספות on
+שבת ב (JSON, Otzaria format) and רש"י and אונקלוס on בראשית א (JSON and CSV), plus six more
+heading-aligned commentaries on בראשית א in Otzaria's era folders (`תנך/מפרשים/ראשונים`: רמב"ן,
+אבן עזרא, ספורנו, דעת זקנים; `תנך/מפרשים/אחרונים`: מלבים, גור אריה) that exercise the drawer's
+priority ranking, accordion, filter and favorites.
 
 Every build writes `assets/db/library.db` + `assets/db/db-version.json`. They are used by
 `npm test` and the web preview only; the APK does not contain them. `--release` also writes
