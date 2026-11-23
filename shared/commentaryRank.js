@@ -480,7 +480,36 @@ function filterCommentaries(ranked, opts) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Commentator selection (chip bar gestures). `selection` is a list of commentator keys;
+// empty = הכל. Display order is always the canonical rank order, never the tap order.
+// ---------------------------------------------------------------------------
+
+/**
+ * Next selection after a gesture on commentator chip `key`.
+ *   tap:       all / another single -> only `key`; the isolated chip again -> all;
+ *              with 2+ selected it toggles `key` in / out of the set.
+ *   longpress: toggles `key` into / out of the current set (from הכל it isolates `key`).
+ * An empty result is הכל.
+ */
+function nextSelection(selection, key, gesture) {
+  const sel = selection || [];
+  const has = sel.includes(key);
+  if (gesture === 'tap' && sel.length < 2) return has ? [] : [key];
+  return has ? sel.filter((k) => k !== key) : [...sel, key];
+}
+
+/** Ranked items shown for `selection` (canonical order; keys absent from this passage are ignored). */
+function selectCommentaries(ranked, selection) {
+  const sel = selection || [];
+  if (!sel.length) return ranked;
+  const want = new Set(sel);
+  return ranked.filter((r) => want.has(r.key));
+}
+
 module.exports = {
+  nextSelection,
+  selectCommentaries,
   CORE_LISTS,
   CORPUS_LABEL,
   TIERS,

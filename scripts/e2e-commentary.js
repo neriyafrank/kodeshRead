@@ -44,6 +44,9 @@ try {
   const tid = (id) => page.locator(`[data-testid="${id}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
   const step = (name) => console.log(`✓ ${name}`);
+  // Chip bar texts, right to left (הכל is the right-most chip).
+  const chipTexts = async () =>
+    (await page.locator('[data-testid="commentary-chip"], [data-testid="commentary-chip-all"]').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })))).sort((a, b) => b.x - a.x).map((p) => p.t);
 
   try {
     await page.goto(BASE + '/', { timeout: 180000 });
@@ -85,6 +88,8 @@ try {
     // Two commentators: no tools header and no toggle for it.
     assert.strictEqual(await tid('commentary-tools-toggle').count(), 0);
     assert.strictEqual(await tid('commentary-tools').count(), 0);
+    // The chip bar is just הכל + the commentators (no mode buttons).
+    assert.deepStrictEqual(await chipTexts(), ['הכל', 'רש"י', 'תוספות']);
     await shot('2-drawer');
     step('drawer shows each commentator\'s full block for the amud');
 
@@ -159,6 +164,14 @@ try {
     step(`follow mode re-syncs on scroll ("${(await firstEntry()).split('\n').pop().slice(0, 20)}…")`);
     await tid('commentary-follow').click();
 
+    // Single-commentator focus (רש"י only) stays on while the drawer opens another book's paragraph.
+    await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].every((e) => e.innerText === 'רש"י'));
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י']);
+    await tid('commentary-chip-all').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
+
     // Open the commentary at its line in a tab.
     await tid('commentary-open').first().click();
     await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('רש"י על שבת'));
@@ -171,6 +184,15 @@ try {
     // Bidirectional: from a רש"י paragraph the drawer shows the base amud; "פתח בספר" opens the
     // base book at the unit and highlights the whole block.
     await tid('para-7').click();
+    // The sticky רש"י selection matches nothing here (the drawer holds only the base text שבת):
+    // clean RTL empty state with a 1-tap way back to everything.
+    await tid('commentary-empty').waitFor({ timeout: 10000 });
+    assert.strictEqual((await tid('commentary-empty').innerText()).trim(), 'אין פירוש של המפרשים שנבחרו לקטע זה');
+    assert.strictEqual(await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="commentary-empty"]')).direction), 'rtl');
+    assert.strictEqual((await tid('commentary-filter-reset').innerText()).trim(), 'הצג את כל המפרשים');
+    await shot('4b-empty-state');
+    await tid('commentary-filter-reset').click();
+    step('empty state for a verse without the chosen commentators + "הצג את כל המפרשים"');
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].some((e) => e.innerText === 'שבת'));
     await tid('commentary-open-block').first().click();
     await page.waitForFunction(() => /^שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''));
@@ -219,10 +241,10 @@ try {
 
     // The tools header starts folded: the first card sits right under the title bar.
     assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'false', 'commentary tools start collapsed');
-    for (const id of ['commentary-tools', 'commentary-filter', 'commentary-chip-all', 'commentary-toggle-all', 'commentary-pills']) assert.strictEqual(await tid(id).count(), 0, `${id} hidden`);
+    for (const id of ['commentary-tools', 'commentary-filter', 'commentary-toggle-all']) assert.strictEqual(await tid(id).count(), 0, `${id} hidden`);
     assert.strictEqual(await tid('commentary-tools-badge').count(), 0, 'no filter badge without a filter');
     const headerBottom = async () => {
-      const h = await toolsToggle.boundingBox();
+      const h = await tid('commentary-chipbar').boundingBox(); // the chip bar sits right under the title bar
       return h.y + h.height;
     };
     const firstCardGap = async () => (await tid('commentary-group').first().boundingBox()).y - (await headerBottom());
@@ -230,10 +252,10 @@ try {
     assert.ok(collapsedGap < 24, `commentaries start right under the title bar (${collapsedGap}px)`);
     await setTools(true);
     assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'true');
-    for (const id of ['commentary-filter', 'commentary-chip-all', 'commentary-toggle-all', 'commentary-pills']) assert.ok(await tid(id).isVisible(), `${id} shown`);
+    for (const id of ['commentary-filter', 'commentary-toggle-all', 'commentary-chipbar']) assert.ok(await tid(id).isVisible(), `${id} shown`);
     await page.waitForTimeout(250);
     const openGap = await firstCardGap();
-    assert.ok(openGap > collapsedGap + 60, `the tools take room only when open (${collapsedGap} -> ${openGap}px)`);
+    assert.ok(openGap > collapsedGap + 30, `the tools take room only when open (${collapsedGap} -> ${openGap}px)`);
     await shot('6a-tools-open');
     await setTools(false);
     assert.strictEqual(await tid('commentary-filter').count(), 0);
@@ -275,20 +297,92 @@ try {
     assert.strictEqual(await tid('commentary-entry').count(), 0);
     step('פתח הכל / כווץ הכל');
 
-    // Commentator pills: priority order right-to-left; a tap opens that card and scrolls to it.
-    const pills = await tid('commentary-pill').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })).sort((a, b) => b.x - a.x).map((p) => p.t));
-    assert.deepStrictEqual(pills, PRIORITY, 'pills right-to-left in priority order');
-    const pillBox = await page.locator('[data-testid="commentary-pill"]', { hasText: 'אונקלוס' }).boundingBox();
-    assert.ok(pillBox.x + pillBox.width <= 401 && pillBox.x > 200, `top-priority pill visible at the right edge (${pillBox.x})`);
-    await page.locator('[data-testid="commentary-pill"]', { hasText: 'גור אריה' }).click();
-    await card('גור אריה').locator('[data-testid="commentary-entry"]').first().waitFor();
-    await page.waitForTimeout(500);
-    const listBox = await tid('commentary-list').boundingBox();
-    const target = await card('גור אריה').boundingBox();
-    assert.ok(target.y >= listBox.y - 2 && target.y < listBox.y + listBox.height / 2, `jumped to גור אריה (card ${target.y}, list ${listBox.y})`);
-    await shot('7-pill-jump');
-    step('pill strip: 1-tap jump scrolls to the commentator and opens it');
+    // Chip bar: הכל at the right edge, then the commentators in priority order; no extra buttons.
+    await setTools(false);
+    assert.deepStrictEqual(await chipTexts(), ['הכל', ...PRIORITY], 'chip bar: הכל + commentators right-to-left in priority order');
+    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 9, 'only 9 chips, no mode buttons');
+    const allBox = await tid('commentary-chip-all').boundingBox();
+    assert.ok(allBox.x + allBox.width <= 401 && allBox.x > 200, `הכל visible at the right edge (${allBox.x})`);
+    const chip = (name) => page.locator('[data-testid="commentary-chip"]', { hasText: name });
+    const longPress = async (name) => {
+      await chip(name).scrollIntoViewIfNeeded();
+      const b = await chip(name).boundingBox();
+      await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(800);
+      await page.mouse.up();
+      await page.waitForTimeout(150);
+    };
+    const showing = async (names) => {
+      try {
+        await page.waitForFunction((n) => JSON.stringify([...document.querySelectorAll('[data-testid="commentary-group-name"]')].map((e) => e.innerText)) === JSON.stringify(n), names, { timeout: 5000 });
+      } catch {
+        assert.deepStrictEqual(await groupNames(), names, 'commentators shown');
+      }
+    };
+    const openCount = () => tid('commentary-group-header').evaluateAll((els) => els.filter((e) => e.getAttribute('aria-expanded') === 'true').length);
+    assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'true');
 
+    // 1-tap focus: only רש"י, expanded immediately.
+    await chip('רש"י').click();
+    await showing(['רש"י']);
+    assert.strictEqual(await openCount(), 1);
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid^="commentary-entry"]').length >= 5, null, { timeout: 5000 });
+    assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'false');
+    assert.strictEqual(await chip('רש"י').getAttribute('aria-pressed'), 'true');
+    await shot('7a-single');
+    // Tap it again -> הכל.
+    await chip('רש"י').click();
+    await showing(PRIORITY);
+    assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'true');
+    // Tap another then הכל.
+    await chip('אבן עזרא').click();
+    await showing(['אבן עזרא']);
+    await tid('commentary-chip-all').click();
+    await showing(PRIORITY);
+    step('1-tap on a commentator isolates it (expanded); tap again or הכל returns to הכל');
+
+    // Long-press: רש"י, then long-press רמב"ן -> both, stacked in canonical order.
+    await chip('רמב"ן').click();
+    await longPress('רש"י');
+    await showing(['רש"י', 'רמב"ן']);
+    assert.strictEqual(await openCount(), 2);
+    const gs = await tid('commentary-group').evaluateAll((els) => els.map((e) => e.getBoundingClientRect().y));
+    assert.ok(gs[0] < gs[1], 'sequential: רש"י above רמב"ן');
+    assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'false');
+    await shot('7b-multi');
+    // With 2+ selected, a plain tap toggles a third in; a long-press toggles one out.
+    await chip('גור אריה').click();
+    await showing(['רש"י', 'רמב"ן', 'גור אריה']);
+    await longPress('רמב"ן');
+    await showing(['רש"י', 'גור אריה']);
+    await chip('גור אריה').click();
+    await showing(['רש"י']);
+    step('long-press builds a multi-selection (canonical order, tap / long-press toggle) with no mode button');
+
+    // Sticky across verses; empty state when the verse lacks the chosen commentators.
+    await chip('גור אריה').click(); // רש"י + גור אריה? (one selected -> tap switches focus)
+    await showing(['גור אריה']);
+    await longPress('רש"י');
+    await showing(['רש"י', 'גור אריה']);
+    await tid('para-5').last().click();
+    await page.waitForTimeout(500);
+    const afterVerse = await groupNames();
+    const emptyText = (await tid('commentary-empty').count()) ? (await tid('commentary-empty').innerText()).trim() : '';
+    await shot('7c-next-verse');
+    if (afterVerse.length) {
+      assert.ok(afterVerse.every((n) => ['רש"י', 'גור אריה'].includes(n)), `selection sticks on the next verse (${afterVerse})`);
+    } else {
+      assert.strictEqual(emptyText, 'אין פירוש של המפרשים שנבחרו לקטע זה');
+      assert.strictEqual((await tid('commentary-filter-reset').innerText()).trim(), 'הצג את כל המפרשים');
+      await tid('commentary-filter-reset').click();
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length > 0);
+      assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'true');
+    }
+    await tid('commentary-chip-all').click();
+    step('selection stays while moving between verses');
+
+        await setTools(true);
     // Name filter: Hebrew + Torah abbreviations.
     const filterTo = async (q, expected) => {
       await tid('commentary-filter').fill(q);
@@ -329,28 +423,12 @@ try {
     await setTools(true);
     step('filter by name / abbreviation (אב"ע, מלבים, רש, רמ; none for תוס); active-filter dot on the folded toggle');
 
-    // View chips.
-    assert.ok((await tid('commentary-chip-all').innerText()).includes('8'));
-    await tid('commentary-chip-core').click();
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 6);
-    assert.deepStrictEqual(await groupNames(), PRIORITY.slice(0, 6));
-    await setTools(false);
-    await tid('commentary-tools-badge').waitFor(); // a view chip counts as a filter too
-    await setTools(true);
-    await tid('commentary-chip-all').click();
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
-    assert.strictEqual(await tid('commentary-chip-pinned').count(), 0, 'no favorites chip before pinning');
-    step('chips: הכל · 8 / עיקריים · 6');
-
-    // Pin a favorite: it jumps to the very top (over the core list) and gets its own chip.
+    // Pin a favorite: it jumps to the very top (over the core list).
     await card('גור אריה').locator('[data-testid="commentary-pin"]').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="commentary-group-name"]')?.innerText === 'גור אריה');
     assert.deepStrictEqual(await groupNames(), ['גור אריה', ...PRIORITY.slice(0, 7)]);
     assert.strictEqual(await card('גור אריה').locator('[data-testid="commentary-pin"]').getAttribute('aria-pressed'), 'true');
-    assert.ok((await tid('commentary-chip-pinned').innerText()).includes('1'));
-    await tid('commentary-chip-pinned').click();
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 1);
-    await tid('commentary-chip-all').click();
+    assert.strictEqual((await chipTexts())[1], '★ גור אריה', 'the favorite is the first commentator chip');
     assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.commentary')).state.pinned), ['גור אריה']);
     await shot('9-pinned');
 

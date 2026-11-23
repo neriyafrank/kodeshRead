@@ -5,21 +5,25 @@
  *    Persisted; pin order = display order at the top of the drawer.
  *  - expanded: commentators the user opened / closed by hand this session. They override the
  *    smart default (favorites + top 3 primary) as the drawer moves between verses. Not persisted.
- *  - view: the drawer's view chip (all / core / pinned). Not persisted.
+ *  - selection: commentator keys picked in the chip bar (empty = הכל). Sticky while moving between
+ *    verses; shared/commentaryRank.js nextSelection(). Not persisted.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
-import type { CommentaryView } from '../../shared/commentaryRank';
+import { nextSelection } from '../../shared/commentaryRank';
 
 interface CommentaryPrefsState {
   pinned: string[];
   expanded: Record<string, boolean>;
-  view: CommentaryView;
+  selection: string[];
   togglePinned: (key: string) => void;
   setExpanded: (patch: Record<string, boolean>) => void;
-  setView: (view: CommentaryView) => void;
+  /** Chip gesture on commentator `key` (see nextSelection). */
+  selectChip: (key: string, gesture: 'tap' | 'longpress') => void;
+  /** הכל: back to every commentator. */
+  clearSelection: () => void;
 }
 
 export const useCommentaryPrefs = create<CommentaryPrefsState>()(
@@ -27,11 +31,12 @@ export const useCommentaryPrefs = create<CommentaryPrefsState>()(
     (set) => ({
       pinned: [],
       expanded: {},
-      view: 'all',
+      selection: [],
       togglePinned: (key) =>
         set((s) => ({ pinned: s.pinned.includes(key) ? s.pinned.filter((k) => k !== key) : [...s.pinned, key] })),
       setExpanded: (patch) => set((s) => ({ expanded: { ...s.expanded, ...patch } })),
-      setView: (view) => set({ view }),
+      selectChip: (key, gesture) => set((s) => ({ selection: nextSelection(s.selection, key, gesture) })),
+      clearSelection: () => set({ selection: [] }),
     }),
     {
       name: 'kodeshread.commentary',

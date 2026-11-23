@@ -50,3 +50,5 @@ export function rankCommentaries<T extends RankInput>(
 export function defaultExpandedKeys(ranked: { key: string; pinned: boolean }[], opts?: { top?: number; allBelow?: number }): Set<string>;
 export function matchesCommentatorQuery(query: string, item: RankInput & Partial<CommentaryClass>): boolean;
 export function filterCommentaries<T extends RankInput & CommentaryClass & { pinned: boolean }>(ranked: T[], opts?: { view?: CommentaryView; query?: string }): T[];
+export function nextSelection(selection: string[], key: string, gesture: 'tap' | 'longpress'): string[];
+export function selectCommentaries<T extends { key: string }>(ranked: T[], selection: string[]): T[];

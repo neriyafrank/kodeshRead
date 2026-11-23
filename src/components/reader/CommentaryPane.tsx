@@ -45,7 +45,7 @@ import {
 } from 'react-native';
 
 import { fetchLinkedEntries, groupLinkedEntries, type CommentaryGroup, type LinkedEntry } from '../../../shared/commentary';
-import { defaultExpandedKeys, filterCommentaries, rankCommentaries, type Ranked } from '../../../shared/commentaryRank';
+import { defaultExpandedKeys, filterCommentaries, rankCommentaries, selectCommentaries, type Ranked } from '../../../shared/commentaryRank';
 import { prepareDisplayText } from '../../../shared/reader';
 import { lineHeightPx } from '../../../shared/typography';
 import { useLibrary } from '../../db/LibraryContext';
@@ -108,8 +108,9 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const togglePinned = useCommentaryPrefs((x) => x.togglePinned);
   const expandedOverrides = useCommentaryPrefs((x) => x.expanded);
   const setExpanded = useCommentaryPrefs((x) => x.setExpanded);
-  const view = useCommentaryPrefs((x) => x.view);
-  const setView = useCommentaryPrefs((x) => x.setView);
+  const selection = useCommentaryPrefs((x) => x.selection);
+  const selectChip = useCommentaryPrefs((x) => x.selectChip);
+  const clearSelection = useCommentaryPrefs((x) => x.clearSelection);
 
   // --- data --------------------------------------------------------------------
   const [data, setData] = useState<{ key: string; groups: CommentaryGroup[] } | null>(null);
@@ -135,52 +136,39 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   // --- priority, filter, expansion ------------------------------------------------
   const ranked = useMemo(() => rankCommentaries(groups ?? [], { pinned, context: { title: bookTitle } }), [groups, pinned, bookTitle]);
   const total = ranked.reduce((n, g) => n + g.entries.length, 0);
-  const pinnedCount = ranked.filter((g) => g.pinned).length;
-  const coreCount = ranked.filter((g) => g.core || g.isSource).length;
   const [query, setQuery] = useState('');
-  // The ⭐ chip is offered only while the passage has favorites.
-  const activeView = view === 'pinned' && !pinnedCount ? 'all' : view;
-  const visible = useMemo(() => filterCommentaries(ranked, { view: activeView, query }), [ranked, activeView, query]);
+  // Chip-bar selection (sticky across verses); keys this passage lacks simply match nothing.
+  const selected = useMemo(() => selectCommentaries(ranked, selection), [ranked, selection]);
+  const selecting = selection.length > 0;
+  const visible = useMemo(() => filterCommentaries(selected, { query }), [selected, query]);
   const defaults = useMemo(() => defaultExpandedKeys(ranked), [ranked]);
   // A narrow name filter opens what it found (as if tapped, so it can still be collapsed).
   const narrowKeys = query.trim() && visible.length <= 3 ? visible.map((g) => g.key).join('\n') : '';
   useEffect(() => {
     if (narrowKeys) setExpanded(Object.fromEntries(narrowKeys.split('\n').map((k) => [k, true])));
   }, [narrowKeys, setExpanded]);
-  const isExpanded = (g: RankedGroup) => expandedOverrides[g.key] ?? defaults.has(g.key);
+  // Chosen commentators read open, stacked one after another; הכל keeps the smart default.
+  const isExpanded = (g: RankedGroup) => expandedOverrides[g.key] ?? (selecting || defaults.has(g.key));
   const allExpanded = visible.length > 0 && visible.every(isExpanded);
   const toggleAll = () => setExpanded(Object.fromEntries(visible.map((g) => [g.key, !allExpanded])));
-  const filtering = !!query.trim() || activeView !== 'all';
-  const showTools = ranked.length >= TOOLS_MIN_GROUPS || !!query || activeView !== 'all';
-  // The tools header starts folded; the toggle in the title bar opens it.
+  const filtering = !!query.trim();
+  const showTools = ranked.length >= TOOLS_MIN_GROUPS || !!query;
+  // The tools header (name filter / open-all) starts folded; the toggle in the title bar opens it.
   const [toolsOpen, setToolsOpen] = useState(false);
+  const onChip = (g: RankedGroup, gesture: 'tap' | 'longpress') => {
+    selectChip(g.key, gesture);
+    setExpanded({ [g.key]: true });
+  };
 
   // --- scrolling ---------------------------------------------------------------------
   const scrollRef = useRef<ScrollViewInstance>(null);
-  const cardY = useRef(new Map<string, number>());
-  const [focusKey, setFocusKey] = useState<string | null>(null);
-  // Back to the top of the list whenever the drawer moves to another paragraph.
+  // Back to the top of the list whenever the drawer moves to another paragraph or selection.
   useEffect(() => {
     scrollRef.current?.scrollTo({ y: 0, animated: false });
-  }, [key]);
-  useEffect(() => {
-    if (!focusKey) return;
-    const t = setTimeout(() => setFocusKey(null), 1600);
-    return () => clearTimeout(t);
-  }, [focusKey]);
-  /** Pill tap: open the commentator and bring its card to the top of the list. */
-  const jumpTo = (g: RankedGroup) => {
-    setExpanded({ [g.key]: true });
-    setFocusKey(g.key);
-    // Opening a card never moves its own top, so the measured position stays valid.
-    requestAnimationFrame(() => {
-      const y = cardY.current.get(g.key);
-      if (y != null) scrollRef.current?.scrollTo({ y, animated: true });
-    });
-  };
+  }, [key, selection]);
 
-  // Commentator pills: LTR strip with reversed items, so the first (top-priority) pill sits at
-  // the right edge on every platform; kept scrolled to that edge.
+  // Chip bar: LTR strip with reversed items, so the first (top-priority) chip sits at the right
+  // edge on every platform; kept scrolled to that edge.
   const pillsRef = useRef<ScrollViewInstance | null>(null);
   const [pillsWidth, setPillsWidth] = useState(0);
 
@@ -234,12 +222,10 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
   const renderCard = (g: RankedGroup) => {
     const open = isExpanded(g);
-    const focused = focusKey === g.key;
     return (
       <View
         key={g.bookId}
-        style={[s.card, focused && { borderColor: c.accent, borderWidth: 1.5 }]}
-        onLayout={(e) => cardY.current.set(g.key, e.nativeEvent.layout.y)}
+        style={s.card}
         testID="commentary-group"
       >
         <View style={s.cardHeader}>
@@ -374,6 +360,64 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
         <IconButton label="✕" a11y="סגור מפרשים" onPress={onClose} palette={c} testID="commentary-close" />
       </View>
 
+      {ranked.length >= 2 && !error ? (
+        <ScrollView
+          ref={(n) => {
+            pillsRef.current = n;
+            setWebDir(n, 'ltr');
+          }}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={[s.pillsScroll, nativeDir('ltr')]}
+          contentContainerStyle={[s.pills, nativeDir('ltr'), { minWidth: pillsWidth }]}
+          onLayout={(e) => setPillsWidth(Math.round(e.nativeEvent.layout.width))}
+          onContentSizeChange={() => pillsRef.current?.scrollToEnd({ animated: false })}
+          keyboardShouldPersistTaps="handled"
+          testID="commentary-chipbar"
+        >
+          {ranked
+            .slice()
+            .reverse()
+            .map((g) => {
+              const on = selection.includes(g.key);
+              return (
+                <Pressable
+                  key={g.bookId}
+                  onPress={() => onChip(g, 'tap')}
+                  onLongPress={() => onChip(g, 'longpress')}
+                  delayLongPress={450}
+                  style={[s.pill, g.core || g.isSource ? s.pillCore : null, on && s.pillOn]}
+                  accessibilityRole="button"
+                  aria-pressed={on}
+                  accessibilityState={{ selected: on }}
+                  accessibilityLabel={`${g.displayName}: הקשה למפרש בודד, לחיצה ארוכה להוספה לבחירה`}
+                  testID="commentary-chip"
+                >
+                  <Text style={[s.pillText, g.core || g.isSource ? s.pillTextCore : null, on && s.pillTextOn]} numberOfLines={1}>
+                    {g.pinned ? '★ ' : ''}
+                    {g.displayName}
+                  </Text>
+                </Pressable>
+              );
+            })
+            .concat(
+              <Pressable
+                key="all"
+                onPress={clearSelection}
+                style={[s.pill, s.pillCore, !selecting && s.pillOn]}
+                accessibilityRole="button"
+                aria-pressed={!selecting}
+                accessibilityState={{ selected: !selecting }}
+                testID="commentary-chip-all"
+              >
+                <Text style={[s.pillText, s.pillTextCore, !selecting && s.pillTextOn]} numberOfLines={1}>
+                  הכל
+                </Text>
+              </Pressable>,
+            )}
+        </ScrollView>
+      ) : null}
+
       <Collapsible open={showTools && !error && toolsOpen} style={s.tools} testID="commentary-tools">
           <View style={s.toolsRow}>
             <View style={s.filterBox}>
@@ -386,7 +430,6 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                 autoCorrect={false}
                 autoCapitalize="none"
                 returnKeyType="search"
-                onSubmitEditing={() => visible[0] && jumpTo(visible[0])}
                 accessibilityLabel="חפש פרשן"
                 testID="commentary-filter"
               />
@@ -407,50 +450,6 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               <Text style={s.toggleAllText}>{allExpanded ? 'כווץ הכל' : 'פתח הכל'}</Text>
             </Pressable>
           </View>
-          <View style={s.chips}>
-            <Chip label={`הכל · ${ranked.length}`} active={activeView === 'all'} onPress={() => setView('all')} palette={c} testID="commentary-chip-all" />
-            {coreCount ? (
-              <Chip label={`עיקריים · ${coreCount}`} active={activeView === 'core'} onPress={() => setView('core')} palette={c} testID="commentary-chip-core" />
-            ) : null}
-            {pinnedCount ? (
-              <Chip label={`מועדפים ⭐ · ${pinnedCount}`} active={activeView === 'pinned'} onPress={() => setView('pinned')} palette={c} testID="commentary-chip-pinned" />
-            ) : null}
-          </View>
-          {visible.length > 1 ? (
-            <ScrollView
-              ref={(n) => {
-                pillsRef.current = n;
-                setWebDir(n, 'ltr');
-              }}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={[s.pillsScroll, nativeDir('ltr')]}
-              contentContainerStyle={[s.pills, nativeDir('ltr'), { minWidth: pillsWidth }]}
-              onLayout={(e) => setPillsWidth(Math.round(e.nativeEvent.layout.width))}
-              onContentSizeChange={() => pillsRef.current?.scrollToEnd({ animated: false })}
-              keyboardShouldPersistTaps="handled"
-              testID="commentary-pills"
-            >
-              {visible
-                .slice()
-                .reverse()
-                .map((g) => (
-                  <Pressable
-                    key={g.bookId}
-                    onPress={() => jumpTo(g)}
-                    style={[s.pill, g.core || g.isSource ? s.pillCore : null, focusKey === g.key && s.pillFocus]}
-                    accessibilityRole="button"
-                    accessibilityLabel={`עבור אל ${g.displayName}`}
-                    testID="commentary-pill"
-                  >
-                    <Text style={[s.pillText, g.core || g.isSource ? s.pillTextCore : null]} numberOfLines={1}>
-                      {g.pinned ? '★ ' : ''}
-                      {g.displayName}
-                    </Text>
-                  </Pressable>
-                ))}
-            </ScrollView>
-          ) : null}
       </Collapsible>
 
       {error ? (
@@ -461,11 +460,13 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
         <Text style={s.message}>אין מפרשים לפסקה זו</Text>
       ) : !visible.length ? (
         <View style={{ alignItems: 'center' }}>
-          <Text style={s.message}>אין פרשנים תואמים</Text>
+          <Text style={s.message} testID="commentary-empty">
+            {selecting && !query.trim() ? 'אין פירוש של המפרשים שנבחרו לקטע זה' : 'אין פרשנים תואמים'}
+          </Text>
           <Pressable
             onPress={() => {
               setQuery('');
-              setView('all');
+              clearSelection();
             }}
             style={[s.openBtn, { marginTop: spacing.sm }]}
             accessibilityRole="button"
@@ -488,28 +489,6 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
     </View>
   );
 }
-
-function Chip({ label, active, onPress, palette, testID }: { label: string; active: boolean; onPress: () => void; palette: Palette; testID: string }) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={[chipStyles.chip, { borderColor: palette.accent }, active && { backgroundColor: palette.accent }]}
-      accessibilityRole="button"
-      aria-selected={active}
-      accessibilityState={{ selected: active }}
-      testID={testID}
-    >
-      <Text style={[chipStyles.text, { color: active ? palette.surface : palette.accent }]} numberOfLines={1}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-const chipStyles = StyleSheet.create({
-  chip: { height: 26, paddingHorizontal: spacing.sm + 2, borderRadius: 13, borderWidth: 1, justifyContent: 'center' },
-  text: { fontSize: 12, fontWeight: '700', writingDirection: 'rtl' },
-});
 
 function IconButton({
   label,
@@ -617,9 +596,8 @@ const createStyles = (c: Palette) =>
     clearText: { fontSize: 13, color: c.textMuted, paddingHorizontal: 2 },
     toggleAll: { height: 32, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRadius: radius.md, backgroundColor: c.accentSoft },
     toggleAllText: { fontSize: 12, fontWeight: '700', color: c.accent },
-    chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs + 2 },
-    pillsScroll: { flexGrow: 0 },
-    pills: { gap: spacing.xs + 2, alignItems: 'center', justifyContent: 'flex-end', flexDirection: 'row', paddingVertical: 2 },
+    pillsScroll: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border, backgroundColor: c.surface },
+    pills: { gap: spacing.xs + 2, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, alignItems: 'center', justifyContent: 'flex-end', flexDirection: 'row' },
     pill: {
       height: 28,
       maxWidth: 150,
@@ -631,9 +609,10 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.surfaceMuted,
     },
     pillCore: { backgroundColor: c.accentSoft, borderColor: c.accentSoft },
-    pillFocus: { borderColor: c.accent, borderWidth: 1.5 },
+    pillOn: { backgroundColor: c.accent, borderColor: c.accent },
     pillText: { fontSize: 13, fontWeight: '600', color: c.textMuted, writingDirection: 'rtl' },
     pillTextCore: { color: c.accent, fontWeight: '700' },
+    pillTextOn: { color: c.surface },
     card: {
       borderRadius: radius.md,
       borderWidth: StyleSheet.hairlineWidth,

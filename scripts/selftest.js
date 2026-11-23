@@ -3340,6 +3340,48 @@ async function commentaryRankTests() {
     // Word starts only: "רמ" is not the folded final mem of "הטורים".
     assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'core', query: 'רמ' })), ['רמב"ן']);
   });
+
+  await check('commentary chip bar: הכל / single tap / long-press multi-select state machine', () => {
+    const ranked = rank.rankCommentaries(TANACH, {});
+    const keyOf = (n) => ranked.find((r) => r.displayName === n).key;
+    const shown = (sel) => names(rank.selectCommentaries(ranked, sel));
+    const all = names(ranked);
+    const [RASHI, RAMBAN, IBN] = ['רש"י', 'רמב"ן', 'אבן עזרא'].map(keyOf);
+    let sel = [];
+    // Default הכל: everything, canonical order (רש"י ahead of רמב"ן ahead of אבן עזרא).
+    assert.deepStrictEqual(shown(sel), all);
+    assert.ok(all.indexOf('רש"י') < all.indexOf('רמב"ן') && all.indexOf('רמב"ן') < all.indexOf('אבן עזרא'));
+    // Tap: isolate one commentator; tap it again -> הכל.
+    sel = rank.nextSelection(sel, RASHI, 'tap');
+    assert.deepStrictEqual(shown(sel), ['רש"י']);
+    assert.deepStrictEqual(rank.nextSelection(sel, RASHI, 'tap'), []);
+    assert.deepStrictEqual(shown(rank.nextSelection(sel, RASHI, 'tap')), all);
+    // Tapping another chip while one is isolated switches the focus.
+    assert.deepStrictEqual(rank.nextSelection(sel, RAMBAN, 'tap'), [RAMBAN]);
+    // הכל (clear) restores everything from any selection.
+    assert.deepStrictEqual(shown([]), all);
+    // Long-press adds a second commentator; shown in canonical order whatever the tap order.
+    const two = rank.nextSelection([RAMBAN], RASHI, 'longpress');
+    assert.deepStrictEqual(two, [RAMBAN, RASHI]);
+    assert.deepStrictEqual(shown(two), ['רש"י', 'רמב"ן']);
+    // From הכל a long-press isolates (nothing to add to).
+    assert.deepStrictEqual(rank.nextSelection([], IBN, 'longpress'), [IBN]);
+    // 2+ selected: both tap and long-press toggle chips in / out.
+    const three = rank.nextSelection(two, IBN, 'tap');
+    assert.deepStrictEqual(shown(three), ['רש"י', 'רמב"ן', 'אבן עזרא']);
+    const back = rank.nextSelection(three, RAMBAN, 'longpress');
+    assert.deepStrictEqual(shown(back), ['רש"י', 'אבן עזרא']);
+    assert.deepStrictEqual(rank.nextSelection(back, IBN, 'tap'), [RASHI], 'down to one -> single focus');
+    assert.deepStrictEqual(rank.nextSelection([RASHI], RASHI, 'longpress'), [], 'removing the last one -> הכל');
+    // Sticky across verses: the same selection filters another passage; commentators it lacks are ignored.
+    const otherVerse = rank.rankCommentaries(TANACH.filter((t) => !/רשי/.test(t.bookTitle)), {});
+    assert.deepStrictEqual(names(rank.selectCommentaries(otherVerse, two)), ['רמב"ן']);
+    // None of the selection present -> empty (the drawer shows "הצג את כל המפרשים").
+    assert.deepStrictEqual(rank.selectCommentaries(otherVerse, [RASHI]), []);
+    // Pinned favorites keep priority inside a multi-selection.
+    const pinnedR = rank.rankCommentaries(TANACH, { pinned: [IBN] });
+    assert.deepStrictEqual(names(rank.selectCommentaries(pinnedR, [RASHI, IBN])), ['אבן עזרא', 'רש"י']);
+  });
 }
 
 /** shared/bookStream.js: incremental UTF-8 + line splitting == whole-file parsing, URI names. */
