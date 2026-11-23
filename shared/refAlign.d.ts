@@ -34,6 +34,7 @@ export function isCommentaryTitle(title: string): boolean;
 export function linkTypeFor(title: string): 'commentary' | 'targum';
 export function splitCommentaryTitle(title: string): { commentator: string; base: string } | null;
 export function pairCommentaries(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[]): import("./pairing").Pairs;
+export function pairCommentariesAsync(books: { id: number; title: string; aliases?: string[]; categoryPath?: string }[], pause?: () => Promise<void>): Promise<import("./pairing").Pairs>;
 /** Name of "(א)" units inside a heading: פסוק (Tanach), משנה, סעיף (סימן / כלל), else אות. */
 export function inlineUnitWord(parentTitle: string, categoryPath?: string | null): string;
 export function markerKey(text: string | null | undefined): string | null;

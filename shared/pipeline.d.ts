@@ -4,6 +4,8 @@ import type { FsAdapter, StopReason, TargetDb, WriterDb } from './indexer';
 export interface PipelineFs<H = unknown> extends FsAdapter<H> {
   uriOf?(handle: H): string;
   fromUri?(uri: string, isDir: boolean): H;
+  /** Streamed text chunks of a book file (preferred over readText when present). */
+  open?(handle: H): Promise<import('./indexer').TextChunkReader>;
 }
 
 export type PipelinePhase = 'scan' | 'books' | 'links' | 'finalize';
@@ -35,7 +37,7 @@ export interface RunImportOptions<H = unknown> {
   linksPerTransaction?: number;
   /** Only (re)align commentary pairs that involve these books. */
   linkBookIds?: number[];
-  finalize?: false | { analyze?: boolean; mergePages?: number; maxSteps?: number };
+  finalize?: false | { analyze?: boolean; analysisLimit?: number; mergePages?: number; maxSteps?: number };
   skipRootDirs?: Set<string>;
 }
 
@@ -62,6 +64,8 @@ export interface QueueCounts {
 
 export const PHASES: PipelinePhase[];
 export const SKIPPED_ROOT_DIRS: Set<string>;
+export const MAX_ATTEMPTS: number;
+export const CRASH_MESSAGE: string;
 export function runImport<H>(db: WriterDb, fsa: PipelineFs<H>, opts: RunImportOptions<H>): Promise<RunImportResult>;
 export function completeImport(db: WriterDb): Promise<void>;
 export function queueCounts(db: WriterDb): Promise<QueueCounts>;

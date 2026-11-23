@@ -31,6 +31,13 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > notification; JS wrapper `src/services/importForegroundService.ts`, no-op on web). Kill/resume is self-tested
 > at every 9th SQL statement in `scripts/selftest.js`.
 
+> **Import stability:** books are streamed (`shared/bookStream.js`: 64KB `FileHandle` chunks -> incremental UTF-8
+> -> lines -> `indexer.createBookParser`, 150-paragraph inserts, 2,000-row FTS statements), never held whole.
+> `shared/pipeline.js` commits `ingestion_state.inflight_key/inflight_attempts` before each book / links batch and
+> skips a unit the app died on twice (`CRASH_MESSAGE`). Pairing yields (`pairCommentariesAsync`). Personal imports
+> use their own SQLite connection. The foreground service never `stopService()`s before `startForeground()`.
+> Self-tested: streamed == whole-file builds, poison book / poison commentary, kill at every 9th statement.
+
 > **Commentary drawer priority & accordion:** `shared/commentaryRank.js` orders linked commentaries
 > (⭐ pins from `src/state/commentaryStore.ts` -> base text -> per-corpus canonical core lists -> Otzaria era
 > folders תרגומים/ראשונים/אחרונים/מחברי זמננו -> alphabetical), assigns tier badges, picks the default-open

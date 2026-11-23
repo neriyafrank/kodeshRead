@@ -24,37 +24,55 @@
  *    TRUNCATE between phases, so memory and the WAL stay bounded;
  *  - an Android foreground service (src/services/importForegroundService.ts) keeps the process
  *    alive in the background; a pause / kill resumes at the exact next folder / book / batch.
+ *
+ * Never blocks or crashes the app:
+ *  - books are STREAMED: 64KB byte chunks through an expo-file-system FileHandle (also on SAF
+ *    content:// URIs), decoded and parsed line by line and written 150 paragraphs at a time, so
+ *    memory per book is one chunk whatever the file size, and the JS thread only ever runs a few
+ *    milliseconds between native round trips;
+ *  - commentary pairing of the whole library yields to the UI every few hundred books;
+ *  - personal imports write through their OWN SQLite connection (WAL), so the reader keeps reading
+ *    committed data instead of queueing behind import statements or running inside their
+ *    transactions;
+ *  - a file the app dies on twice is skipped on the next resume (shared/pipeline.js crash guard);
+ *  - names of listed files come from their URIs where possible (no SAF query per file);
+ *  - progress reaches React at most every PROGRESS_MS.
  */
-import { Directory, File } from 'expo-file-system';
+import { Directory, File, FileMode } from 'expo-file-system';
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 
+import { cleanName, nameFromUri, openTextReader } from '../../shared/bookStream';
 import * as indexer from '../../shared/indexer';
 import type { IngestionError, IngestionState, StopReason, TargetDb, WriterDb } from '../../shared/indexer';
 import * as pipeline from '../../shared/pipeline';
 import type { PipelineFs, PipelinePhase, PipelineProgress } from '../../shared/pipeline';
 import { closeQuietly, yieldToUI } from '../db/dbUtils';
-import { CORE_BUILD_DB, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toWriter } from '../db/library';
+import { CORE_BUILD_DB, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toWriter, USER_DB } from '../db/library';
 import { stopRequest, useLibraryJobs } from '../state/libraryJobs';
 
 type Entry = File | Directory;
 
 /** SAF (content://) names can arrive URL-encoded on some devices. */
 function entryName(e: Entry): string {
-  let n = e.name || '';
-  if (/%[0-9A-F]{2}/i.test(n)) {
-    try {
-      n = decodeURIComponent(n);
-    } catch {
-      // keep as is
-    }
-  }
-  const slash = Math.max(n.lastIndexOf('/'), n.lastIndexOf(':'));
-  return slash >= 0 ? n.slice(slash + 1) : n;
+  // From the URI when it carries the name: reading `e.name` on a SAF entry is a synchronous
+  // content-provider query per file (seconds for a big folder).
+  return nameFromUri(e.uri) ?? cleanName(e.name || '');
+}
+
+/** Bytes of a file through a FileHandle (works for file:// and SAF content:// URIs). */
+function byteSource(file: File) {
+  const handle = file.open(FileMode.ReadOnly);
+  return {
+    read: (n: number) => handle.readBytes(n),
+    close: () => handle.close(),
+  };
 }
 
 const deviceFs: PipelineFs<Entry> = {
   list: async (dir) => (dir as Directory).list().map((e) => ({ name: entryName(e), isDir: e instanceof Directory, handle: e })),
   readText: (file) => (file as File).text(),
+  // Streamed reads: the book is never one string in memory.
+  open: (file) => openTextReader(() => byteSource(file as File)),
   uriOf: (e) => e.uri,
   fromUri: (uri, isDir) => (isDir ? new Directory(uri) : new File(uri)),
 };
@@ -69,7 +87,16 @@ export const PHASE_LABELS: Record<PipelinePhase, string> = {
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
+/** Minimum interval between progress updates reaching React / the notification. */
+const PROGRESS_MS = 250;
+let lastProgress = { at: 0, phase: '' };
+
 function onProgress(p: PipelineProgress) {
+  const now = Date.now();
+  // Phase changes and the last item of a phase always show; anything else at most every PROGRESS_MS.
+  const last = p.total != null && p.current != null && p.current >= p.total;
+  if (p.phase === lastProgress.phase && !last && now - lastProgress.at < PROGRESS_MS) return;
+  lastProgress = { at: now, phase: p.phase };
   let detail: string | null = null;
   let fraction: number | null = null;
   if (p.phase === 'scan') detail = `${fmt(p.current ?? 0)} תיקיות · ${fmt(p.total ?? 0)} ספרים נמצאו${p.detail ? ` · ${p.detail}` : ''}`;
@@ -160,14 +187,42 @@ async function readAliases(dir: Directory): Promise<Record<string, string[]>> {
   }
 }
 
-/** Low-RAM bulk-write tuning for a database an import writes to. */
+/** Low-RAM bulk-write tuning for a connection an import writes through. */
 async function tuneForImport(db: SQLiteDatabase): Promise<void> {
   // WAL + NORMAL: every commit is durable enough to resume from after a crash / OS kill without
-  // fsync-ing every page; a 16MB page cache and in-memory temp B-trees keep memory flat and
-  // predictable; journal_size_limit caps the WAL file after each checkpoint.
+  // fsync-ing every page; a 16MB page cache keeps memory flat (temp B-trees stay in memory:
+  // Android has no reliably writable SQLite temp directory); journal_size_limit caps the WAL file
+  // after each checkpoint; busy_timeout waits for a reader's checkpoint instead of failing.
   await db.execAsync(
-    'PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -16000; PRAGMA temp_store = MEMORY; PRAGMA journal_size_limit = 67108864; PRAGMA foreign_keys = OFF;',
+    'PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -16000; PRAGMA temp_store = MEMORY; PRAGMA journal_size_limit = 67108864; PRAGMA busy_timeout = 10000; PRAGMA foreign_keys = OFF;',
   );
+}
+
+/**
+ * A dedicated connection to the personal library for one import. The app's own connection keeps
+ * serving the reader: in WAL mode it reads the last committed state while this one writes.
+ */
+async function openUserWriter(): Promise<SQLiteDatabase> {
+  const db = await openDatabaseAsync(USER_DB, { useNewConnection: true });
+  try {
+    await tuneForImport(db);
+    await indexer.ensureSchema(toWriter(db), { kind: 'user' });
+    return db;
+  } catch (e) {
+    await closeQuietly(db);
+    throw e;
+  }
+}
+
+/** Runs `fn` with a personal-library write connection that is always closed afterwards. */
+async function withUserWriter<T>(fn: (db: SQLiteDatabase) => Promise<T>): Promise<T> {
+  const db = await openUserWriter();
+  try {
+    return await fn(db);
+  } finally {
+    await db.execAsync('PRAGMA wal_checkpoint(PASSIVE);').catch(() => undefined);
+    await closeQuietly(db);
+  }
 }
 
 function walCheckpointer(db: SQLiteDatabase) {
@@ -206,6 +261,7 @@ async function runPipeline(
 ): Promise<ImportSummary> {
   const w = toWriter(db);
   const before = p.resume ? await indexer.readIngestionState(w) : null;
+  lastProgress = { at: 0, phase: '' };
   try {
     const r = await pipeline.runImport(w, deviceFs, {
       source: p.source,
@@ -223,7 +279,7 @@ async function runPipeline(
       walCheckpoint: walCheckpointer(db),
       checkpointEvery: 150,
       linksPerTransaction: 20,
-      finalize: { analyze: target === 'core' },
+      finalize: { analyze: target === 'core', analysisLimit: 1000 },
     });
     const errors = r.stopped ? (await indexer.readIngestionErrors(w, 50)).map((e) => ({ path: e.file_path, message: e.message })) : r.errors.map((e) => ({ path: e.relPath, message: e.message }));
     return {
@@ -251,48 +307,54 @@ async function finishUser(user: SQLiteDatabase, out: ImportSummary): Promise<Imp
   return out;
 }
 
-/** Imports picked .txt files into the root of "הספרים שלי". */
-export async function importUserFiles(user: SQLiteDatabase, picked: File[], opts: RunOptions = {}): Promise<ImportSummary> {
+/**
+ * Imports picked .txt files into the root of "הספרים שלי". `_reader` is the app's own connection
+ * (kept for the call shape); the import writes through a dedicated connection.
+ */
+export async function importUserFiles(_reader: SQLiteDatabase, picked: File[], opts: RunOptions = {}): Promise<ImportSummary> {
   ensureNative();
   const files = picked.map((f) => ({ name: entryName(f), handle: f as Entry }));
   const books = files.filter((f) => indexer.isBookFileName(f.name));
   if (!books.length) throw new Error('לא נבחרו קובצי ‎.txt');
   const uri = filesUri(picked);
   liveSources.set(uri, { kind: 'files', files: picked });
-  await tuneForImport(user);
-  const out = await runPipeline(user, 'user', {
-    source: { kind: 'files', files },
-    sourceUri: uri,
-    sourceName: books.length === 1 ? books[0].name : `${books.length} קבצים`,
-    idBase: indexer.USER_ID_BASE,
-    categoryPrefix: [indexer.USER_ROOT_NAME],
-    resume: !!opts.resume,
+  return withUserWriter(async (user) => {
+    const out = await runPipeline(user, 'user', {
+      source: { kind: 'files', files },
+      sourceUri: uri,
+      sourceName: books.length === 1 ? books[0].name : `${books.length} קבצים`,
+      idBase: indexer.USER_ID_BASE,
+      categoryPrefix: [indexer.USER_ROOT_NAME],
+      resume: !!opts.resume,
+    });
+    return finishUser(user, out);
   });
-  return finishUser(user, out);
 }
 
 /** Imports a folder tree (sub-folders become categories) into "הספרים שלי/<folder>". */
-export async function importUserFolder(user: SQLiteDatabase, root: Directory, opts: RunOptions = {}): Promise<ImportSummary> {
+export async function importUserFolder(_reader: SQLiteDatabase, root: Directory, opts: RunOptions = {}): Promise<ImportSummary> {
   ensureNative();
   useLibraryJobs.getState().update({ stage: PHASE_LABELS.scan, fraction: null, detail: null, phase: 'scan' });
   const books = await resolveBooksRoot(root);
   const uri = folderUri(root);
   liveSources.set(uri, { kind: 'folder', dir: root });
-  await tuneForImport(user);
-  const out = await runPipeline(user, 'user', {
-    source: { kind: 'folder', root: books },
-    sourceUri: uri,
-    sourceName: entryName(root),
-    idBase: indexer.USER_ID_BASE,
-    categoryPrefix: [indexer.USER_ROOT_NAME, entryName(root)],
-    aliasOverrides: await readAliases(books),
-    resume: !!opts.resume,
+  const aliasOverrides = await readAliases(books);
+  return withUserWriter(async (user) => {
+    const out = await runPipeline(user, 'user', {
+      source: { kind: 'folder', root: books },
+      sourceUri: uri,
+      sourceName: entryName(root),
+      idBase: indexer.USER_ID_BASE,
+      categoryPrefix: [indexer.USER_ROOT_NAME, entryName(root)],
+      aliasOverrides,
+      resume: !!opts.resume,
+    });
+    if (!out.stopped && out.books === 0 && out.skipped === 0 && !out.errors.length) {
+      await finishUser(user, out);
+      throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
+    }
+    return finishUser(user, out);
   });
-  if (!out.stopped && out.books === 0 && out.skipped === 0 && !out.errors.length) {
-    await finishUser(user, out);
-    throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
-  }
-  return finishUser(user, out);
 }
 
 /** "Discard & reset" of an interrupted personal import: deletes the books it added. */

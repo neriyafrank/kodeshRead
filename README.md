@@ -299,9 +299,35 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
     (no in-memory list of thousands of SAF URIs; non-text files are counted in `skipped_count` and
     never read); **books** takes the queue's next file in canonical order and writes it — lines,
     TOC, `book_units`, FTS rows, queue row `done`, checkpoint — in **one transaction per book**,
-    then drops its text and yields (15 ms) so the UI stays at 60fps; **links** and **finalize** as
-    below. A kill at any statement resumes at the exact next folder / book / batch (self-tested
-    by killing the import at every 9th SQL statement).
+    then yields (15 ms) so the UI stays at 60fps; **links** and **finalize** as below. A kill at
+    any statement resumes at the exact next folder / book / batch (self-tested by killing the
+    import at every 9th SQL statement).
+  * *Streamed books, no freezes* (`shared/bookStream.js`): on the device a book is never one
+    string in memory. It is read in 64KB chunks through an expo-file-system `FileHandle` (also on
+    SAF `content://` URIs), decoded incrementally (multi-byte characters split across chunks are
+    handled), cut into lines and parsed line by line (`createBookParser`, the same parser behind
+    `parseBook`), and its paragraphs are inserted 150 at a time; the book row, TOC, units and FTS
+    rows (in 2,000-row statements) follow. The JS thread never runs more than a few milliseconds
+    between native round trips, and memory per book is one chunk whatever its size (a 28MB test
+    book: one 1.35s / 105MB block before, ≤ ~10ms slices now, measured on Node). A line over 4M
+    characters fails that book instead of exhausting memory. Commentary pairing of the whole
+    library (`pairCommentariesAsync`) yields every 150 books, and `ANALYZE` is bounded
+    (`analysis_limit`). File names come from SAF URIs where they carry them, instead of one
+    synchronous content-provider query per file.
+  * *Crash-loop protection.* Before a book (or a links batch) starts, its key is committed as
+    `inflight_key` with an attempt count. If the app dies on it (out of memory, a native fault,
+    the OS), the next run retries it once — a links batch one job at a time, to isolate the
+    faulty commentary — and if the app dies on it again it is skipped and logged ("הייבוא נעצר
+    באמצע קובץ זה פעמיים…"). One bad file can never trap every later resume in a crash.
+  * *Own write connection.* Personal imports write through a dedicated SQLite connection
+    (`useNewConnection`, WAL, `busy_timeout`), so the reader keeps reading committed data instead
+    of queueing behind import statements or running inside their open transaction.
+  * *Foreground-service safety.* Android crashes an app whose started foreground service is
+    stopped before it reached `startForeground()` (e.g. a one-file import that finishes in
+    milliseconds). The module never calls `stopService()`: the service always reaches the
+    foreground first and then honours a pending stop; a refused start (background start, missing
+    permission) is caught, a stale stop never stops the next job, and after the Android 15
+    `dataSync` time limit JS sees the service gone and pauses on background instead.
   * *Checkpoints.* Each target DB has an `ingestion_state` row (`source_uri`, `target_db`,
     `status` = `in_progress` / `paused` / `completed`, `phase` = scan / books / links / finalize,
     `processed_count` / `total_count`, `last_book_path`, `base_book_id`, `updated_at`) and an

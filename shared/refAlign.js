@@ -200,7 +200,7 @@ function makeBaseIndex(units) {
 // ---------------------------------------------------------------------------
 
 // Pairing lives in ./pairing.js (calibrated on the full Otzaria library index).
-const { KNOWN_BASES, isCommentaryTitle, splitCommentaryTitle, pairCommentaries, multiTargets, headingBookKey } = require('./pairing');
+const { KNOWN_BASES, isCommentaryTitle, splitCommentaryTitle, pairCommentaries, pairCommentariesAsync, multiTargets, headingBookKey } = require('./pairing');
 
 /**
  * Whether a commentary's inline "(א)" numbering can be the base's own units. Not for the Shulchan
@@ -422,6 +422,7 @@ module.exports = {
   sharesInlineNumbering,
   splitCommentaryTitle,
   pairCommentaries,
+  pairCommentariesAsync,
   inlineUnitWord,
   markerKey,
   inlineUnits,
