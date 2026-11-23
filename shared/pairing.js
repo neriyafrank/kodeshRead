@@ -181,12 +181,39 @@ function affinity(commCorpus, candCorpus) {
  * @returns {{ commId: number, baseId: number, how: string }[] & { multi?: { commId, scope }[] }}
  *   Array of one-to-one pairs; `.multi` lists corpus-wide commentaries with their scope.
  */
+/** Books handled between two pause points of pairCommentariesAsync (a few ms of work on a phone). */
+const PAIR_SLICE = 150;
+
+/** pairCommentaries in one go (the PC build, tests). */
 function pairCommentaries(books) {
+  const it = pairSteps(books);
+  for (;;) {
+    const r = it.next();
+    if (r.done) return r.value;
+  }
+}
+
+/**
+ * The same pairing, cooperatively: `pause()` is awaited every PAIR_SLICE books, so pairing the
+ * whole Otzaria library on a phone never blocks the JS thread for more than a few milliseconds.
+ */
+async function pairCommentariesAsync(books, pause) {
+  const it = pairSteps(books);
+  for (;;) {
+    const r = it.next();
+    if (r.done) return r.value;
+    if (pause) await pause();
+  }
+}
+
+function* pairSteps(books) {
+  let tick = 0;
   const info = books.map((b) => ({ b, place: placeOf(b.categoryPath) }));
   const byId = new Map(info.map((x) => [x.b.id, x]));
   const index = new Map(); // key -> [{ x, strength }]
   const sindex = new Map(); // skeleton key -> [{ x, strength }]
   for (const x of info) {
+    if (++tick % PAIR_SLICE === 0) yield;
     for (const [k, s] of baseKeys(x.b, x.place)) {
       // A commentary is a base only under its exact title (nested chains); its stripped forms
       // ("יכין זבים" -> "זבים") are weaker than any primary text's.
@@ -229,6 +256,7 @@ function pairCommentaries(books) {
   const out = [];
   const multi = [];
   for (const x of info) {
+    if (++tick % PAIR_SLICE === 0) yield;
     const { b, place } = x;
     const splits = commentarySplits(b.title);
     let found = null;
@@ -393,4 +421,4 @@ function headingBookKey(title) {
   return stripFillers(aliasKey(String(title || '').replace(/^\s*(פרשת|ספר|מסכת)\s+/, '')));
 }
 
-module.exports = { commentarySplits, nameVariants, KNOWN_BASES, COMMENTARY_DIRS, isCommentaryTitle, splitCommentaryTitle, placeOf, pairCommentaries, multiTargets, headingBookKey, scopeOfMulti };
+module.exports = { commentarySplits, nameVariants, KNOWN_BASES, COMMENTARY_DIRS, isCommentaryTitle, splitCommentaryTitle, placeOf, pairCommentaries, pairCommentariesAsync, multiTargets, headingBookKey, scopeOfMulti };

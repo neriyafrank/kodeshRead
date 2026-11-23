@@ -9,7 +9,9 @@ import expo.modules.kotlin.modules.ModuleDefinition
 
 /**
  * JS bridge: start / update / stop the import foreground service.
- * update() re-posts the notification directly (no service intent per progress tick).
+ * update() re-posts the notification directly (no service intent per progress tick); it is a
+ * no-op once the service stopped (finished, refused or timed out), so a late tick never revives
+ * an orphan notification.
  */
 class ImportForegroundServiceModule : Module() {
   private val context: Context
@@ -27,6 +29,7 @@ class ImportForegroundServiceModule : Module() {
         putExtra(ImportForegroundService.EXTRA_CURRENT, current)
         putExtra(ImportForegroundService.EXTRA_TOTAL, total)
       }
+      ImportForegroundService.beginStart()
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(intent)
       } else {
@@ -42,9 +45,10 @@ class ImportForegroundServiceModule : Module() {
       true
     }
 
+    // Never Context.stopService(): if the service has not reached startForeground() yet, Android
+    // would crash the app ("did not then call startForeground()"). The service stops itself.
     AsyncFunction("stop") {
-      val ctx = context
-      ctx.stopService(Intent(ctx, ImportForegroundService::class.java))
+      ImportForegroundService.requestStop()
       true
     }
 

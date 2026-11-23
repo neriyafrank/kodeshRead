@@ -122,6 +122,7 @@ async function main() {
     assert.strictEqual(commentary.commentatorName('הערות על רשי על בראשית'), 'הערות על רשי');
   });
   await commentaryRankTests();
+  await bookStreamTests();
 
   await check('reader: prepareDisplayText (BiDi RLM, safe HTML, niqqud)', () => {
     const RLM = reader.RLM;
@@ -2007,6 +2008,154 @@ async function streamingPipelineTests() {
       db.raw.close();
     });
 
+    // --- streamed reads (device path) ------------------------------------------------------
+    const bookStream = require('../shared/bookStream');
+    /** fs adapter whose open() streams a file in tiny, irregular byte chunks (multi-byte chars split). */
+    const streamingFs = (chunkOf) => ({
+      ...nodeFs,
+      uriOf: (h) => h,
+      fromUri: (u) => u,
+      open: (file) => {
+        let i = 0;
+        return bookStream.openTextReader(
+          () => {
+            const fd = fs.openSync(file, 'r');
+            return {
+              read: async () => {
+                const n = chunkOf(i++);
+                const buf = Buffer.alloc(n);
+                const got = fs.readSync(fd, buf, 0, n, null);
+                return new Uint8Array(buf.buffer, buf.byteOffset, got);
+              },
+              close: () => fs.closeSync(fd),
+            };
+          },
+          { forceJs: true },
+        );
+      },
+    });
+    await check('pipeline: streamed book reads (1..17-byte chunks, JS UTF-8 decoder) == whole-file reads', async () => {
+      for (const [label, chunkOf] of [['1 byte', () => 1], ['irregular', (i) => 1 + ((i * 7) % 17)]]) {
+        const db = await fresh(`stream-${label.replace(/\s/g, '')}.db`);
+        const r = await pipeline.runImport(db.w, streamingFs(chunkOf), opts());
+        assert.strictEqual(r.stopped, null);
+        await pipeline.completeImport(db.w);
+        assert.deepStrictEqual(await librarySnapshot(db.read), refSnap, label);
+        assert.strictEqual(r.failed, 1, 'the binary .txt still fails (streamed)');
+        db.raw.close();
+      }
+    });
+
+    // --- crash-loop protection ----------------------------------------------------------------
+    /** Writer adapter the test can "kill" (every later statement throws, like a dead process). */
+    const dieable = (w) => {
+      const st = { dead: false };
+      const guard = (fn) => async (sql, params) => {
+        if (st.dead) throw new Error('process is dead');
+        return fn(sql, params);
+      };
+      return { st, w: { exec: guard(w.exec), run: guard(w.run), all: guard(w.all) } };
+    };
+    /** Runs the import until it completes, "crashing the app" whenever `crashes(db)` says so. */
+    const runWithCrashes = async (name, makeFs) => {
+      const file = path.join(work, name);
+      let db = await fresh(name);
+      for (let runs = 1; runs < 40; runs++) {
+        const d = dieable(db.w);
+        const st = await indexer.readIngestionState(db.read);
+        let r = null;
+        try {
+          r = await pipeline.runImport(d.w, makeFs(d.st), opts({ resume: !!st }));
+        } catch (e) {
+          assert.ok(d.st.dead, `unexpected failure: ${e.message}`);
+        }
+        if (r) {
+          assert.strictEqual(r.stopped, null);
+          await pipeline.completeImport(db.w);
+          return { db, runs, r };
+        }
+        db.raw.close(); // the OS took the process
+        db = openWal(file);
+        await indexer.ensureSchema(db.w, { kind: 'core' });
+      }
+      throw new Error('never completed (crash loop)');
+    };
+    await check('pipeline: a book that crashes the app every time is skipped on the 3rd run (no crash loop)', async () => {
+      const poison = 'משנה ברכות.txt';
+      let reads = 0;
+      const { db, runs, r } = await runWithCrashes('poison-book.db', (st) => ({
+        ...nodeFs,
+        uriOf: (h) => h,
+        fromUri: (u) => u,
+        readText: async (f) => {
+          if (f.endsWith(path.sep + poison)) {
+            reads++;
+            st.dead = true; // out of memory / native fault while reading this book
+            throw new Error('process is dead');
+          }
+          return nodeFs.readText(f);
+        },
+      }));
+      assert.strictEqual(runs, 3, `two crashes, then skipped (${runs} runs)`);
+      assert.strictEqual(reads, 2, 'retried exactly once');
+      const books = await db.read.all('SELECT file_path FROM books');
+      assert.ok(!books.some((b) => b.file_path.endsWith('/' + poison)));
+      assert.strictEqual(books.length, fx.booksCount - 1, 'every other book imported');
+      const errs = await indexer.readIngestionErrors(db.read, 50);
+      assert.ok(errs.some((e) => e.file_path.endsWith('/' + poison) && e.message === pipeline.CRASH_MESSAGE), JSON.stringify(errs));
+      assert.ok(r.errors.some((e) => e.relPath.endsWith('/' + poison)));
+      const st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(st.inflight_key, null, 'nothing left in flight');
+      assert.ok((await db.read.all('SELECT COUNT(*) AS n FROM ref_links'))[0].n > 0, 'links phase ran');
+      db.raw.close();
+    });
+    await check('pipeline: a commentary that crashes the links phase every time is isolated and skipped', async () => {
+      const target = 'ברטנורא על משנה ברכות';
+      let targetId = null;
+      // The crash is injected while aligning `target` (its ref_links rows are replaced first).
+      const file = path.join(work, 'poison-link.db');
+      let d2 = await fresh('poison-link.db');
+      let crashes = 0;
+      let done = null;
+      for (let run = 0; run < 40 && !done; run++) {
+        const st0 = await indexer.readIngestionState(d2.read);
+        const d = dieable(d2.w);
+        const w = {
+          ...d.w,
+          run: async (sql, params) => {
+            if (targetId == null && /^INSERT INTO books|^UPDATE books SET title/.test(sql) && params && params[0] === target) targetId = params[3];
+            if (/^DELETE FROM ref_links WHERE comm_book_id/.test(sql) && params[0] === targetId) {
+              d.st.dead = true;
+              crashes++;
+              throw new Error('process is dead');
+            }
+            return d.w.run(sql, params);
+          },
+        };
+        try {
+          const r = await pipeline.runImport(w, nodeFs, opts({ resume: !!st0, linksPerTransaction: 4 }));
+          await pipeline.completeImport(d2.w);
+          done = r;
+        } catch (e) {
+          assert.ok(d.st.dead, e.message);
+          d2.raw.close();
+          d2 = openWal(file);
+          await indexer.ensureSchema(d2.w, { kind: 'core' });
+        }
+      }
+      assert.ok(done, 'completed');
+      assert.ok(targetId != null, 'target commentary indexed');
+      assert.ok(crashes >= 2 && crashes <= 6, `${crashes} crashes before the job was skipped`);
+      assert.strictEqual(Number((await d2.read.all('SELECT COUNT(*) AS n FROM ref_links WHERE comm_book_id = ?', [targetId]))[0].n), 0);
+      const errs = await indexer.readIngestionErrors(d2.read, 50);
+      assert.ok(errs.some((e) => e.file_path === 'קישור פרשנים: ' + target && e.message === pipeline.CRASH_MESSAGE), JSON.stringify(errs));
+      // Every other commentary is still aligned.
+      const snap = await librarySnapshot(d2.read);
+      assert.ok(snap.refLinks.length > 0 && snap.refLinks.length < refSnap.refLinks.length);
+      assert.strictEqual(Number((await indexer.readIngestionState(d2.read)).links_done), Number((await indexer.readIngestionState(d2.read)).links_total));
+      d2.raw.close();
+    });
+
     // --- crash (kill) at any statement ------------------------------------------------------
     const probe = await fresh('probe.db');
     const log = [];
@@ -2408,6 +2557,114 @@ async function commentaryRankTests() {
   });
 }
 
+/** shared/bookStream.js: incremental UTF-8 + line splitting == whole-file parsing, URI names. */
+async function bookStreamTests() {
+  const bs = require('../shared/bookStream');
+  const sampleFiles = fs
+    .readdirSync(path.join(ROOT, 'raw_library', 'sample'), { recursive: true })
+    .filter((f) => String(f).endsWith('.txt'))
+    .map((f) => path.join(ROOT, 'raw_library', 'sample', String(f)));
+  /** Lines of `buf` streamed in chunks of chunkOf(i) bytes. */
+  const streamLines = (buf, chunkOf, forceJs) => {
+    const dec = bs.createUtf8Decoder({ forceJs });
+    const sp = bs.createLineSplitter();
+    const out = [];
+    for (let i = 0, k = 0; i < buf.length; k++) {
+      const n = chunkOf(k);
+      out.push(...sp.push(dec.write(new Uint8Array(buf.subarray(i, i + n)))));
+      i += n;
+    }
+    out.push(...sp.push(dec.end()), ...sp.end());
+    return out;
+  };
+  const wholeLines = (text) => text.replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n');
+
+  await check('book stream: UTF-8 + lines across every chunk boundary == split of the whole text (BOM, CRLF, lone CR, astral)', () => {
+    const text = '﻿<h1>בְּרֵאשִׁ֖ית 😀</h1>\r\nשורה ב\rשורה ג\n\né ü 中文 𝄞\r\n';
+    const buf = Buffer.from(text, 'utf8');
+    for (const forceJs of [true, false]) {
+      for (let size = 1; size <= buf.length; size++) assert.deepStrictEqual(streamLines(buf, () => size, forceJs), wholeLines(text), `chunk ${size} (js ${forceJs})`);
+    }
+    const d = bs.createUtf8Decoder({ forceJs: true });
+    assert.strictEqual(d.write(new Uint8Array([0x41, 0xff, 0xe2, 0x28, 0x41])) + d.end(), 'A��(A', 'invalid bytes -> U+FFFD');
+    const cut = bs.createUtf8Decoder({ forceJs: true });
+    assert.strictEqual(cut.write(new Uint8Array([0xd7])) + cut.end(), '�', 'truncated sequence at EOF');
+  });
+
+  await check('book stream: every sample book streams (irregular chunks) to exactly parseBook\'s paragraphs and TOC', () => {
+    for (const f of sampleFiles) {
+      const buf = fs.readFileSync(f);
+      const whole = indexer.parseBook(buf.toString('utf8'), 'x');
+      const parser = indexer.createBookParser('x');
+      const paragraphs = [];
+      for (const l of streamLines(buf, (k) => 1 + ((k * 131) % 4093), true)) {
+        const p = parser.line(l);
+        if (p) paragraphs.push(p);
+      }
+      assert.deepStrictEqual({ ...parser.finish(), paragraphs }, whole, path.basename(f));
+    }
+  });
+
+  await check('book stream: a line longer than the limit fails the book instead of exhausting memory', () => {
+    const sp = bs.createLineSplitter({ maxLineChars: 100 });
+    sp.push('a'.repeat(60) + '\n' + 'b'.repeat(60));
+    assert.throws(() => sp.push('c'.repeat(60)), bs.LineTooLongError);
+    assert.ok(bs.MAX_LINE_CHARS >= 1024 * 1024);
+  });
+
+  await check('book stream: openTextReader reads a byte source in chunks and always closes it', async () => {
+    const buf = Buffer.from('<h1>ספר</h1>\nשורה אחת\nשורה שתיים', 'utf8');
+    let pos = 0;
+    let closed = 0;
+    const reader = await bs.openTextReader(() => ({
+      read: async (n) => {
+        const out = new Uint8Array(buf.subarray(pos, pos + n));
+        pos += out.length;
+        return out;
+      },
+      close: () => closed++,
+    }), { chunkBytes: 5, forceJs: true });
+    let text = '';
+    for (let t; (t = await reader.read()) != null; ) text += t;
+    await reader.close();
+    await reader.close();
+    assert.strictEqual(text, buf.toString('utf8'));
+    assert.strictEqual(closed, 1);
+  });
+
+  await check('book stream: names from SAF / file URIs (no per-file content-provider query)', () => {
+    const enc = encodeURIComponent;
+    const ext = 'content://com.android.externalstorage.documents/tree/primary%3AOtzaria/document/';
+    assert.strictEqual(bs.nameFromUri(ext + enc('primary:Otzaria/אוצריא/תנך')), 'תנך');
+    assert.strictEqual(bs.nameFromUri(ext + enc('primary:Otzaria/אוצריא/תנך/בראשית.txt')), 'בראשית.txt');
+    assert.strictEqual(bs.nameFromUri(ext + 'primary%3AOtzaria'), 'Otzaria');
+    assert.strictEqual(bs.nameFromUri('content://com.android.providers.downloads.documents/document/msf%3A1000123'), null, 'opaque id');
+    assert.strictEqual(bs.nameFromUri('content://com.android.providers.downloads.documents/document/' + enc('raw:/storage/emulated/0/Download/ספר.txt')), 'ספר.txt');
+    assert.strictEqual(bs.nameFromUri('file:///data/files/' + enc('שבת.txt')), 'שבת.txt');
+    assert.strictEqual(bs.nameFromUri('content://media/external/file/123'), null);
+    assert.strictEqual(bs.cleanName('primary:Otzaria/x%20y.txt'), 'x y.txt');
+  });
+
+  await check('pairing: cooperative pairCommentariesAsync == pairCommentaries, and it yields', async () => {
+    const pairing = require('../shared/pairing');
+    const books = fs
+      .readFileSync(path.join(ROOT, 'otzaria_index_only.txt'), 'utf8')
+      .split('\n')
+      .filter((l) => l.endsWith('.txt'))
+      .slice(0, 3000)
+      .map((l, i) => {
+        const parts = l.replace(/^\.\//, '').split('/');
+        return { id: i + 1, title: parts[parts.length - 1].replace(/\.txt$/, ''), aliases: [], categoryPath: parts.slice(0, -1).join('/') };
+      });
+    let pauses = 0;
+    const a = await pairing.pairCommentariesAsync(books, async () => void pauses++);
+    const b = pairing.pairCommentaries(books);
+    assert.deepStrictEqual([...a], [...b]);
+    assert.deepStrictEqual(a.multi, b.multi);
+    assert.ok(pauses >= 20, `${pauses} pauses`);
+  });
+}
+
 /** The Android foreground-service config plugin + native module wiring. */
 async function foregroundServicePluginTests() {
   const plugin = require('../plugins/withImportForegroundService');
@@ -2438,6 +2695,16 @@ async function foregroundServicePluginTests() {
     const svc = src('ImportForegroundService.kt');
     assert.strictEqual(`${pkg}.ImportForegroundService`, plugin.SERVICE_NAME);
     assert.ok(/FOREGROUND_SERVICE_TYPE_DATA_SYNC/.test(svc) && /PARTIAL_WAKE_LOCK/.test(svc));
+    // Crash guards: Android kills the app if a started foreground service is stopped before it
+    // called startForeground(), so the module never uses stopService(); the service reaches the
+    // foreground first in onStartCommand and only then honours a pending stop.
+    const code = (f) => src(f).replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.ok(!/stopService\(/.test(code(`${cls}.kt`)), 'module never calls Context.stopService()');
+    assert.ok(/requestStop\(\)/.test(src(`${cls}.kt`)) && /beginStart\(\)/.test(src(`${cls}.kt`)));
+    const onStart = svc.slice(svc.indexOf('override fun onStartCommand'), svc.indexOf('override fun onTimeout'));
+    assert.ok(onStart.indexOf('startForeground(') >= 0 && onStart.indexOf('startForeground(') < onStart.indexOf('stopRequested'), 'startForeground before honouring a stop');
+    assert.ok(/catch \(e: Exception\)/.test(onStart), 'a refused startForeground() is caught');
+    assert.ok(/gen == generation && stopRequested/.test(svc), 'a stale stop never stops a newer job');
     const js = fs.readFileSync(path.join(ROOT, 'src', 'services', 'importForegroundService.ts'), 'utf8');
     assert.ok(/requireOptionalNativeModule<NativeImportService>\('ImportForegroundService'\)/.test(js), 'JS looks the module up optionally (web no-op)');
   });

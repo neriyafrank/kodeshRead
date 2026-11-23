@@ -16,12 +16,21 @@
  *
  * Every step commits its checkpoint (ingestion_state) together with the rows it describes, so a
  * pause, an OS kill or a crash at any statement resumes at the exact next folder / book / batch,
- * with no duplicates and no wasted work. There are no external link files: commentary links come
+ * with no duplicates and no wasted work.
+ *
+ * Crash-loop protection: before a book (or a links batch) starts, its key is committed as
+ * `inflight_key` with an attempt count. A unit that was still in flight when the app died is
+ * retried once (alone, for links); if the app dies on it again it is skipped and logged, so one
+ * file that crashes the app (out of memory, a native fault) can never trap every later resume.
+ *
+ * Books are streamed when the file adapter has `open(handle)` (text chunks; see
+ * shared/bookStream.js): a book is parsed and written as it arrives, never held whole. There are no external link files: commentary links come
  * only from folder paths, file names and the books' own headings.
  *
  * File adapter (in addition to indexer's { list, readText }):
  *   uriOf(handle) -> string            persisted in import_queue
  *   fromUri(uri, isDir) -> handle      re-opens a queued folder / file
+ *   open(handle) -> Promise<{ read() -> Promise<string|null>, close() }>   optional streamed reads
  * (both default to the identity, which suits node paths).
  */
 'use strict';
@@ -37,6 +46,23 @@ const SKIPPED_ROOT_DIRS = new Set(['links']);
 const METADATA_FILES = new Set(['order.json', 'aliases.json', 'manifest.json', 'files.json']);
 
 const PHASES = ['scan', 'books', 'links', 'finalize'];
+
+/** Runs that may die on the same book / links job before it is skipped. */
+const MAX_ATTEMPTS = 2;
+const CRASH_MESSAGE = 'הייבוא נעצר באמצע קובץ זה פעמיים (קריסה או סגירת האפליקציה) — הקובץ דולג';
+
+/** Attempts already made on `key` (0 when another unit, or nothing, was in flight). */
+function attemptsOf(st, key) {
+  return st && st.inflight_key === key ? Number(st.inflight_attempts) || 0 : 0;
+}
+const CLEAR_INFLIGHT = { inflight_key: null, inflight_attempts: 0 };
+
+/** The checkpoint row; unlike indexer.readIngestionState, a failing read (dead database) throws. */
+async function checkpoint(db) {
+  const st = (await db.all('SELECT * FROM ingestion_state WHERE id = 1', []))[0];
+  if (!st) throw new Error('ingestion checkpoint missing');
+  return st;
+}
 
 const defaultYield = () => new Promise((r) => setTimeout(r, 0));
 
@@ -229,24 +255,48 @@ async function booksPhase(db, fsa, o, report) {
     const relParts = row.rel.split('/');
     const file = { name: relParts[relParts.length - 1], rel: relParts, dir: relParts.slice(0, -1) };
     const relPath = prefix.concat(relParts).join('/');
-    const r = await tx(db, async () => {
-      const old = await db.all('SELECT id FROM books WHERE file_path = ?', [relPath]);
-      const res = await writer.write({ file, relPath, oldIds: old.map((x) => x.id), read: () => fsa.readText(fromUri(row.uri, false)) });
-      if (res.ok) await db.run("UPDATE import_queue SET status = 'done', book_id = ? WHERE id = ?", [res.id, row.id]);
-      else {
+    const key = 'book:' + row.id;
+    const attempts = attemptsOf(await checkpoint(db), key);
+    let r;
+    if (attempts >= MAX_ATTEMPTS) {
+      // The app died on this book every time: skip it instead of crashing on every resume.
+      r = { ok: false, error: new Error(CRASH_MESSAGE) };
+      await tx(db, async () => {
         await db.run("UPDATE import_queue SET status = 'failed' WHERE id = ?", [row.id]);
-        await logError(db, relPath, res.error);
-      }
-      await indexer.writeIngestionState(db, {
-        phase: 'books',
-        status: 'in_progress',
-        processed_count: done + 1,
-        total_count: total,
-        last_book_path: relPath,
-        error_count: await count(db, 'SELECT COUNT(*) AS n FROM ingestion_errors'),
+        await logError(db, relPath, r.error);
+        await indexer.writeIngestionState(db, Object.assign({
+          phase: 'books',
+          status: 'in_progress',
+          processed_count: done + 1,
+          total_count: total,
+          last_book_path: relPath,
+          error_count: await count(db, 'SELECT COUNT(*) AS n FROM ingestion_errors'),
+        }, CLEAR_INFLIGHT));
       });
-      return res;
-    });
+    } else {
+      // Committed before the book starts: a kill while writing it is detected on resume.
+      await tx(db, () => indexer.writeIngestionState(db, { inflight_key: key, inflight_attempts: attempts + 1 }));
+      const handle = fromUri(row.uri, false);
+      const source = fsa.open ? { open: () => fsa.open(handle) } : { read: () => fsa.readText(handle) };
+      r = await tx(db, async () => {
+        const old = await db.all('SELECT id FROM books WHERE file_path = ?', [relPath]);
+        const res = await writer.write(Object.assign({ file, relPath, oldIds: old.map((x) => x.id) }, source));
+        if (res.ok) await db.run("UPDATE import_queue SET status = 'done', book_id = ? WHERE id = ?", [res.id, row.id]);
+        else {
+          await db.run("UPDATE import_queue SET status = 'failed' WHERE id = ?", [row.id]);
+          await logError(db, relPath, res.error);
+        }
+        await indexer.writeIngestionState(db, Object.assign({
+          phase: 'books',
+          status: 'in_progress',
+          processed_count: done + 1,
+          total_count: total,
+          last_book_path: relPath,
+          error_count: await count(db, 'SELECT COUNT(*) AS n FROM ingestion_errors'),
+        }, CLEAR_INFLIGHT));
+        return res;
+      });
+    }
     done++;
     if (r.ok) {
       out.books++;
@@ -259,6 +309,58 @@ async function booksPhase(db, fsa, o, report) {
     report('books', done, total, r.ok ? r.title : file.name);
     // Keep the WAL bounded: fold it back into the database every `every` books.
     if (done % every === 0) await o.walCheckpoint('PASSIVE');
+    await o.yieldToUI();
+  }
+}
+
+/**
+ * Links phase: aligns commentaries with their base books in batches of `linksPerTransaction`
+ * jobs, the checkpoint cursor committed with each batch. The library is paired once per run,
+ * cooperatively (yieldToUI between slices). A batch that was in flight when the app died is redone
+ * one job at a time, and a single job the app died on twice is skipped and logged.
+ * @returns {Promise<StopReason|null>}
+ */
+async function linksPhase(db, o, report, out) {
+  if (!(await indexer.hasTable(db, 'ref_links'))) return null;
+  const plan = await indexer.refLinkJobs(db, o.linkBookIds, o.yieldToUI);
+  const total = plan.jobs.length;
+  const byId = new Map(plan.books.map((b) => [b.id, b]));
+  const perTx = Math.max(1, o.linksPerTransaction || 20);
+  out.refLinks = { pairs: total, units: 0 };
+  for (;;) {
+    const stop = o.shouldStop ? o.shouldStop() : null;
+    if (stop) return stop;
+    const st = await checkpoint(db);
+    const cursor = Math.min(total, Number(st.links_done) || 0);
+    if (cursor >= total) {
+      if (Number(st.links_total) !== total) await tx(db, () => indexer.writeIngestionState(db, { links_done: total, links_total: total }));
+      return null;
+    }
+    const key = 'links:' + cursor;
+    const attempts = attemptsOf(st, key);
+    if (attempts >= MAX_ATTEMPTS) {
+      const job = plan.jobs[cursor];
+      const title = (byId.get(job.commId) || {}).title || String(job.commId);
+      await tx(db, async () => {
+        await logError(db, 'קישור פרשנים: ' + title, new Error(CRASH_MESSAGE));
+        await indexer.writeIngestionState(db, Object.assign({ links_done: cursor + 1, links_total: total, phase: 'links' }, CLEAR_INFLIGHT));
+      });
+      continue;
+    }
+    // After a crash in this batch: redo it one job at a time, so the faulty job is isolated.
+    const size = attempts ? 1 : perTx;
+    await tx(db, () => indexer.writeIngestionState(db, { inflight_key: key, inflight_attempts: attempts + 1, links_total: total }));
+    const r = await indexer.indexRefLinks(db, {
+      plan,
+      cursor,
+      limit: size,
+      booksPerTransaction: size,
+      shouldStop: o.shouldStop,
+      beforeCommit: (next, n) => indexer.writeIngestionState(db, Object.assign({ links_done: next, links_total: n, phase: 'links' }, CLEAR_INFLIGHT)),
+      onBook: (b) => report('links', b.index, b.total, b.title),
+    });
+    out.refLinks.units += r.units;
+    if (r.stopped) return r.stopped;
     await o.yieldToUI();
   }
 }
@@ -317,7 +419,8 @@ async function runImport(db, fsa, opts) {
   const out = { stopped: null, phase: st.phase, books: 0, paragraphs: 0, failed: 0, skippedFiles: 0, errors: [], refLinks: { pairs: 0, units: 0 } };
   const pause = async (stop) => {
     out.stopped = stop;
-    await tx(db, () => indexer.writeIngestionState(db, { status: 'paused' }));
+    // A clean stop: nothing is in flight any more.
+    await tx(db, () => indexer.writeIngestionState(db, Object.assign({ status: 'paused' }, CLEAR_INFLIGHT)));
     return out;
   };
   const setPhase = (phase, extra) => tx(db, () => indexer.writeIngestionState(db, Object.assign({ phase, status: 'in_progress' }, extra || {})));
@@ -339,18 +442,8 @@ async function runImport(db, fsa, opts) {
     phase = 'links';
   }
   if (phase === 'links') {
-    const cur = await indexer.readIngestionState(db);
-    const ref = await indexer.indexRefLinks(db, {
-      bookIds: o.linkBookIds,
-      cursor: Number(cur.links_done) || 0,
-      booksPerTransaction: o.linksPerTransaction || 20,
-      shouldStop: o.shouldStop,
-      beforeCommit: (next, total) => indexer.writeIngestionState(db, { links_done: next, links_total: total, phase: 'links' }),
-      onBook: (b) => report('links', b.index, b.total, b.title),
-      yieldEvery: o.yieldToUI,
-    });
-    out.refLinks = { pairs: ref.pairs, units: ref.units };
-    if (ref.stopped) return pause(ref.stopped);
+    const r = await linksPhase(db, o, report, out);
+    if (r) return pause(r);
     await o.walCheckpoint('TRUNCATE');
     await setPhase('finalize');
     phase = 'finalize';
@@ -388,4 +481,4 @@ async function completeImport(db) {
   });
 }
 
-module.exports = { runImport, completeImport, queueCounts, PHASES, SKIPPED_ROOT_DIRS };
+module.exports = { runImport, completeImport, queueCounts, PHASES, SKIPPED_ROOT_DIRS, MAX_ATTEMPTS, CRASH_MESSAGE };

@@ -18,6 +18,7 @@
 
 const { normalizeHebrew, extractRefKey, generateBookAliases, aliasKey, decodeEntities, stripHtml } = require('./hebrew');
 const refAlign = require('./refAlign');
+const { createLineSplitter } = require('./bookStream');
 
 /**
  * Bump when the schema or the parsing rules change (stored in meta.script_version).
@@ -160,6 +161,8 @@ CREATE TABLE IF NOT EXISTS ingestion_state (
   scanned_dirs INTEGER NOT NULL DEFAULT 0,
   links_done INTEGER NOT NULL DEFAULT 0,
   links_total INTEGER NOT NULL DEFAULT 0,
+  inflight_key TEXT,
+  inflight_attempts INTEGER NOT NULL DEFAULT 0,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -219,12 +222,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_import_queue_rel ON import_queue(kind, rel
 CREATE INDEX IF NOT EXISTS idx_import_queue_next ON import_queue(kind, status, sort_key);
 `;
 
-/** ingestion_state columns added after v3 (name -> DDL), applied by migrateSchema(). */
-const INGESTION_COLUMNS_V6 = {
+/**
+ * ingestion_state columns added after v3 (name -> DDL), applied by migrateSchema().
+ * inflight_key / inflight_attempts: the unit of work (a book, a links batch) that is running,
+ * committed before it starts; a unit still in flight after repeated kills is skipped on resume
+ * (crash-loop protection, shared/pipeline.js).
+ */
+const INGESTION_COLUMNS = {
   skipped_count: 'INTEGER NOT NULL DEFAULT 0',
   scanned_dirs: 'INTEGER NOT NULL DEFAULT 0',
   links_done: 'INTEGER NOT NULL DEFAULT 0',
   links_total: 'INTEGER NOT NULL DEFAULT 0',
+  inflight_key: 'TEXT',
+  inflight_attempts: 'INTEGER NOT NULL DEFAULT 0',
 };
 
 const FTS_TABLE_RE = /CREATE VIRTUAL TABLE paragraphs_fts[\s\S]*?\);\n/;
@@ -275,9 +285,9 @@ async function migrateSchema(db) {
     await db.exec('ALTER TABLE books ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 1');
   }
   await db.exec(INGESTION_SCHEMA);
-  // v3..v5 -> v6: new checkpoint counters (CREATE TABLE IF NOT EXISTS keeps the old shape).
+  // Newer checkpoint columns (CREATE TABLE IF NOT EXISTS keeps an old table's shape).
   const stateCols = new Set((await db.all('PRAGMA table_info(ingestion_state)', [])).map((c) => c.name));
-  for (const [name, ddl] of Object.entries(INGESTION_COLUMNS_V6)) {
+  for (const [name, ddl] of Object.entries(INGESTION_COLUMNS)) {
     if (!stateCols.has(name)) await db.exec(`ALTER TABLE ingestion_state ADD COLUMN ${name} ${ddl}`);
   }
   await db.exec(REF_LINKS_SCHEMA);
@@ -381,57 +391,75 @@ function plainHeading(html) {
 const HEADING_RE = /^\s*<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>\s*(.*)$/i;
 
 /**
- * Parse one Otzaria .txt book.
- * line_index = physical line number in the file (1-based, blank lines skipped),
- * which keeps Otzaria link indices valid. Headings are paragraphs too (is_heading=level).
+ * Incremental Otzaria .txt parser: feed physical lines in order (`line(text)`), get the paragraph
+ * each line produces (or null); `finish()` returns the title, the TOC and the last line number.
+ * line_index = physical line number in the file (1-based, blank lines skipped), which keeps Otzaria
+ * link indices valid. Headings are paragraphs too (is_heading = level). Only the TOC is retained,
+ * so a book can be streamed line by line without ever holding its text.
  */
-function parseBook(raw, fallbackTitle) {
-  const text = raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
-  const lines = text.split('\n');
-  const paragraphs = [];
-  const toc = []; // { parentIdx, level, title, refKey, startLine }
-  const stack = []; // open headings: { level, tocIdx, title }
+function createBookParser(fallbackTitle) {
+  const toc = []; // { parentIdx, level, title, refKey, refPath, startLine }
+  const stack = []; // open headings: { level, tocIdx, title, labels }
   let title = null;
+  let lineNo = 0;
+  let lastParagraphLine = 0;
+  const emit = (p) => {
+    lastParagraphLine = p.lineIndex;
+    return p;
+  };
+  return {
+    line(line) {
+      const lineIndex = ++lineNo;
+      if (!line.trim()) return null;
+      const h = HEADING_RE.exec(line);
+      if (h) {
+        const level = Number(h[1]);
+        const headingTitle = plainHeading(h[2]);
+        if (level === 1) {
+          if (!title) title = headingTitle;
+          return emit({ lineIndex, tocPath: null, display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: 1 });
+        }
+        while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
+        const parent = stack[stack.length - 1];
+        // refPath: canonical reference of the unit ("פרק א|פסוק א", "דף ב|עמוד א"), used to align commentaries.
+        const labels = (parent ? parent.labels : []).concat(refAlign.unitLabels(headingTitle));
+        toc.push({ parentIdx: parent ? parent.tocIdx : null, level, title: headingTitle, refKey: extractRefKey(headingTitle), refPath: refAlign.refKeyOf(labels), startLine: lineIndex });
+        stack.push({ level, tocIdx: toc.length - 1, title: headingTitle, labels });
+        const p = { lineIndex, tocPath: stack.map((x) => x.title).join(' > '), display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: level };
+        // Rare: text after a closing heading tag on the same line.
+        if (h[3] && h[3].trim()) {
+          const display = sanitizeDisplay(h[3]);
+          if (display) p.display += ' ' + display;
+        }
+        return emit(p);
+      }
+      const content = line.replace(/^\s*<p\b[^>]*>/i, '').replace(/<\/p>\s*$/i, '');
+      const display = sanitizeDisplay(content);
+      if (!display) return null;
+      return emit({
+        lineIndex,
+        tocPath: stack.length ? stack.map((x) => x.title).join(' > ') : null,
+        display,
+        clean: normalizeHebrew(content),
+        isHeading: 0,
+      });
+    },
+    finish() {
+      return { title: title || fallbackTitle, toc, totalLines: lastParagraphLine };
+    },
+  };
+}
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-    const lineIndex = i + 1;
-    const h = HEADING_RE.exec(line);
-    if (h) {
-      const level = Number(h[1]);
-      const headingTitle = plainHeading(h[2]);
-      if (level === 1) {
-        if (!title) title = headingTitle;
-        paragraphs.push({ lineIndex, tocPath: null, display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: 1 });
-        continue;
-      }
-      while (stack.length && stack[stack.length - 1].level >= level) stack.pop();
-      const parent = stack[stack.length - 1];
-      // refPath: canonical reference of the unit ("פרק א|פסוק א", "דף ב|עמוד א"), used to align commentaries.
-      const labels = (parent ? parent.labels : []).concat(refAlign.unitLabels(headingTitle));
-      toc.push({ parentIdx: parent ? parent.tocIdx : null, level, title: headingTitle, refKey: extractRefKey(headingTitle), refPath: refAlign.refKeyOf(labels), startLine: lineIndex });
-      stack.push({ level, tocIdx: toc.length - 1, title: headingTitle, labels });
-      paragraphs.push({ lineIndex, tocPath: stack.map((s) => s.title).join(' > '), display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: level });
-      // Rare: text after a closing heading tag on the same line.
-      if (h[3] && h[3].trim()) {
-        const display = sanitizeDisplay(h[3]);
-        if (display) paragraphs[paragraphs.length - 1].display += ' ' + display;
-      }
-      continue;
-    }
-    const content = line.replace(/^\s*<p\b[^>]*>/i, '').replace(/<\/p>\s*$/i, '');
-    const display = sanitizeDisplay(content);
-    if (!display) continue;
-    paragraphs.push({
-      lineIndex,
-      tocPath: stack.length ? stack.map((s) => s.title).join(' > ') : null,
-      display,
-      clean: normalizeHebrew(content),
-      isHeading: 0,
-    });
+/** Parse a whole Otzaria .txt book held in memory (the PC build, tests): createBookParser over its lines. */
+function parseBook(raw, fallbackTitle) {
+  const parser = createBookParser(fallbackTitle);
+  const splitter = createLineSplitter({ maxLineChars: Infinity });
+  const paragraphs = [];
+  for (const line of splitter.push(raw).concat(splitter.end())) {
+    const p = parser.line(line);
+    if (p) paragraphs.push(p);
   }
-  return { title: title || fallbackTitle, paragraphs, toc, totalLines: paragraphs.length ? paragraphs[paragraphs.length - 1].lineIndex : 0 };
+  return Object.assign(parser.finish(), { paragraphs });
 }
 
 // ---------------------------------------------------------------------------
@@ -678,6 +706,8 @@ function parseLinkFile(fileName, raw) {
 // Writing
 // ---------------------------------------------------------------------------
 const PARA_BATCH = 150; // rows per multi-row INSERT (<= 8 params each)
+/** Paragraphs per FTS insert statement (bounded native work per call). */
+const FTS_BATCH = 2000;
 
 /**
  * Multi-row INSERTs in chunks of PARA_BATCH. `map(item, index)` (optional) turns an item into its
@@ -797,30 +827,66 @@ async function createBookWriter(db, opts) {
     return id;
   };
 
-  /** Parses + writes one book; returns its counts. Throws on any failure. */
-  const writeParsed = async (file, relPath, oldIds, raw) => {
-    assertTextContent(raw);
+  /**
+   * Streams one book into the database: lines are parsed as they arrive and paragraphs are
+   * inserted PARA_BATCH at a time, so neither the text nor the parsed book is ever held whole.
+   * The book row, TOC, units and FTS rows are written once the last line is in. Throws on any
+   * failure (the caller's SAVEPOINT rolls the partial book back).
+   * `next()` yields text chunks, then null.
+   */
+  const writeStream = async (file, relPath, oldIds, next) => {
     const fallback = file.name.replace(/\.[^.]+$/, '');
-    const parsed = parseBook(raw, fallback);
-    const relKey = file.rel.join('/');
-    const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(relKey)] || [], overrides[aliasKey(fallback)] || []);
-    const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
-
     for (const old of oldIds || []) await deleteBook(db, old);
     const dirParts = prefix.concat(file.dir);
     const categoryId = dirParts.length ? await ensureCategory(dirParts) : null;
     const id = ++bookId;
+    const firstParaId = paraId + 1;
+    // The row comes first (paragraphs reference it); title / aliases / size are set at the end.
+    await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines, is_complete) VALUES (?, ?, ?, ?, ?, 0, 0)', [id, categoryId, fallback, '||', relPath]);
+    const parser = createBookParser(fallback);
+    const splitter = createLineSplitter({ maxLineChars: o.maxLineChars });
+    let head = '';
+    let batch = [];
+    let lines = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      const rows = batch;
+      batch = [];
+      lines += rows.length;
+      await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, rows, (q) => [
+        ++paraId, id, q.lineIndex, q.tocPath, q.display, q.clean, q.isHeading ? 1 : 0,
+      ]);
+    };
+    const feed = async (textLines) => {
+      for (const l of textLines) {
+        const q = parser.line(l);
+        if (!q) continue;
+        batch.push(q);
+        if (batch.length >= PARA_BATCH) await flush();
+      }
+    };
+    for (;;) {
+      const chunk = await next();
+      if (chunk == null) break;
+      if (head.length < 4096) {
+        head += chunk.slice(0, 4096 - head.length);
+        assertTextContent(head);
+      }
+      await feed(splitter.push(chunk));
+    }
+    await feed(splitter.end());
+    await flush();
+
+    const parsed = parser.finish();
+    const relKey = file.rel.join('/');
+    const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(relKey)] || [], overrides[aliasKey(fallback)] || []);
+    const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
     // Stored as "|a|b|c|" so a single alias can also be matched in SQL with LIKE '%|alias|%'.
-    await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines, is_complete) VALUES (?, ?, ?, ?, ?, ?, 0)', [
-      id, categoryId, parsed.title, '|' + aliases.join('|') + '|', relPath, parsed.totalLines,
-    ]);
+    await db.run('UPDATE books SET title = ?, aliases = ?, total_lines = ? WHERE id = ?', [parsed.title, '|' + aliases.join('|') + '|', parsed.totalLines, id]);
     const tocIds = [];
     for (let i = 0; i < parsed.toc.length; i++) tocIds.push(++tocId);
     await insertMany(db, 'INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line)', 7, parsed.toc, (n, i) => [
       tocIds[i], id, n.parentIdx == null ? null : tocIds[n.parentIdx], n.level, n.title, n.refKey, n.startLine,
-    ]);
-    await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, parsed.paragraphs, (p) => [
-      ++paraId, id, p.lineIndex, p.tocPath, p.display, p.clean, p.isHeading ? 1 : 0,
     ]);
     let units = 0;
     if (unitsTable) {
@@ -830,39 +896,60 @@ async function createBookWriter(db, opts) {
         id, u.refKey, u.labels.length, u.start, u.end, u.ownEnd, u.title,
       ]);
     }
-    await db.run(
-      `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
-       SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE book_id = ?`,
-      [id],
-    );
+    // FTS rows in bounded id ranges: no single statement runs long enough to stall the connection.
+    for (let from = firstParaId; from <= paraId; from += FTS_BATCH) {
+      await db.run(
+        `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
+         SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE id BETWEEN ? AND ? AND book_id = ?`,
+        [from, Math.min(paraId, from + FTS_BATCH - 1), id],
+      );
+    }
     await db.run('UPDATE books SET is_complete = 1 WHERE id = ?', [id]);
-    return { id, title: parsed.title, lines: parsed.paragraphs.length, tocNodes: parsed.toc.length, units };
+    return { id, title: parsed.title, lines, tocNodes: parsed.toc.length, units };
   };
 
   /**
    * @param {{ file: { name, rel: string[], dir: string[] }, relPath: string, oldIds?: number[],
-   *           read: () => Promise<string>, onFileRead?: (relKey, raw) => void }} job
+   *           open?: () => Promise<{ read(): Promise<string|null>, close(): any }>,
+   *           read?: () => Promise<string>, onFileRead?: (relKey, raw) => void }} job
+   *   open: streamed text chunks (the device); read: the whole text at once (the PC build, which
+   *   also hashes it through onFileRead). Both go through the same line parser.
    * @returns {Promise<{ ok: true, id, title, lines, tocNodes, units } | { ok: false, error }>}
    */
   const write = async (job) => {
     if (isolate) await db.exec('SAVEPOINT book');
     bookCats = [];
+    // Ids handed out by a book that is rolled back are reused: ids never depend on failures / kills.
+    const ids = { catId, bookId, tocId, paraId };
+    let reader = null;
     try {
-      let raw = await job.read();
-      if (job.onFileRead) job.onFileRead(job.file.rel.join('/'), raw);
-      const r = await writeParsed(job.file, job.relPath, job.oldIds, raw);
-      raw = null; // drop the text before the caller yields
+      let next;
+      if (job.open) {
+        reader = await job.open();
+        next = () => reader.read();
+      } else {
+        let raw = await job.read();
+        if (job.onFileRead) job.onFileRead(job.file.rel.join('/'), raw);
+        next = async () => {
+          const t = raw;
+          raw = null; // drop the text as soon as it is handed over
+          return t;
+        };
+      }
+      const r = await writeStream(job.file, job.relPath, job.oldIds, next);
       if (isolate) await db.exec('RELEASE book');
       return Object.assign({ ok: true }, r);
     } catch (e) {
       if (!isolate) throw e;
       await db.exec('ROLLBACK TO book');
       await db.exec('RELEASE book');
+      ({ catId, bookId, tocId, paraId } = ids);
       for (const p of bookCats) catIds.delete(p);
       state.newCats -= bookCats.length;
       return { ok: false, error: e };
     } finally {
       bookCats = null;
+      if (reader) await Promise.resolve(reader.close()).catch(() => undefined);
     }
   };
 
@@ -1178,14 +1265,15 @@ async function loadBookUnits(db, bookId, totalLines, unitsTable) {
  * One job per commentary -> base pair (Otzaria "X על Y"), or per corpus-wide commentary
  * ("… על השס"), whose top-level headings each name a base (resolved when it is aligned).
  */
-async function refLinkJobs(db, bookIds) {
+async function refLinkJobs(db, bookIds, pause) {
   const rows = await db.all(
     `SELECT b.id, b.title, b.aliases, b.total_lines, COALESCE(c.path, '') AS category_path
        FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE b.is_complete = 1 ORDER BY b.id`,
     [],
   );
   const books = rows.map((r) => ({ id: r.id, title: r.title, aliases: String(r.aliases).split('|').filter(Boolean), categoryPath: r.category_path, totalLines: r.total_lines }));
-  const paired = refAlign.pairCommentaries(books);
+  // On the device the pairing yields every few hundred books (pause), so it never freezes the UI.
+  const paired = pause ? await refAlign.pairCommentariesAsync(books, pause) : refAlign.pairCommentaries(books);
   let jobs = paired.map((p) => ({ commId: p.commId, baseId: p.baseId }));
   for (const m of paired.multi || []) jobs.push({ commId: m.commId, scope: m.scope });
   if (bookIds) {
@@ -1218,6 +1306,8 @@ async function refLinkJobs(db, bookIds) {
  *           onBook?: (p: { index, total, title }) => void, onCommit?: () => Promise<void>,
  *           yieldEvery?: () => Promise<void> }} [opts]
  *   bookIds: only (re)align pairs that involve these books (a personal import).
+ *   plan:    a refLinkJobs() result to reuse (the pipeline computes it once per run);
+ *   limit:   process at most this many jobs from `cursor`, then return (cursor = next job).
  * @returns {Promise<{ pairs, aligned, units, stopped, cursor }>}
  */
 async function indexRefLinks(db, opts) {
@@ -1225,7 +1315,7 @@ async function indexRefLinks(db, opts) {
   const stats = { pairs: 0, aligned: 0, units: 0, stopped: null, cursor: 0 };
   if (!(await hasTable(db, 'ref_links'))) return stats;
   const unitsTable = await hasTable(db, 'book_units');
-  const { books, jobs } = await refLinkJobs(db, o.bookIds);
+  const { books, jobs } = o.plan || (await refLinkJobs(db, o.bookIds));
   const byId = new Map(books.map((b) => [b.id, b]));
   stats.pairs = jobs.length;
   // Base books are reused by many commentaries (רש"י, רמב"ן, ... על בראשית): keep a few cached.
@@ -1258,8 +1348,9 @@ async function indexRefLinks(db, opts) {
     if (o.yieldEvery) await o.yieldEvery();
   };
   let i = start;
+  const stopAt = o.limit ? Math.min(jobs.length, start + o.limit) : jobs.length;
   try {
-    for (; i < jobs.length; i++) {
+    for (; i < stopAt; i++) {
       const stop = o.shouldStop ? o.shouldStop() : null;
       if (stop) {
         stats.stopped = stop;
@@ -1336,7 +1427,8 @@ async function finalizeIndex(db, opts) {
   } else if (hasFts) {
     await db.exec("INSERT INTO paragraphs_fts(paragraphs_fts) VALUES('optimize')");
   }
-  if (o.analyze) await db.exec('ANALYZE');
+  // analysis_limit bounds ANALYZE to a sample per index (multi-GB libraries on a phone).
+  if (o.analyze) await db.exec(o.analysisLimit ? `PRAGMA analysis_limit = ${Number(o.analysisLimit) | 0}; ANALYZE` : 'ANALYZE');
   await db.exec('PRAGMA optimize');
 }
 
@@ -1355,6 +1447,7 @@ async function libraryCounts(db) {
 }
 
 module.exports = {
+  createBookParser,
   SCHEMA,
   INGESTION_SCHEMA,
   REF_LINKS_SCHEMA,

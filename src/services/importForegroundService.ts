@@ -35,9 +35,23 @@ export function isAvailable(): boolean {
   return !!native;
 }
 
-/** True while this session's foreground service is running (imports survive backgrounding). */
+/** Grace period after start(): the service reaches the foreground asynchronously. */
+const STARTING_MS = 5000;
+let startedAt = 0;
+
+/**
+ * True while this session's foreground service is really running (imports survive backgrounding).
+ * False once Android refused it or stopped it (Android 15 dataSync time limit): the lifecycle then
+ * pauses the import when the app leaves the foreground instead of letting the OS kill it.
+ */
 export function isActive(): boolean {
-  return active;
+  if (!active || !native) return false;
+  if (Date.now() - startedAt < STARTING_MS) return true;
+  try {
+    return native.isRunning();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -64,6 +78,7 @@ export async function start(title: string, text: string, current = 0, total = 0)
   try {
     await native.start(title, text, toInt(current), toInt(total));
     active = true;
+    startedAt = Date.now();
     lastUpdate = Date.now();
     return true;
   } catch (e) {

@@ -36,6 +36,18 @@ export interface ParsedBook {
   totalLines: number;
 }
 
+/** Text chunks of one file, then null (shared/bookStream.js openTextReader). */
+export interface TextChunkReader {
+  read(): Promise<string | null>;
+  close(): unknown;
+}
+
+/** Incremental line parser behind parseBook (only the TOC is retained). */
+export function createBookParser(fallbackTitle: string): {
+  line(text: string): ParsedBook['paragraphs'][number] | null;
+  finish(): Omit<ParsedBook, 'paragraphs'>;
+};
+
 export interface BookProgress {
   index: number;
   total: number;
@@ -71,6 +83,10 @@ export interface IngestionState {
   /** v6: links-phase cursor (commentary jobs committed) / total. */
   links_done?: number;
   links_total?: number;
+  /** Unit of work running when the checkpoint was written ("book:<queue id>", "links:<cursor>"). */
+  inflight_key?: string | null;
+  /** Runs that started this unit without finishing it (killed); skipped once it reaches the limit. */
+  inflight_attempts?: number;
   started_at: string;
   updated_at: string;
 }
@@ -173,7 +189,10 @@ export interface BookWriter {
     file: { name: string; rel: string[]; dir: string[] };
     relPath: string;
     oldIds?: number[];
-    read: () => Promise<string>;
+    /** Streamed text chunks (the device): the book is parsed and written as it arrives. */
+    open?: () => Promise<TextChunkReader>;
+    /** The whole text at once (the PC build). One of open / read is required. */
+    read?: () => Promise<string>;
     onFileRead?: (relKey: string, raw: string) => void;
   }): Promise<BookWriteResult | { ok: false; error: unknown }>;
   readonly newCategories: number;
@@ -193,7 +212,7 @@ export function insertMany<T>(db: WriterDb, head: string, cols: number, items: T
 export function maxId(db: WriterDb, table: string, base: number): Promise<number>;
 export function hasTable(db: { all: WriterDb['all'] }, name: string): Promise<boolean>;
 export function loadBookUnits(db: WriterDb, bookId: number, totalLines: number, unitsTable: boolean): Promise<unknown[]>;
-export function refLinkJobs(db: WriterDb, bookIds?: number[]): Promise<{ books: unknown[]; jobs: { commId: number; baseId?: number; scope?: unknown }[] }>;
+export function refLinkJobs(db: WriterDb, bookIds?: number[], pause?: () => Promise<void>): Promise<{ books: unknown[]; jobs: { commId: number; baseId?: number; scope?: unknown }[] }>;
 export function nowIso(): string;
 export function errorMessage(e: unknown): string;
 export class IngestionStopped extends Error {
@@ -240,6 +259,10 @@ export function indexRefLinks(
     bookIds?: number[];
     booksPerTransaction?: number;
     cursor?: number;
+    /** A refLinkJobs() result to reuse instead of pairing the library again. */
+    plan?: { books: unknown[]; jobs: { commId: number; baseId?: number; scope?: unknown }[] };
+    /** At most this many jobs from `cursor` in this call. */
+    limit?: number;
     shouldStop?: () => 'pause' | 'cancel' | null | undefined;
     beforeCommit?: (next: number, total: number) => Promise<void>;
     onBook?: (p: { index: number; total: number; title: string }) => void;
@@ -259,6 +282,6 @@ export function indexLinks<H>(
 ): Promise<LinkStats>;
 export function finalizeIndex(
   db: WriterDb,
-  opts?: { analyze?: boolean; incremental?: boolean; mergePages?: number; maxSteps?: number; onStep?: (step: number) => Promise<void>; shouldStop?: () => unknown },
+  opts?: { analyze?: boolean; analysisLimit?: number; incremental?: boolean; mergePages?: number; maxSteps?: number; onStep?: (step: number) => Promise<void>; shouldStop?: () => unknown },
 ): Promise<void>;
 export function libraryCounts(db: WriterDb): Promise<LibraryCounts>;
