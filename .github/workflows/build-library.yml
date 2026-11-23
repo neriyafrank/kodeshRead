@@ -38,6 +38,8 @@ concurrency:
 env:
   RELEASE_TAG: library-latest
   GH_TOKEN: ${{ github.token }}
+  # gh must never need a .git folder (steps run in $WORK, which is not a repository).
+  GH_REPO: ${{ github.repository }}
   # split -b 1500M = 1.5 GiB parts: strictly below GitHub's 2 GiB per-asset limit.
   PART_SIZE: 1500M
   WORK: /mnt/library-work
@@ -48,7 +50,7 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Free disk space
         run: |
@@ -67,7 +69,7 @@ jobs:
           if [ "$free_work" -lt 35 ]; then echo "::error::less than 35 GB free for the build"; exit 1; fi
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22 # node:sqlite (FTS5) needs >= 22.13
 
@@ -114,40 +116,61 @@ jobs:
           cat "$WORK/library-manifest.json"
 
       - name: Publish release ${{ env.RELEASE_TAG }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          LIBRARY_SCOPE: ${{ inputs.library_scope }}
         run: |
           set -euo pipefail
           cd "$WORK"
           version=$(node -p "require('./library-manifest.json').version")
-          notes="Pre-indexed core library (${{ inputs.source_repo }}, scope ${{ inputs.library_scope }}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --notes "$notes" --latest=false
+          notes="Pre-indexed core library (${SOURCE_REPO}, scope ${LIBRARY_SCOPE}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes" --latest=false
             # Unpublish the old manifest first: no client pairs it with half-replaced parts.
-            gh release delete-asset "$RELEASE_TAG" library-manifest.json -y || true
+            gh release delete-asset "$RELEASE_TAG" library-manifest.json --repo "$GITHUB_REPOSITORY" -y || true
           else
-            gh release create "$RELEASE_TAG" --title "Cloud library (latest)" --notes "$notes" --latest=false --target "$GITHUB_SHA"
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Cloud library (latest)" --notes "$notes" --latest=false --target "$GITHUB_SHA"
           fi
           for f in parts/core_library.db.zip.part-*; do
             for attempt in 1 2 3; do
-              if gh release upload "$RELEASE_TAG" "$f" --clobber; then break; fi
+              if gh release upload "$RELEASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber; then break; fi
               [ "$attempt" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
               sleep $((attempt * 20))
             done
           done
           # Drop parts of an older, longer build.
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep '^core_library\.db\.zip\.part-' | while read -r a; do
-            [ -f "parts/$a" ] || gh release delete-asset "$RELEASE_TAG" "$a" -y
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | { grep '^core_library\.db\.zip\.part-' || true; } | while read -r a; do
+            [ -f "parts/$a" ] || gh release delete-asset "$RELEASE_TAG" "$a" --repo "$GITHUB_REPOSITORY" -y
           done
           # The manifest goes last: it is what makes the new version visible to the app.
-          gh release upload "$RELEASE_TAG" library-manifest.json --clobber
+          gh release upload "$RELEASE_TAG" library-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Summary
+        if: always()
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          LIBRARY_SCOPE: ${{ inputs.library_scope }}
+          JOB_STATUS: ${{ job.status }}
         run: |
+          set -uo pipefail
+          manifest="$WORK/library-manifest.json"
           {
-            echo "### Cloud library published"
+            if [ "$JOB_STATUS" = success ]; then
+              echo "### Cloud library published"
+            else
+              echo "### Cloud library build did not finish (${JOB_STATUS})"
+            fi
             echo
-            echo "Release: \`${RELEASE_TAG}\` · source \`${{ inputs.source_repo }}\` · scope \`${{ inputs.library_scope }}\`"
-            echo
-            echo '```json'
-            node -e "const m=require('$WORK/library-manifest.json');console.log(JSON.stringify({version:m.version,books:m.bookCount,paragraphs:m.paragraphCount,zipMB:Math.round(m.totalZipBytes/1048576),dbMB:Math.round(m.uncompressedDbBytes/1048576),parts:m.parts.length},null,2))"
-            echo '```'
+            echo "Release: \`${RELEASE_TAG}\` · source \`${SOURCE_REPO}\` · scope \`${LIBRARY_SCOPE}\`"
+            if [ -f "$manifest" ]; then
+              echo
+              echo '```json'
+              MANIFEST="$manifest" node -e "const m=require(process.env.MANIFEST);console.log(JSON.stringify({version:m.version,books:m.bookCount,paragraphs:m.paragraphCount,zipMB:Math.round(m.totalZipBytes/1048576),dbMB:Math.round(m.uncompressedDbBytes/1048576),parts:(m.parts||[]).length},null,2))" || echo "(manifest unreadable)"
+              echo '```'
+            else
+              echo
+              echo "_No manifest was written._"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
