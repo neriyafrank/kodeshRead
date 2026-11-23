@@ -2,20 +2,21 @@
  * "ניהול ספרייה ועדכונים" (Library & Updates Manager):
  *  - core library: installed version/stats, release URL, check for updates, download with
  *    progress + verification + atomic swap, rebuild from an Otzaria folder on the device, remove
- *  - personal books: import .txt files or a folder into user_library.db, list + delete
+ *  - personal books: import .txt files or a folder into user_library.db; the list (lazy,
+ *    per folder, paged) and deletion live in components/library/PersonalBooks.tsx
  */
 import { Stack } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { USER_ROOT_NAME } from '../../shared/sources';
 import { JobStatus } from '../components/library/JobStatus';
+import { PersonalBooks } from '../components/library/PersonalBooks';
 import { ResumeCards } from '../components/library/ResumeCard';
 import { useLibrary } from '../db/LibraryContext';
 import { isWeb } from '../db/library';
 import { cleanupDownloads, defaultManifestUrl, type ReleaseInfo } from '../services/coreLibrary';
 import { useLibraryActions, useManifestUrl } from '../services/libraryActions';
-import { listUserBooks, type UserBookRow } from '../services/localIndexer';
 import { formatMB, useLibraryJobs } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
@@ -52,7 +53,6 @@ export default function LibraryManagerScreen() {
   const setManifestUrl = useLibrarySettings((x) => x.setManifestUrl);
   const [urlDraft, setUrlDraft] = useState(manifestUrl);
   const [check, setCheck] = useState<Check>({ status: 'idle' });
-  const [userBooks, setUserBooks] = useState<UserBookRow[] | null>(null);
 
   const [urlSource, setUrlSource] = useState(manifestUrl);
   if (urlSource !== manifestUrl) {
@@ -62,17 +62,6 @@ export default function LibraryManagerScreen() {
   }
 
   useEffect(() => cleanupDownloads(), []);
-
-  useEffect(() => {
-    let alive = true;
-    listUserBooks(lib.user).then(
-      (rows) => alive && setUserBooks(rows),
-      () => alive && setUserBooks([]),
-    );
-    return () => {
-      alive = false;
-    };
-  }, [lib.user, lib.generation]);
 
   const info = lib.core?.info ?? null;
 
@@ -112,20 +101,6 @@ export default function LibraryManagerScreen() {
 
   const onRemoveCore = () =>
     confirm('הסרת ספריית הליבה', 'הספרייה הראשית תימחק מהמכשיר. הספרים האישיים יישארו.', 'הסר', () => void actions.removeCore());
-
-  const onDeleteBook = (b: UserBookRow) => confirm('מחיקת ספר', `למחוק את "${b.title}" מהספרים האישיים?`, 'מחק', () => void actions.deleteUserBooks([b.id]));
-
-  const groups = useMemo(() => {
-    const map = new Map<string, UserBookRow[]>();
-    for (const b of userBooks ?? []) {
-      const folder = (b.category_path ?? '').replace(new RegExp(`^${USER_ROOT_NAME}/?`), '');
-      map.set(folder, [...(map.get(folder) ?? []), b]);
-    }
-    return [...map];
-  }, [userBooks]);
-
-  const onDeleteFolder = (folder: string, books: UserBookRow[]) =>
-    confirm('מחיקת תיקייה', `למחוק את כל ${books.length} הספרים בתיקייה "${folder}"?`, 'מחק הכול', () => void actions.deleteUserBooks(books.map((b) => b.id)));
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="library-manager">
@@ -211,37 +186,7 @@ export default function LibraryManagerScreen() {
           <Button label={'ייבוא קובץ ספר (\u200E.txt\u200E)'} onPress={() => void actions.importFiles()} disabled={busy || isWeb} testID="import-files" />
           <Button label="ייבוא תיקיית ספרים" onPress={() => void actions.importFolder()} disabled={busy || isWeb} kind="secondary" testID="import-folder" />
         </View>
-        {userBooks == null ? (
-          <ActivityIndicator color={c.accent} />
-        ) : userBooks.length === 0 ? (
-          <Text style={s.empty}>עדיין לא יובאו ספרים.</Text>
-        ) : (
-          groups.map(([folder, books]) => (
-            <View key={folder || '/'} style={s.group}>
-              <View style={s.groupHead}>
-                <Text style={s.groupTitle}>📁 {folder || USER_ROOT_NAME}</Text>
-                {books.length > 1 ? (
-                  <Pressable onPress={() => onDeleteFolder(folder || USER_ROOT_NAME, books)} disabled={busy} hitSlop={6}>
-                    <Text style={s.dangerLink}>מחק תיקייה</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-              {books.map((b) => (
-                <View key={b.id} style={s.bookRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.bookTitle} numberOfLines={1}>
-                      {b.title}
-                    </Text>
-                    <Text style={s.bookMeta}>{num(b.total_lines)} שורות</Text>
-                  </View>
-                  <Pressable onPress={() => onDeleteBook(b)} disabled={busy} hitSlop={8} accessibilityRole="button" accessibilityLabel={`מחק ${b.title}`} testID={`delete-book-${b.id}`}>
-                    <Text style={s.dangerLink}>מחק</Text>
-                  </Pressable>
-                </View>
-              ))}
-            </View>
-          ))
-        )}
+        <PersonalBooks />
       </View>
       {isWeb ? <Text style={s.empty}>הורדה וייבוא זמינים באפליקציית Android בלבד; בתצוגה המקדימה בדפדפן מוצגת ספריית הדוגמה.</Text> : null}
     </ScrollView>
@@ -306,11 +251,4 @@ const createStyles = (c: Palette) =>
     releaseTitle: { fontSize: 15, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
     releaseText: { fontSize: 13, color: c.text, writingDirection: 'rtl' },
     divider: { height: 1, backgroundColor: c.border },
-    group: { gap: spacing.xs },
-    groupHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-    groupTitle: { fontSize: 15, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
-    bookRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingStart: spacing.lg, paddingVertical: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
-    bookTitle: { fontSize: 15, color: c.text, writingDirection: 'rtl' },
-    bookMeta: { fontSize: 12, color: c.textMuted },
-    dangerLink: { color: c.danger, fontSize: 14, fontWeight: '600' },
   });

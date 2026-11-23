@@ -441,16 +441,44 @@ export async function findInterruptedImports(user: SQLiteDatabase): Promise<Inte
 export interface UserBookRow {
   id: number;
   title: string;
-  file_path: string;
   total_lines: number;
-  category_path: string | null;
 }
 
-export function listUserBooks(user: SQLiteDatabase): Promise<UserBookRow[]> {
-  return user.getAllAsync<UserBookRow>(
-    `SELECT b.id, b.title, b.file_path, b.total_lines, c.path AS category_path
-     FROM books b LEFT JOIN categories c ON c.id = b.category_id ORDER BY b.file_path`,
+/** One personal folder (a leaf category that holds books) with its totals. */
+export interface UserFolderRow {
+  category_id: number | null;
+  category_path: string | null;
+  book_count: number;
+  total_lines: number;
+}
+
+/**
+ * Personal folders with book counts — one row per folder, never one per book. The manager
+ * screen renders this summary and loads a folder's books only when it is opened: a personal
+ * library imported from a whole Otzaria folder holds thousands of books, and rendering them
+ * all at once froze the screen and crashed the app.
+ */
+export function listUserFolders(user: SQLiteDatabase): Promise<UserFolderRow[]> {
+  return user.getAllAsync<UserFolderRow>(
+    `SELECT b.category_id AS category_id, c.path AS category_path,
+            COUNT(*) AS book_count, COALESCE(SUM(b.total_lines), 0) AS total_lines
+     FROM books b LEFT JOIN categories c ON c.id = b.category_id
+     GROUP BY b.category_id ORDER BY c.path`,
   );
+}
+
+/** One page of the books in a personal folder (ordered by file path). */
+export function listUserBooksInFolder(user: SQLiteDatabase, categoryId: number | null, limit: number, offset = 0): Promise<UserBookRow[]> {
+  return user.getAllAsync<UserBookRow>(
+    `SELECT id, title, total_lines FROM books WHERE category_id IS ? ORDER BY file_path LIMIT ? OFFSET ?`,
+    [categoryId, limit, offset],
+  );
+}
+
+/** Every book id in a personal folder (for "delete folder"). */
+export async function listUserBookIdsInFolder(user: SQLiteDatabase, categoryId: number | null): Promise<number[]> {
+  const rows = await user.getAllAsync<{ id: number }>(`SELECT id FROM books WHERE category_id IS ?`, [categoryId]);
+  return rows.map((r) => r.id);
 }
 
 /** Deletes personal books (text, TOC, FTS rows, links) and folders left empty. */
