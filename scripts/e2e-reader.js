@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 /**
  * End-to-end check of the reader's tab management, the collapsible reader tools bar, the
- * cascading-columns TOC (fit-to-content widths, right-aligned labels on phone and tablet), and
- * commentary favorites (⭐) following a commentator across books and tabs (web preview).
+ * cascading-columns TOC (fit-to-content widths, right-aligned labels on phone and tablet),
+ * commentary favorites (⭐) following a commentator across books and tabs, and the reading
+ * typography: Taamey Frank CLM loaded via @font-face, vocalization-aware line height with no
+ * mark collisions, margin verse numbers, the טעמי פרנק / מערכת font picker and the בהיר / ספיה /
+ * כהה themes persisted across reloads and applied to reader, commentary drawer, TOC and library
+ * (web preview). With --shots, tanach-light.png / tanach-dark.png show Genesis 1 with
+ * cantillation and niqqud in both themes (device scale 2).
  *
  *   npm run web                          # terminal 1 (Metro on :8081, sample DB)
  *   npm run e2e:reader [-- --shots=DIR]  # terminal 2
@@ -25,7 +30,7 @@ try {
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 400, height: 820 } });
+  const page = await browser.newPage({ viewport: { width: 400, height: 820 }, deviceScaleFactor: SHOTS ? 2 : 1 });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -318,6 +323,153 @@ try {
     assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.commentary')).state.pinned), ['רמבנ', 'רשי', 'תוספות']);
     await tid('commentary-close').click();
     step('commentary ⭐ favorites persist and follow the commentator across books and tabs');
+
+    // --- typography: Taamey Frank CLM, leading, verse numbers, font picker, themes -------------
+    const appearance = () => page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.appearance') || '{}'));
+    /** Background actually painted under an element (first non-transparent ancestor). */
+    const paintedBg = (id) =>
+      page.evaluate((testId) => {
+        // By id, or the element on top at a point ([x, y]).
+        let el = Array.isArray(testId) ? document.elementFromPoint(testId[0], testId[1]) : [...document.querySelectorAll(`[data-testid="${testId}"]`)].pop();
+        for (; el; el = el.parentElement) {
+          const bg = getComputedStyle(el).backgroundColor;
+          if (bg && bg !== 'transparent' && !/rgba\(.*, 0\)$/.test(bg)) return bg;
+        }
+        return null;
+      }, id);
+    const verseMetrics = () =>
+      page.evaluate(() => {
+        // The visible reader (expo-router web can keep a hidden copy of a screen underneath).
+        const list = [...document.querySelectorAll('[data-testid="reader-list"]')].pop();
+        const top = (sel) => list.querySelector(sel);
+        const rows = [...list.querySelectorAll('[data-testid^="verse-text-"]')].filter((e) => e.getBoundingClientRect().height > 0);
+        const first = rows[0];
+        const cs = getComputedStyle(first);
+        const fontSize = parseFloat(cs.fontSize);
+        const lineHeight = parseFloat(cs.lineHeight);
+        // Ink extent of every visible verse in this font (marks included) vs the line box.
+        const ctx = document.createElement('canvas').getContext('2d');
+        ctx.font = `${cs.fontSize} ${cs.fontFamily}`;
+        let ink = 0;
+        let worst = '';
+        for (const r of rows) {
+          for (const word of r.innerText.split(/\s+/)) {
+            const m = ctx.measureText(word);
+            const h = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+            if (h > ink) [ink, worst] = [h, word];
+          }
+        }
+        const num = top(`[data-testid="verse-num-${first.dataset.testid.slice('verse-text-'.length)}"]`);
+        const nb = num.getBoundingClientRect();
+        const tb = first.getBoundingClientRect();
+        return {
+          family: cs.fontFamily,
+          fontSize,
+          lineHeight,
+          ink,
+          worst,
+          rows: rows.length,
+          num: num.innerText.trim(),
+          numColor: getComputedStyle(num).color,
+          textColor: cs.color,
+          numRightOfText: nb.left >= tb.right - 1,
+          numSize: parseFloat(getComputedStyle(num).fontSize),
+          // Verse number vertically centred on the first text line.
+          numOffset: Math.abs(nb.top + nb.height / 2 - (tb.top + lineHeight / 2)),
+          fontLoaded: document.fonts.check(`${cs.fontSize} "TaameyFrankCLM-Medium"`),
+          faces: [...document.fonts].filter((f) => /TaameyFrank/.test(f.family)).map((f) => `${f.family}:${f.status}`),
+        };
+      });
+    await page.locator('[data-testid^="tab-"][aria-selected]', { hasText: 'בראשית' }).last().click();
+    await tid('reader-back').click();
+    await tid('quick-jump-input').fill('בראשית א');
+    await page.locator('[data-testid="quick-jump-result"]', { hasText: 'בראשית' }).first().click();
+    await tid('verse-num-3').waitFor({ timeout: 20000 });
+    await page.evaluate(() => document.fonts.ready);
+    let vm = await verseMetrics();
+    assert.ok(/TaameyFrankCLM-Medium/.test(vm.family), `reader font: ${vm.family}`);
+    assert.ok(vm.fontLoaded && vm.faces.some((f) => f === 'TaameyFrankCLM-Medium:loaded'), `@font-face loaded (${vm.faces})`);
+    assert.strictEqual(vm.lineHeight, Math.ceil(vm.fontSize * 1.85), `te'amim leading 1.85x (${vm.lineHeight}px at ${vm.fontSize}px)`);
+    assert.ok(vm.ink < vm.lineHeight, `zero collisions: tallest word "${vm.worst}" inks ${vm.ink.toFixed(1)}px < ${vm.lineHeight}px line box`);
+    assert.strictEqual(vm.num, 'א', 'verse number split off');
+    assert.ok(vm.numRightOfText, 'verse number in the right margin');
+    assert.ok(vm.numSize < vm.fontSize * 0.7 && vm.numColor !== vm.textColor, `verse number subtle (${vm.numSize}px, ${vm.numColor})`);
+    assert.ok(vm.numOffset <= 3, `verse number centred on the first line (${vm.numOffset.toFixed(1)}px)`);
+    assert.ok(!(await tid('verse-text-3').innerText()).includes('(א)'), 'the text no longer repeats "(א)"');
+    if (await page.locator('[data-testid="commentary-pane"]').count()) await tid('commentary-close').click();
+    await page.waitForTimeout(2300); // the jump-target glow fades out
+    await shot('tanach-light');
+    // Leading follows the visible marks.
+    await openTools();
+    await tid('toggle-cantillation').click();
+    await page.waitForFunction((px) => parseFloat(getComputedStyle([...document.querySelectorAll('[data-testid="verse-text-3"]')].pop()).lineHeight) === px, Math.ceil(vm.fontSize * 1.75));
+    await tid('toggle-nikkud').click();
+    await page.waitForFunction((px) => parseFloat(getComputedStyle([...document.querySelectorAll('[data-testid="verse-text-3"]')].pop()).lineHeight) === px, Math.ceil(vm.fontSize * 1.55));
+    await tid('toggle-cantillation').click(); // brings niqqud + te'amim back
+    await page.waitForFunction((px) => parseFloat(getComputedStyle([...document.querySelectorAll('[data-testid="verse-text-3"]')].pop()).lineHeight) === px, Math.ceil(vm.fontSize * 1.85));
+    step(`typography: Taamey Frank CLM via @font-face, ${vm.lineHeight}px leading at ${vm.fontSize}px (ink ${vm.ink.toFixed(1)}px), 1.85 / 1.75 / 1.55 with te'amim / niqqud / plain, margin verse numbers`);
+
+    // Aa: font picker + 3-way theme switcher, persisted across a reload.
+    await tid('aa-button').click();
+    await tid('appearance-sheet').waitFor();
+    for (const id of ['theme-light', 'theme-sepia', 'theme-dark', 'font-taameyFrank', 'font-system']) assert.ok(await visible(id), `${id} in the Aa panel`);
+    assert.strictEqual(await tid('font-taameyFrank').getAttribute('aria-checked'), 'true', 'טעמי פרנק is the default');
+    assert.ok((await tid('font-taameyFrank').innerText()).includes('טעמי פרנק') && (await tid('font-system').innerText()).includes('מערכת'));
+    assert.ok((await tid('line-height-value').innerText()).startsWith('1.85'), await tid('line-height-value').innerText());
+    await tid('font-system').click();
+    await page.waitForFunction(() => !/TaameyFrank/.test(getComputedStyle([...document.querySelectorAll('[data-testid="verse-text-3"]')].pop()).fontFamily));
+    await tid('theme-dark').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.appearance')).state.theme === 'dark');
+    await shot('r8-appearance-dark');
+    assert.deepStrictEqual([(await appearance()).state.fontFamily, (await appearance()).state.theme], ['system', 'dark']);
+    await page.reload({ timeout: 180000 });
+    await tid('verse-num-3').waitFor({ timeout: 180000 });
+    assert.deepStrictEqual([(await appearance()).state.fontFamily, (await appearance()).state.theme, (await appearance()).version], ['system', 'dark', 3], 'persisted');
+    vm = await verseMetrics();
+    assert.ok(!/TaameyFrank/.test(vm.family), `system font after reload (${vm.family})`);
+    assert.strictEqual(await paintedBg('reader-list'), 'rgb(33, 33, 33)', 'dark charcoal reader');
+    assert.strictEqual(vm.textColor, 'rgb(232, 230, 227)', 'warm off-white text');
+    // Back to טעמי פרנק for the dark screenshot.
+    await openTools();
+    await tid('aa-button').click();
+    await tid('font-taameyFrank').click();
+    await page.waitForFunction(() => /TaameyFrank/.test(getComputedStyle([...document.querySelectorAll('[data-testid="verse-text-3"]')].pop()).fontFamily));
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="appearance-sheet"]'), null, { timeout: 5000 }).catch(() => undefined);
+    if (await page.locator('[data-testid="appearance-sheet"]').count()) await page.mouse.click(200, 60);
+    await page.waitForTimeout(300);
+    await tid('reader-tools-toggle').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
+    vm = await verseMetrics();
+    assert.ok(vm.ink < vm.lineHeight, 'dark: no collisions');
+    await shot('tanach-dark');
+    // The theme reaches the commentary drawer (active verse in slate / indigo), the TOC and the library.
+    await tid('para-3').click();
+    await tid('commentary-pane').waitFor({ timeout: 10000 });
+    const activeBg = await page.evaluate(() => getComputedStyle([...document.querySelectorAll('[data-testid="para-3"]')].pop()).backgroundColor);
+    assert.strictEqual(activeBg, 'rgb(45, 51, 71)', `active verse highlight ${activeBg}`);
+    const paneBg = await paintedBg('commentary-pane');
+    assert.ok(['rgb(33, 33, 33)', 'rgb(42, 42, 42)', 'rgb(48, 48, 48)'].includes(paneBg), `commentary drawer ${paneBg}`);
+    await shot('r9-dark-commentary');
+    await tid('commentary-close').click();
+    await openToc(0);
+    const tocBg = await paintedBg('toc-col-0');
+    assert.ok(['rgb(33, 33, 33)', 'rgb(42, 42, 42)', 'rgb(48, 48, 48)'].includes(tocBg), `TOC ${tocBg}`);
+    await tid('toc-close').click();
+    await tid('reader-back').click();
+    await tid('quick-jump-input').waitFor();
+    const libBg = await paintedBg([100, 600]);
+    assert.ok(['rgb(33, 33, 33)', 'rgb(42, 42, 42)'].includes(libBg), `library ${libBg}`);
+    const jumpBg = await paintedBg('quick-jump-input');
+    assert.ok(['rgb(42, 42, 42)', 'rgb(33, 33, 33)'].includes(jumpBg), `quick jump bar ${jumpBg}`);
+    await shot('r10-dark-library');
+    // Back to the defaults for the rest of the run.
+    await page.evaluate(() => {
+      const a = JSON.parse(localStorage.getItem('kodeshread.appearance'));
+      a.state.theme = 'light';
+      localStorage.setItem('kodeshread.appearance', JSON.stringify(a));
+    });
+    step(`themes: font + theme persist across reload; Dark charcoal reaches reader (${activeBg} active verse), commentary drawer, TOC and library`);
 
     // --- tablet: docked TOC stays open after a jump -------------------------------------------
     await page.setViewportSize({ width: 1180, height: 820 });

@@ -52,6 +52,13 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > cards (pins + top 3) and filters by name with Torah abbreviations. `CommentaryPane.tsx` renders collapsible
 > cards with a sticky filter / chips / pill-strip header. Regression-tested in `scripts/selftest.js`.
 
+> **Reading typography & themes:** `shared/typography.js` (font keys, vocalization-aware line height:
+> slider = plain leading 1.55x, +0.2 niqqud / +0.3 te'amim; margin verse numbers via `splitVerseMarker`;
+> persisted-settings migrate/sanitize, `APPEARANCE_VERSION` 3). Default reader font: bundled Taamey Frank CLM
+> (`assets/fonts/`, GPOS mark/mkmk; `expo-font` plugin in `app.json` + `useFonts`), plus Frank Ruhl /
+> David / Assistant / Heebo / `system` ("מערכת"). Themes בהיר / ספיה / כהה (Dark = charcoal `#212121`,
+> text `#E8E6E3`, `selection` slate-indigo). Self-tested in `scripts/selftest.js`, e2e in `e2e:reader`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

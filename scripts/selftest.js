@@ -19,6 +19,9 @@
  *    from every corpus of otzaria_index_only.txt; the Android foreground-service plugin.
  * 7. End of a core build (shared/coreFinalize.js): swap over an open core with live -wal / -shm,
  *    non-fatal finalize optimizations, finalize-only retries that read no book, step diagnostics.
+ * 8. Reading typography (shared/typography.js): bundled Taamey Frank CLM (GPOS mark / mkmk),
+ *    vocalization-aware line height, margin verse numbers, font / theme persistence (zustand
+ *    persist round trip + migrations) and the theme palettes (Dark charcoal, contrast).
  */
 'use strict';
 
@@ -694,6 +697,8 @@ async function main() {
   await otzariaIndexPipelineTests();
   await foregroundServicePluginTests();
   await coreFinalizeTests();
+  // 8. Reading typography, fonts and themes.
+  await typographyTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -3061,3 +3066,244 @@ async function coreFinalizeTests() {
 }
 
 main();
+
+/** Minimal sfnt reader: table directory, hhea / head metrics and the GPOS feature tags. */
+function readFontInfo(file) {
+  const b = fs.readFileSync(file);
+  const numTables = b.readUInt16BE(4);
+  const tables = {};
+  for (let i = 0; i < numTables; i++) {
+    const o = 12 + i * 16;
+    tables[b.toString('latin1', o, o + 4)] = { offset: b.readUInt32BE(o + 8), length: b.readUInt32BE(o + 12) };
+  }
+  const head = tables.head.offset;
+  const hhea = tables.hhea.offset;
+  const info = { tables: Object.keys(tables), unitsPerEm: b.readUInt16BE(head + 18), ascender: b.readInt16BE(hhea + 4), descender: b.readInt16BE(hhea + 6), gposFeatures: [], gposScripts: [] };
+  if (tables.GPOS) {
+    const g = tables.GPOS.offset;
+    const scriptList = g + b.readUInt16BE(g + 4);
+    for (let i = 0, n = b.readUInt16BE(scriptList); i < n; i++) info.gposScripts.push(b.toString('latin1', scriptList + 2 + i * 6, scriptList + 6 + i * 6));
+    const featureList = g + b.readUInt16BE(g + 6);
+    for (let i = 0, n = b.readUInt16BE(featureList); i < n; i++) info.gposFeatures.push(b.toString('latin1', featureList + 2 + i * 6, featureList + 6 + i * 6));
+  }
+  const cmap = tables.cmap.offset;
+  info.hasCmap = b.readUInt16BE(cmap + 2) > 0;
+  return info;
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+function contrast(a, b) {
+  const lum = (hex) => {
+    const [r, g, bl] = hexToRgb(hex).map((v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+  return (x + 0.05) / (y + 0.05);
+}
+/** Palettes from src/theme.ts (plain object literal -> JSON-ish parse). */
+function readPalettes() {
+  const src = fs.readFileSync(path.join(ROOT, 'src/theme.ts'), 'utf8');
+  const out = {};
+  for (const name of ['light', 'sepia', 'dark']) {
+    const m = new RegExp(`\\n  ${name}: \\{([\\s\\S]*?)\\n  \\}`).exec(src);
+    assert.ok(m, `palette ${name} in src/theme.ts`);
+    out[name] = {};
+    for (const [, k, v] of m[1].matchAll(/(\w+): '([^']*)'/g)) out[name][k] = v;
+  }
+  return out;
+}
+
+async function typographyTests() {
+  const typo = require('../shared/typography');
+  const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+
+  await check('typography: line height scales with cantillation / niqqud (1.85 / 1.75 / 1.55)', () => {
+    const base = typo.LINE_HEIGHT.default;
+    assert.strictEqual(base, 1.55);
+    const all = { showNikkud: true, showCantillation: true };
+    const nikkudOnly = { showNikkud: true, showCantillation: false };
+    const plain = { showNikkud: false, showCantillation: false };
+    assert.strictEqual(typo.lineHeightMultiplier(base, all), 1.85);
+    assert.strictEqual(typo.lineHeightMultiplier(base, nikkudOnly), 1.75);
+    assert.strictEqual(typo.lineHeightMultiplier(base, plain), 1.55);
+    // Te'amim are never shown without niqqud: their room goes with it.
+    assert.strictEqual(typo.lineHeightMultiplier(base, { showNikkud: false, showCantillation: true }), 1.55);
+    assert.deepStrictEqual(typo.visibleMarks({ showNikkud: false, showCantillation: true }), { nikkud: false, cantillation: false });
+    // Spec window: 1.75x-1.9x with marks.
+    for (const o of [all, nikkudOnly]) {
+      const m = typo.lineHeightMultiplier(base, o);
+      assert.ok(m >= 1.75 && m <= 1.9, `${JSON.stringify(o)} -> ${m}`);
+    }
+    // The slider shifts every mode alike; the result stays within bounds.
+    assert.strictEqual(typo.lineHeightMultiplier(2.0, all), 2.3);
+    assert.strictEqual(typo.lineHeightMultiplier(99, all), typo.MAX_EFFECTIVE_LINE_HEIGHT);
+    assert.strictEqual(typo.lineHeightMultiplier(0.5, plain), typo.LINE_HEIGHT.min);
+    assert.strictEqual(typo.lineHeightMultiplier(NaN, all), 1.85);
+    // px: rounded up at every font size so the line box never shrinks below the multiplier.
+    for (let fs_ = typo.FONT_SIZE.min; fs_ <= typo.FONT_SIZE.max; fs_++) {
+      const withMarks = typo.lineHeightPx(fs_, base, all);
+      const without = typo.lineHeightPx(fs_, base, plain);
+      assert.ok(withMarks >= fs_ * 1.85 && withMarks < fs_ * 1.85 + 1, `${fs_}px: ${withMarks}`);
+      assert.ok(withMarks - without >= Math.floor(fs_ * 0.3), `${fs_}px: +${withMarks - without}px for te'amim`);
+      assert.ok(typo.lineHeightPx(fs_ + 1, base, all) > withMarks, 'monotonic in font size');
+    }
+    assert.strictEqual(typo.lineHeightPx(20, base, all), 37);
+    // The reader, the commentary drawer and the Aa preview all use the effective value.
+    assert.ok(/lineHeightMultiplier\(lineHeight, \{ showNikkud, showCantillation \}\)/.test(read('src/components/reader/BookReader.tsx')));
+    assert.ok(/estimateItemSize\(fontSize, effectiveLineHeight\)/.test(read('src/components/reader/BookReader.tsx')));
+    assert.ok(/lineHeightPx\(entrySize, lineHeight, \{ showNikkud, showCantillation \}\)/.test(read('src/components/reader/CommentaryPane.tsx')));
+    assert.ok(/effectiveLineHeight\(/.test(read('src/components/reader/AppearanceSheet.tsx')));
+    // Android keeps the font padding on reader + commentary text (marks never clip).
+    assert.ok(/text: \{[^}]*includeFontPadding: true/.test(read('src/components/reader/BookReader.tsx')));
+    assert.ok(/entryText: \{[^}]*includeFontPadding: true/.test(read('src/components/reader/CommentaryPane.tsx')));
+  });
+
+  await check('typography: Taamey Frank CLM bundled (GPOS mark/mkmk), registered for web + Android', () => {
+    const files = { regular: 'assets/fonts/TaameyFrankCLM-Medium.ttf', bold: 'assets/fonts/TaameyFrankCLM-Bold.ttf' };
+    for (const f of Object.values(files)) {
+      const info = readFontInfo(path.join(ROOT, f));
+      for (const t of ['GPOS', 'GSUB', 'GDEF', 'cmap', 'glyf']) assert.ok(info.tables.includes(t), `${f}: ${t} table`);
+      assert.ok(info.gposFeatures.includes('mark') && info.gposFeatures.includes('mkmk'), `${f}: GPOS features ${info.gposFeatures}`);
+      assert.ok(info.gposScripts.includes('hebr'), `${f}: GPOS scripts ${info.gposScripts}`);
+      // The 1.85x cantillation line box holds the font's own extent with room to spare.
+      const extent = (info.ascender - info.descender) / info.unitsPerEm;
+      assert.ok(extent > 1 && typo.lineHeightMultiplier(typo.LINE_HEIGHT.default, {}) >= extent * 1.4, `${f}: extent ${extent.toFixed(2)}em`);
+    }
+    assert.ok(fs.existsSync(path.join(ROOT, 'assets/fonts/GNU-GPL-2.0.txt')) && /font exception/i.test(read('assets/fonts/README.md')), 'license shipped');
+    // Android: the expo-font config plugin embeds both files (family name = file name)...
+    const app = JSON.parse(read('app.json'));
+    const plugin = app.expo.plugins.find((p) => Array.isArray(p) && p[0] === 'expo-font');
+    assert.ok(plugin, 'expo-font plugin configured with fonts');
+    assert.deepStrictEqual(plugin[1].fonts, Object.values(files).map((f) => './' + f));
+    // ...and fonts.ts loads the same files under those family names (web @font-face / Expo Go).
+    const fontsTs = read('src/fonts.ts');
+    assert.ok(/regular: 'TaameyFrankCLM-Medium', bold: 'TaameyFrankCLM-Bold'/.test(fontsTs));
+    assert.ok(/\[TAAMEY_FRANK\.regular\]: require\('\.\.\/assets\/fonts\/TaameyFrankCLM-Medium\.ttf'\)/.test(fontsTs));
+    assert.ok(/\[TAAMEY_FRANK\.bold\]: require\('\.\.\/assets\/fonts\/TaameyFrankCLM-Bold\.ttf'\)/.test(fontsTs));
+    // Picker: every shared font key has an entry, Taamey Frank first and default, "מערכת" = platform font.
+    const keys = [...fontsTs.matchAll(/\{ key: '(\w+)', label: '[^']*', hebrewLabel: '([^']*)'/g)].map((m) => [m[1], m[2]]);
+    assert.deepStrictEqual(keys.map((k) => k[0]), typo.FONT_KEYS);
+    assert.strictEqual(typo.DEFAULT_FONT, 'taameyFrank');
+    assert.deepStrictEqual(keys[0], ['taameyFrank', 'טעמי פרנק']);
+    assert.deepStrictEqual(keys.at(-1), ['system', 'מערכת']);
+    assert.ok(/key: 'system'[^}]*regular: undefined, bold: undefined/.test(fontsTs));
+  });
+
+  await check('typography: verse numbers split off for the margin column', () => {
+    const RLM = reader.RLM;
+    const prep = (t) => reader.prepareDisplayText(t, { showNikkud: true, showCantillation: true });
+    let r = typo.splitVerseMarker(prep('(א) <big>בְּ</big>רֵאשִׁ֖ית בָּרָ֣א'));
+    assert.deepStrictEqual(r, { marker: 'א', text: '<big>בְּ</big>רֵאשִׁ֖ית בָּרָ֣א' });
+    // The RLM that prepareDisplayText added for the parentheses is dropped with the number...
+    assert.ok(prep('(יא) וַיֹּ֣אמֶר')[0] === RLM);
+    assert.deepStrictEqual(typo.splitVerseMarker(prep('(יא) וַיֹּ֣אמֶר')), { marker: 'יא', text: 'וַיֹּ֣אמֶר' });
+    // ...and kept when the rest still needs it.
+    assert.deepStrictEqual(typo.splitVerseMarker(prep('(קנז) ראה (שם) 12')), { marker: 'קנז', text: RLM + 'ראה (שם) 12' });
+    assert.strictEqual(typo.splitVerseMarker(prep('(טו) וַיְהִי')).marker, 'טו');
+    assert.strictEqual(typo.splitVerseMarker(prep('(טז) וַיְהִי')).marker, 'טז');
+    // Words in parentheses are not numbers (final letters, ascending values, repeats).
+    for (const t of ['(שם) ראה', '(גם) כן', '(רש) x', '(יי) x', '(בא) x', 'אין מספר', '(א)']) assert.strictEqual(typo.splitVerseMarker(prep(t)).marker, null, t);
+    assert.strictEqual(typo.hebrewNumeralValue('קנז'), 157);
+    assert.strictEqual(typo.hebrewNumeralValue('תתר'), 1000);
+    assert.strictEqual(typo.hebrewNumeralValue('שם'), 0);
+    for (let n = 1; n <= 1200; n++) assert.strictEqual(typo.hebrewNumeralValue(typo.toHebrewNumeral(n)), n, `numeral ${n}`);
+    assert.deepStrictEqual([15, 16, 115, 270, 344].map(typo.toHebrewNumeral), ['טו', 'טז', 'קטו', 'רע', 'שמד']);
+    assert.deepStrictEqual(['ער', 'ערד', 'שדמ', 'רחצ'].map(typo.hebrewNumeralValue), [270, 274, 344, 298]);
+    assert.ok(typo.verseGutterWidth(20) >= 24 && typo.verseGutterWidth(36) > typo.verseGutterWidth(14));
+    assert.ok(/splitVerseMarker\(prepared\)/.test(read('src/components/reader/BookReader.tsx')));
+  });
+
+  await check('typography: font / theme persistence (zustand persist round trip, migrations)', async () => {
+    // Same persist wiring as src/state/settingsStore.ts, over an in-memory storage.
+    const { createStore } = require('zustand/vanilla');
+    const { persist, createJSONStorage } = require('zustand/middleware');
+    const mem = new Map();
+    const storage = { getItem: (k) => mem.get(k) ?? null, setItem: (k, v) => void mem.set(k, v), removeItem: (k) => void mem.delete(k) };
+    const defaults = { fontFamily: typo.DEFAULT_FONT, fontSize: 20, lineHeight: typo.LINE_HEIGHT.default, theme: 'light', showNikkud: true, showCantillation: true, commentaryRatio: 0.42, commentaryFollow: false };
+    const make = () =>
+      createStore(
+        persist((set) => ({ ...defaults, set: (patch) => set(patch) }), {
+          name: 'kodeshread.appearance',
+          storage: createJSONStorage(() => storage),
+          version: typo.APPEARANCE_VERSION,
+          migrate: (p, v) => typo.migrateAppearance(p, v),
+          merge: (p, cur) => ({ ...cur, ...typo.sanitizeAppearance(p) }),
+          partialize: ({ set: _s, ...rest }) => rest,
+        }),
+      );
+    const settle = (st) => new Promise((r) => (st.persist.hasHydrated() ? r() : st.persist.onFinishHydration(r)));
+
+    let st = make();
+    await settle(st);
+    assert.strictEqual(st.getState().fontFamily, 'taameyFrank', 'fresh install: Taamey Frank CLM');
+    st.getState().set({ fontFamily: 'system', theme: 'dark' });
+    st = make(); // "app restart"
+    await settle(st);
+    assert.deepStrictEqual([st.getState().fontFamily, st.getState().theme], ['system', 'dark'], 'font + theme survive a restart');
+    st.getState().set({ theme: 'sepia', fontFamily: 'taameyFrank', lineHeight: 1.8 });
+    st = make();
+    await settle(st);
+    assert.deepStrictEqual([st.getState().fontFamily, st.getState().theme, st.getState().lineHeight], ['taameyFrank', 'sepia', 1.8]);
+    assert.strictEqual(JSON.parse(mem.get('kodeshread.appearance')).version, 3);
+
+    // v2 (before this release): untouched defaults move to Taamey Frank + 1.55; choices stay.
+    mem.set('kodeshread.appearance', JSON.stringify({ version: 2, state: { fontFamily: 'frankRuhl', fontSize: 22, lineHeight: 1.7, theme: 'dark', showNikkud: true, showCantillation: false, commentaryRatio: 0.5, commentaryFollow: true } }));
+    st = make();
+    await settle(st);
+    let s = st.getState();
+    assert.deepStrictEqual([s.fontFamily, s.fontSize, s.lineHeight, s.theme, s.showCantillation, s.commentaryRatio, s.commentaryFollow], ['taameyFrank', 22, 1.55, 'dark', false, 0.5, true]);
+    mem.set('kodeshread.appearance', JSON.stringify({ version: 2, state: { fontFamily: 'david', lineHeight: 2.1, theme: 'sepia' } }));
+    st = make();
+    await settle(st);
+    s = st.getState();
+    // A custom leading keeps its vocalized spacing (2.1 = 1.8 + 0.3 for te'amim).
+    assert.deepStrictEqual([s.fontFamily, s.lineHeight, s.theme], ['david', 1.8, 'sepia']);
+    assert.strictEqual(typo.lineHeightMultiplier(s.lineHeight, s), 2.1);
+    // v1: showNiqqud -> showNikkud.
+    assert.deepStrictEqual(typo.migrateAppearance({ showNiqqud: false }, 1).showNikkud, false);
+    assert.ok(!('showNiqqud' in typo.migrateAppearance({ showNiqqud: false }, 1)));
+    // Unknown values in storage (newer / corrupted build) fall back instead of breaking the reader.
+    mem.set('kodeshread.appearance', JSON.stringify({ version: 3, state: { fontFamily: 'comicSans', theme: 'oled', fontSize: 99, lineHeight: 'x' } }));
+    st = make();
+    await settle(st);
+    s = st.getState();
+    assert.deepStrictEqual([s.fontFamily, s.theme, s.fontSize, s.lineHeight], ['taameyFrank', 'light', typo.FONT_SIZE.max, typo.LINE_HEIGHT.default]);
+
+    // The app store is wired to the same shared functions.
+    const store = read('src/state/settingsStore.ts');
+    for (const re of [/version: APPEARANCE_VERSION/, /migrate: \(persisted, version\) => migrateAppearance\(/, /merge: \(persisted, current\) => \(\{ \.\.\.current, \.\.\.\(sanitizeAppearance\(/, /fontFamily: DEFAULT_FONT/, /partialize: \(\{ fontFamily, fontSize, lineHeight, theme,/]) {
+      assert.ok(re.test(store), `settingsStore.ts: ${re}`);
+    }
+  });
+
+  await check('themes: 3-way switcher, low-glare Dark charcoal, readable contrast', () => {
+    const p = readPalettes();
+    const dark = p.dark;
+    const bg = hexToRgb(dark.background);
+    assert.ok(bg.every((v) => v >= 0x1e && v <= 0x25), `dark background ${dark.background} in #1E1E1E-#252525`);
+    assert.strictEqual(dark.text.toUpperCase(), '#E8E6E3');
+    const [r, , b] = hexToRgb(dark.selection);
+    assert.ok(b > r + 12, `active-verse highlight is slate / indigo (${dark.selection})`);
+    for (const [name, pal] of Object.entries(p)) {
+      for (const k of ['background', 'surface', 'text', 'textMuted', 'accent', 'selection', 'highlight', 'verseNumber']) assert.ok(/^#[0-9A-Fa-f]{6}$/.test(pal[k]), `${name}.${k}`);
+      assert.ok(contrast(pal.text, pal.background) >= 7, `${name}: text contrast ${contrast(pal.text, pal.background).toFixed(1)} (AAA)`);
+      assert.ok(contrast(pal.text, pal.selection) >= 7, `${name}: text on the active verse`);
+      assert.ok(contrast(pal.text, pal.highlight) >= 4.5, `${name}: text on the jump glow`);
+      assert.ok(contrast(pal.verseNumber, pal.background) >= 2.5 && contrast(pal.verseNumber, pal.background) < contrast(pal.text, pal.background), `${name}: verse numbers subtle but legible`);
+      assert.ok(contrast(pal.textMuted, pal.background) >= 4.5, `${name}: muted text`);
+    }
+    // Not harsh: no pure black / white in Dark.
+    assert.ok(dark.background !== '#000000' && dark.text.toUpperCase() !== '#FFFFFF');
+    const sheet = read('src/components/reader/AppearanceSheet.tsx');
+    for (const label of ["{ name: 'light', label: 'בהיר' }", "{ name: 'sepia', label: 'ספיה' }", "{ name: 'dark', label: 'כהה' }"]) assert.ok(sheet.includes(label), label);
+    assert.deepStrictEqual(typo.THEMES, ['light', 'sepia', 'dark']);
+    // The active verse uses the palette's selection colour.
+    assert.ok(/selected && \{ backgroundColor: c\.selection \}/.test(read('src/components/reader/BookReader.tsx')));
+  });
+}

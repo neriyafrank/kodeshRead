@@ -9,6 +9,9 @@
  * - Jumps (Quick Jump / TOC / search) scroll inside the window when the target is
  *   loaded, otherwise the window is re-centred; the target row glows for 2s.
  * - The exact position (top line + pixel offset into it) is saved to the tab.
+ * - Typography (shared/typography.js): the line height grows with the visible marks (niqqud /
+ *   te'amim) so stacked marks never touch the neighbouring lines, Android keeps the font
+ *   padding, and leading verse / seif numbers "(א)" sit in a subtle margin column.
  * - Paragraphs with entries in `links` carry a small count badge (counts are fetched
  *   with each window chunk). Tapping such a paragraph opens the commentary drawer,
  *   docked under the text as a resizable split view and synchronized to it.
@@ -42,6 +45,7 @@ import {
   type ParagraphRow,
 } from '../../../shared/reader';
 import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
+import { lineHeightMultiplier, splitVerseMarker, verseGutterWidth } from '../../../shared/typography';
 import { markTerms } from '../../../shared/search';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
@@ -77,6 +81,7 @@ interface WindowState {
 
 interface Typography {
   fontSize: number;
+  /** Effective multiplier (slider + room for the visible marks). */
   lineHeight: number;
   regular: string | undefined;
   bold: string | undefined;
@@ -130,11 +135,12 @@ export function BookReader({ tab, onOpenToc }: Props) {
 
   // --- typography -----------------------------------------------------------
   const font = readerFont(fontFamily);
+  const effectiveLineHeight = lineHeightMultiplier(lineHeight, { showNikkud, showCantillation });
   const typo = useMemo<Typography>(
-    () => ({ fontSize, lineHeight, regular: font.regular, bold: font.bold, showNikkud, showCantillation, palette }),
-    [fontSize, lineHeight, font.regular, font.bold, showNikkud, showCantillation, palette],
+    () => ({ fontSize, lineHeight: effectiveLineHeight, regular: font.regular, bold: font.bold, showNikkud, showCantillation, palette }),
+    [fontSize, effectiveLineHeight, font.regular, font.bold, showNikkud, showCantillation, palette],
   );
-  const estimatedItemSize = estimateItemSize(fontSize, lineHeight);
+  const estimatedItemSize = estimateItemSize(fontSize, effectiveLineHeight);
 
   // --- position persistence ---------------------------------------------------
   const position = useRef({ currentLineIndex: tab.currentLineIndex, tocPath: tab.tocPath, lineOffset: tab.lineOffset });
@@ -519,11 +525,14 @@ interface RowProps {
 }
 
 const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms }: RowProps) {
-  const html = useMemo(() => {
+  const { html, verse } = useMemo(() => {
     const prepared = prepareDisplayText(row.display_text, { showNikkud: typo.showNikkud, showCantillation: typo.showCantillation });
+    // "(א) ..." -> the verse number goes to the margin column, the text keeps a clean edge.
+    const split = row.is_heading ? { marker: null, text: prepared } : splitVerseMarker(prepared);
     // The search hit stays marked for the highlight's lifetime (2 s), then the row re-renders plain.
-    return highlightNonce && highlightTerms?.length ? markTerms(prepared, highlightTerms) : prepared;
-  }, [row.display_text, typo.showNikkud, typo.showCantillation, highlightNonce, highlightTerms]);
+    const body = highlightNonce && highlightTerms?.length ? markTerms(split.text, highlightTerms) : split.text;
+    return { html: body, verse: split.marker };
+  }, [row.display_text, row.is_heading, typo.showNikkud, typo.showCantillation, highlightNonce, highlightTerms]);
   // Accent at ~35% alpha: stays visible on top of the (highlight-coloured) row glow.
   const markStyle = useMemo(() => ({ backgroundColor: `${typo.palette.accent}59`, borderRadius: 3 }), [typo.palette.accent]);
   const [glow] = useState(() => new Animated.Value(0));
@@ -549,31 +558,51 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
   }
 
   const links = row.link_count;
+  const lineHeightPx = Math.ceil(size * typo.lineHeight);
+  const text = (
+    <RichText
+      html={html}
+      fontSize={size}
+      boldFamily={typo.bold}
+      markStyle={markStyle}
+      style={[
+        styles.text,
+        {
+          color: c.text,
+          fontFamily: row.is_heading ? typo.bold : typo.regular,
+          fontWeight: row.is_heading && !typo.bold ? '700' : undefined,
+          lineHeight: lineHeightPx,
+        },
+        headingStyle,
+        verse ? styles.verseText : null,
+      ]}
+      testID={verse ? `verse-text-${row.line_index}` : undefined}
+    />
+  );
   return (
     <Pressable
       onPress={() => onPress(row)}
-      style={[styles.row, selected && { backgroundColor: c.accentSoft }]}
+      style={[styles.row, selected && { backgroundColor: c.selection }]}
       accessibilityHint={links ? `${links} מפרשים` : undefined}
       testID={`para-${row.line_index}`}
     >
       {selected ? <View pointerEvents="none" style={[styles.selectedBar, { backgroundColor: c.accent }]} /> : null}
       <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: glow }]} />
-      <RichText
-        html={html}
-        fontSize={size}
-        boldFamily={typo.bold}
-        markStyle={markStyle}
-        style={[
-          styles.text,
-          {
-            color: c.text,
-            fontFamily: row.is_heading ? typo.bold : typo.regular,
-            fontWeight: row.is_heading && !typo.bold ? '700' : undefined,
-            lineHeight: Math.round(size * typo.lineHeight),
-          },
-          headingStyle,
-        ]}
-      />
+      {verse ? (
+        <View style={styles.verseRow}>
+          {/* Same line box as the text, so the number sits centred on the verse's first line. */}
+          <Text
+            style={[styles.verseNum, { width: verseGutterWidth(size), fontSize: Math.max(11, Math.round(size * 0.58)), lineHeight: lineHeightPx, color: c.verseNumber }]}
+            accessibilityLabel={`פסוק ${verse}`}
+            testID={`verse-num-${row.line_index}`}
+          >
+            {verse}
+          </Text>
+          {text}
+        </View>
+      ) : (
+        text
+      )}
       {links ? (
         <View
           pointerEvents="none"
@@ -610,7 +639,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   badgeText: { fontSize: 10, fontWeight: '700', lineHeight: 13 },
-  text: { writingDirection: 'rtl', textAlign: 'justify' },
+  // Android: keep the font's ascent / descent padding so te'amim above the first line and below
+  // the last one are never clipped by the text view.
+  text: { writingDirection: 'rtl', textAlign: 'justify', includeFontPadding: true },
+  verseRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  verseText: { flex: 1, minWidth: 0 },
+  // Start-side (right) margin: small, muted sans-serif digits-as-letters, like a printed Chumash.
+  verseNum: { textAlign: 'center', fontWeight: '600', includeFontPadding: false, fontVariant: ['tabular-nums'] },
   message: { textAlign: 'center', marginTop: spacing.xl, fontSize: 16 },
   end: { textAlign: 'center', paddingVertical: spacing.xl * 2, fontSize: 14 },
   breadcrumb: {

@@ -47,6 +47,7 @@ import {
 import { fetchLinkedEntries, groupLinkedEntries, type CommentaryGroup, type LinkedEntry } from '../../../shared/commentary';
 import { defaultExpandedKeys, filterCommentaries, rankCommentaries, type Ranked } from '../../../shared/commentaryRank';
 import { prepareDisplayText } from '../../../shared/reader';
+import { lineHeightPx } from '../../../shared/typography';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
 import { alignRight, inputAlignRight, nativeDir, setWebDir } from '../../lib/direction';
@@ -223,7 +224,8 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
   const entrySize = Math.max(13, Math.round(fontSize * 0.88));
   const crumbs = tocPath ? tocPath.split(' > ') : [];
-  const entryTextStyle = [s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: Math.round(entrySize * lineHeight) }];
+  // Same vocalization-aware leading as the reader (commentaries quote vocalized verses).
+  const entryTextStyle = [s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: lineHeightPx(entrySize, lineHeight, { showNikkud, showCantillation }) }];
 
   const openGroup = (g: RankedGroup) => {
     if (g.block) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block.start, endLine: g.block.end });
@@ -675,5 +677,5 @@ const createStyles = (c: Palette) =>
     entryOpenText: { fontSize: 13, color: c.accent, opacity: 0.7 },
     openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 3, borderRadius: radius.sm, backgroundColor: c.accentSoft },
     openText: { fontSize: 12, fontWeight: '600', color: c.accent },
-    entryText: { color: c.text, writingDirection: 'rtl', textAlign: 'justify' },
+    entryText: { color: c.text, writingDirection: 'rtl', textAlign: 'justify', includeFontPadding: true },
   });

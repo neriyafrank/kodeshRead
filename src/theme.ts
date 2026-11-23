@@ -1,6 +1,7 @@
 /**
- * App palettes (Light / Sepia / OLED Dark) and the hook that picks the active one
- * from the persisted appearance settings.
+ * App palettes (Light / Sepia / Dark) and the hook that picks the active one from the persisted
+ * appearance settings. Dark is a low-glare charcoal (not pure black) with warm off-white text
+ * and a slate-indigo active-verse highlight.
  */
 import { useMemo } from 'react';
 
@@ -16,7 +17,12 @@ export interface Palette {
   textMuted: string;
   accent: string;
   accentSoft: string;
+  /** Jump-target glow (2 s). */
   highlight: string;
+  /** Background of the active verse / paragraph (the one the commentary drawer shows). */
+  selection: string;
+  /** Margin verse numbers. */
+  verseNumber: string;
   danger: string;
   backdrop: string;
   statusBar: 'dark' | 'light';
@@ -34,6 +40,8 @@ export const palettes: Record<ThemeName, Palette> = {
     accent: '#8A5A12',
     accentSoft: '#F4E7CF',
     highlight: '#FFE9A8',
+    selection: '#F4E7CF',
+    verseNumber: '#9A8F7E',
     danger: '#A3361F',
     backdrop: 'rgba(20, 14, 4, 0.38)',
     statusBar: 'dark',
@@ -49,23 +57,27 @@ export const palettes: Record<ThemeName, Palette> = {
     accent: '#8B4A1C',
     accentSoft: '#E6D4AE',
     highlight: '#EFCF7C',
+    selection: '#E6D4AE',
+    verseNumber: '#9A8462',
     danger: '#9C3317',
     backdrop: 'rgba(40, 24, 6, 0.4)',
     statusBar: 'dark',
   },
   dark: {
     name: 'dark',
-    background: '#000000',
-    surface: '#0E0E0E',
-    surfaceMuted: '#181818',
-    border: '#262626',
-    text: '#E4DED2',
-    textMuted: '#948C7F',
-    accent: '#D8A54C',
-    accentSoft: '#2A2114',
-    highlight: '#4D3B0E',
-    danger: '#FF7B5C',
-    backdrop: 'rgba(0, 0, 0, 0.6)',
+    background: '#212121',
+    surface: '#2A2A2A',
+    surfaceMuted: '#303030',
+    border: '#3B3B3B',
+    text: '#E8E6E3',
+    textMuted: '#A29E97',
+    accent: '#D2AE6D',
+    accentSoft: '#3A3428',
+    highlight: '#3D4769',
+    selection: '#2D3347',
+    verseNumber: '#8C8A86',
+    danger: '#F08A6E',
+    backdrop: 'rgba(0, 0, 0, 0.55)',
     statusBar: 'light',
   },
 };

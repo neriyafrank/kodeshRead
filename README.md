@@ -26,9 +26,20 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
 * **Tabs**: several books open at once; each tab persists `{ tabId, bookId, bookTitle,
   currentLineIndex, tocPath, lineOffset }` so switching tabs or relaunching restores the
   exact scroll position.
-* **`Aa` sheet**: Frank Ruhl Libre / David Libre / Assistant / Heebo (bundled via
-  `@expo-google-fonts/*`), font size and line height sliders, Light / Sepia / OLED Dark,
-  live Niqqud & cantillation toggle. Settings persist.
+* **`Aa` sheet**: a 3-way theme switcher (בהיר / ספיה / כהה), the reader font — **טעמי פרנק**
+  (Taamey Frank CLM, the default), Frank Ruhl Libre, David Libre, Assistant, Heebo or **מערכת**
+  (the platform font) — font size and line height sliders, live niqqud & cantillation toggles.
+  Settings persist (`shared/typography.js` migrates older saved settings).
+* **Cantillation-grade typography** (`shared/typography.js`): Taamey Frank CLM
+  (`assets/fonts/`, Culmus project, GPL v2 + font exception) carries OpenType GPOS mark-to-base /
+  mark-to-mark tables, so niqqud and te'amim are anchored and stacked instead of colliding. It is
+  embedded natively by the `expo-font` config plugin (`app.json`, family = file name) and loaded
+  with `useFonts` (web `@font-face`). The slider sets plain-text leading (default 1.55×); visible
+  niqqud adds 0.2 and te'amim 0.3 (1.75× / 1.85×), Android keeps `includeFontPadding`, and a
+  leading verse / seif number `(א)` moves to a subtle right-margin column.
+* **Themes**: Light, Sepia and a low-glare Dark (charcoal `#212121`, warm off-white `#E8E6E3`
+  text, slate-indigo active verse) applied to the reader, commentary drawer, TOC, search and
+  library.
 
 * **Full-text search** (`src/app/search.tsx`, logic in `shared/search.js`): opened from the
   Library header (חיפוש) or the reader toolbar (🔍 = scoped to the open book).
@@ -75,7 +86,7 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
     to step to the previous or next paragraph with commentaries (the text scrolls along), and
     **סנכרון** to make the drawer follow the reading line while you scroll.
   * Links work in both directions: open a commentary and its drawer shows the source line.
-  * It uses the active theme (Light / Sepia / OLED Dark), font, size, line height and niqqud
+  * It uses the active theme (Light / Sepia / Dark), font, size, line height and niqqud
     setting.
 
 ## Quick start

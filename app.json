@@ -70,7 +70,15 @@
         }
       ],
       "./plugins/withImportForegroundService",
-      "expo-font",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/TaameyFrankCLM-Medium.ttf",
+            "./assets/fonts/TaameyFrankCLM-Bold.ttf"
+          ]
+        }
+      ],
       "expo-status-bar"
     ]
   }

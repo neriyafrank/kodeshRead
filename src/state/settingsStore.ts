@@ -1,19 +1,29 @@
-/** Persisted reading appearance (the `Aa` panel). */
+/** Persisted reading appearance (the `Aa` panel). Rules live in shared/typography.js. */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
+import {
+  APPEARANCE_VERSION,
+  DEFAULT_FONT,
+  FONT_SIZE as FONT_SIZE_RANGE,
+  LINE_HEIGHT as LINE_HEIGHT_RANGE,
+  lineHeightMultiplier,
+  migrateAppearance,
+  sanitizeAppearance,
+} from '../../shared/typography';
 import type { FontFamilyKey } from '../fonts';
 
 export type ThemeName = 'light' | 'sepia' | 'dark';
 
-export const FONT_SIZE = { min: 14, max: 36, step: 1, default: 20 };
-export const LINE_HEIGHT = { min: 1.2, max: 2.4, step: 0.05, default: 1.7 };
+export const FONT_SIZE = FONT_SIZE_RANGE;
+/** Slider range: leading of plain text; visible niqqud / te'amim add their own room on top. */
+export const LINE_HEIGHT = LINE_HEIGHT_RANGE;
 
 export interface AppearanceSettings {
   fontFamily: FontFamilyKey;
   fontSize: number;
-  /** Multiplier of fontSize. */
+  /** Multiplier of fontSize for plain text (see effectiveLineHeight). */
   lineHeight: number;
   theme: ThemeName;
   /** Vowel points (ניקוד). Hiding them hides cantillation too. */
@@ -36,7 +46,7 @@ interface SettingsState extends AppearanceSettings {
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
-  fontFamily: 'frankRuhl',
+  fontFamily: DEFAULT_FONT as FontFamilyKey,
   fontSize: FONT_SIZE.default,
   lineHeight: LINE_HEIGHT.default,
   theme: 'light',
@@ -68,16 +78,12 @@ export const useSettings = create<SettingsState>()(
     {
       name: 'kodeshread.appearance',
       storage: createJSONStorage(() => AsyncStorage),
-      // v2: showNiqqud -> showNikkud (+ showCantillation). Older saved settings keep their choice.
-      version: 2,
-      migrate: (persisted, version) => {
-        const p = (persisted ?? {}) as Record<string, unknown>;
-        if (version < 2 && typeof p.showNiqqud === 'boolean' && p.showNikkud === undefined) {
-          p.showNikkud = p.showNiqqud;
-          delete p.showNiqqud;
-        }
-        return p as unknown as SettingsState;
-      },
+      // v2: showNiqqud -> showNikkud (+ showCantillation).
+      // v3: Taamey Frank CLM default, plain-text slider (marks add their own leading).
+      version: APPEARANCE_VERSION,
+      migrate: (persisted, version) => migrateAppearance(persisted as Record<string, unknown>, version) as unknown as SettingsState,
+      // Unknown font keys / themes in storage (e.g. from a newer build) fall back to the defaults.
+      merge: (persisted, current) => ({ ...current, ...(sanitizeAppearance(persisted as Record<string, unknown>) as Partial<SettingsState>) }),
       partialize: ({ fontFamily, fontSize, lineHeight, theme, showNikkud, showCantillation, commentaryRatio, commentaryFollow }) => ({
         fontFamily,
         fontSize,
@@ -91,3 +97,16 @@ export const useSettings = create<SettingsState>()(
     },
   ),
 );
+
+/** Line-height multiplier actually used for the text (slider + room for the visible marks). */
+export function effectiveLineHeight(s: Pick<AppearanceSettings, 'lineHeight' | 'showNikkud' | 'showCantillation'>): number {
+  return lineHeightMultiplier(s.lineHeight, s);
+}
+
+/** Hook: the effective line-height multiplier. */
+export function useEffectiveLineHeight(): number {
+  const lineHeight = useSettings((s) => s.lineHeight);
+  const showNikkud = useSettings((s) => s.showNikkud);
+  const showCantillation = useSettings((s) => s.showCantillation);
+  return lineHeightMultiplier(lineHeight, { showNikkud, showCantillation });
+}

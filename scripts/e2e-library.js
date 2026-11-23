@@ -167,7 +167,8 @@ try {
     step('column path persists; a book opens from its column');
 
     // --- טעמים / ניקוד toggles ---------------------------------------------------------------
-    const para = page.locator('[data-testid^="para-"]', { hasText: /\(א\)/ }).last();
+    // Verse א (its number sits in the margin column, the text no longer starts with "(א)").
+    const para = page.locator('[data-testid^="para-"]', { has: page.locator('[data-testid^="verse-num-"]', { hasText: /^א$/ }) }).last();
     await para.waitFor({ timeout: 20000 });
     const text = () => para.innerText();
     const TROPE = /[\u0591-\u05AF]/;

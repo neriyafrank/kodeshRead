@@ -125,7 +125,7 @@ try {
     assert.ok(y7 > 60 && y7 < (await tid('commentary-pane').boundingBox()).y, `resizing must not scroll the text (line 7 at ${y7})`);
     step(`resizable (${Math.round(before)} -> ${Math.round(after)} px)`);
 
-    // Theme: switch to OLED dark in the Aa sheet (in the folded reader tools bar); the drawer follows.
+    // Theme: switch to Dark (charcoal) in the Aa sheet (in the folded reader tools bar); the drawer follows.
     assert.strictEqual(await tid('aa-button').count(), 0, 'reader tools collapsed by default');
     await tid('reader-tools-toggle').click();
     await tid('aa-button').click();
@@ -135,7 +135,7 @@ try {
     if (await tid('appearance-sheet').count()) await page.mouse.click(200, 60);
     await page.waitForTimeout(400);
     const bg = await tid('commentary-pane').evaluate((el) => getComputedStyle(el).backgroundColor);
-    assert.ok(/rgb\(14, 14, 14\)/.test(bg), `drawer background ${bg}`);
+    assert.strictEqual(bg, 'rgb(42, 42, 42)', `drawer background ${bg} (Dark surface #2A2A2A)`);
     await shot('3-dark');
     step('drawer uses the active theme');
 

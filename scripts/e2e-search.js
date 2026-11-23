@@ -167,9 +167,9 @@ try {
     await page.goto(BASE + '/search');
     await tid('search-result').first().waitFor({ timeout: 60000 });
     const bg = await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="search-result"]')).backgroundColor);
-    assert.strictEqual(bg, 'rgb(14, 14, 14)');
+    assert.strictEqual(bg, 'rgb(42, 42, 42)', 'Dark charcoal surface (#2A2A2A)');
     await shot('4-dark');
-    step('OLED dark theme');
+    step('dark (charcoal) theme');
 
     const real = errors.filter((e) => !/Warning:|deprecated|DevTools/i.test(e));
     assert.deepStrictEqual(real, [], 'console errors');
