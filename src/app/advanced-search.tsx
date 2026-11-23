@@ -15,13 +15,14 @@
 import { FlashList } from '@shopify/flash-list';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { ActivityIndicator, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { ADVANCED_DEFAULTS, NEAR_DISTANCES, buildQuery, type ProximityMode, type SearchPlan } from '../../shared/hebrewSearch';
 import { CORPORA, type SearchRow, type SearchScope } from '../../shared/search';
 import { ResultCard } from '../components/search/ResultCard';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
+import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
 import { alignRight, inputAlignRight } from '../lib/direction';
 import { advancedDefaults, scopeLabel, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
@@ -84,7 +85,7 @@ export default function AdvancedSearchScreen() {
   // The query runs on "חפש": a snapshot of the form.
   const [submitted, setSubmitted] = useState<{ plan: SearchPlan; scope: SearchScope } | null>(null);
   const [formOpen, setFormOpen] = useState(true);
-  const { current, shown, loading, loadMore, loadingMore } = usePlanResults(submitted?.plan ?? null, submitted?.scope ?? { kind: 'all' }, 0);
+  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, counting, progress } = usePlanResults(submitted?.plan ?? null, submitted?.scope ?? { kind: 'all' }, 0, submitted);
   const draftPlan = useMemo(() => planOf(advanced), [advanced]);
 
   const setField = (k: keyof AdvancedState['fields'], v: string) => setAdvanced({ fields: { ...advanced.fields, [k]: v } });
@@ -330,15 +331,15 @@ export default function AdvancedSearchScreen() {
             <Text style={s.editText}>עריכה ▾</Text>
           </Pressable>
           <View style={s.resultsHeader}>
-            {loading ? <ActivityIndicator size="small" color={c.accent} /> : null}
             {!loading && current ? (
               <Text style={s.count} testID="adv-count">
-                {countLabel(current)}
+                {countLabel(current, counting)}
               </Text>
             ) : null}
             <View style={s.flex} />
             {submitted.plan.hasExpansions ? <Text style={s.note}>התאמות מדויקות תחילה</Text> : null}
           </View>
+          <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} scope={submitted.scope} progress={progress} onCancel={cancel} onRetry={rerun} testIDPrefix="adv" />
           {current?.error ? (
             <Text style={s.empty}>שגיאה בחיפוש: {current.error}</Text>
           ) : current && current.rows.length === 0 && !current.hasMore ? (
@@ -357,7 +358,7 @@ export default function AdvancedSearchScreen() {
               contentContainerStyle={s.list}
               ListFooterComponent={
                 loadingMore ? (
-                  <ActivityIndicator style={s.footer} color={c.accent} />
+                  <LoadingMoreFooter />
                 ) : current?.hasMore && rows.length < 10 ? (
                   <Pressable onPress={loadMore} style={s.more} testID="adv-more">
                     <Text style={s.moreText}>המשך חיפוש…</Text>
@@ -492,7 +493,6 @@ const createStyles = (c: Palette) =>
     count: { fontSize: 13, color: c.textMuted, ...alignRight },
     note: { fontSize: 12, color: c.accent, ...alignRight },
     list: { paddingBottom: spacing.xl },
-    footer: { marginVertical: spacing.lg },
     more: { alignSelf: 'center', marginVertical: spacing.lg, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: 999, backgroundColor: c.accentSoft },
     moreText: { color: c.accent, fontWeight: '700' },
     divider: { marginHorizontal: spacing.md, marginTop: spacing.sm, marginBottom: spacing.sm, paddingVertical: 4, borderTopWidth: 1, borderTopColor: c.border },

@@ -117,6 +117,82 @@ try {
     await tid('search-result').first().waitFor({ timeout: 20000 });
     step('FTS syntax characters are sanitized');
 
+    // ---- Search progress UI (Simple Search) -------------------------------------------------
+    // __KODESHREAD_SEARCH_DELAY_MS__ / __KODESHREAD_COUNT_DELAY_MS__ slow the run down deterministically.
+    const setDelay = (search, count) =>
+      page.evaluate(([a, b]) => {
+        globalThis.__KODESHREAD_SEARCH_DELAY_MS__ = a;
+        globalThis.__KODESHREAD_COUNT_DELAY_MS__ = b;
+      }, [search, count]);
+    const plain = (t) => t.replace(/[⁦⁩]/g, '');
+    const searchingBarVisible = (id) => page.waitForFunction((x) => { const el = document.querySelector(`[data-testid="${x}"]`); return !!el && parseFloat(getComputedStyle(el).opacity) > 0.3; }, id, { timeout: 5000 });
+    await setDelay(2500, 0);
+    await tid('search-input').fill('מצוה');
+    await tid('search-progress-track').waitFor({ timeout: 2000 });
+    await searchingBarVisible('search-progress-bar'); // the sweep bar paints at once, long before the query starts
+    assert.strictEqual(await tid('search-status').count(), 0, 'no banner flicker for the first 300 ms');
+    await tid('search-status').waitFor({ timeout: 3000 });
+    assert.strictEqual(await tid('search-stage').innerText(), 'מחפש בכל הספרייה…');
+    const t1 = plain(await tid('search-elapsed').innerText());
+    assert.ok(/^\d+\.\d שניות?$|^0\.\d שניות$|^1\.0 שנייה$/.test(t1), `elapsed: ${t1}`);
+    await page.waitForTimeout(700);
+    const t2 = plain(await tid('search-elapsed').innerText());
+    assert.ok(parseFloat(t2) > parseFloat(t1), `live timer ${t1} -> ${t2}`);
+    assert.ok((await tid('search-elapsed').innerText()).includes('⁦'), 'number isolated LTR');
+    assert.strictEqual(await tid('search-empty').count(), 0, 'no empty message while searching');
+    const bannerBox = await tid('search-status').boundingBox();
+    assert.ok(bannerBox && bannerBox.x >= 0 && bannerBox.x + bannerBox.width <= 401, 'banner fits the phone width');
+    assert.strictEqual(await tid('search-stage').evaluate((el) => getComputedStyle(el).textAlign), 'right', 'RTL: stage text flush right');
+    await shot('5-progress-searching');
+    await tid('search-cancel').click();
+    await tid('search-cancelled').waitFor({ timeout: 2000 });
+    assert.strictEqual(await tid('search-status').count(), 0, 'cancel leaves the loading state at once');
+    assert.strictEqual(await tid('search-empty').count(), 0, 'cancelled is not "no results"');
+    await page.waitForTimeout(2800); // the slow query would have finished by now: its results are ignored
+    assert.strictEqual(await tid('search-result').count(), 0, 'stale results after cancel are discarded');
+    assert.strictEqual(await tid('search-empty').count(), 0);
+    await shot('5b-progress-cancelled');
+    await setDelay(0, 0);
+    await tid('search-retry').click();
+    await tid('search-result').first().waitFor({ timeout: 20000 });
+    assert.strictEqual(await tid('search-cancelled').count(), 0);
+    step('Simple Search progress: instant bar, delayed banner, live RTL timer, cancel, retry');
+
+    // A newer query supersedes a slow earlier one: only the newer results ever show.
+    await setDelay(1800, 0);
+    await tid('search-input').fill('ברא');
+    await page.waitForTimeout(700);
+    await tid('search-input').fill('אמר');
+    await tid('search-status').waitFor({ timeout: 3000 });
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="search-status"]').length === 0, null, { timeout: 15000 });
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="search-hit"]')].length > 0 && [...document.querySelectorAll('[data-testid="search-hit"]')].every((el) => el.textContent.replace(/[^א-ת]/g, '') === 'אמר'), null, { timeout: 15000 });
+    await page.waitForTimeout(1500);
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('[data-testid="search-hit"]')].every((el) => el.textContent.replace(/[^א-ת]/g, '') === 'אמר')), 'late results of the superseded query never appear');
+    // The first page shows immediately; the total resolves behind a subtle indicator.
+    await setDelay(0, 1500);
+    await tid('search-input').fill('ויאמר אל');
+    await tid('search-result').first().waitFor({ timeout: 15000 });
+    const countTxt = async () => (await tid('search-count').innerText().catch(() => '')) || '';
+    await page.waitForFunction(() => /מחשב סך הכל/.test((document.querySelector('[data-testid="search-count"]') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => undefined);
+    const counting = /מחשב סך הכל/.test(await countTxt());
+    if (counting) await page.waitForFunction(() => !/מחשב סך הכל/.test((document.querySelector('[data-testid="search-count"]') || {}).textContent || ''), null, { timeout: 15000 });
+    step(`newer query supersedes a slow one; first page before the total${counting ? ' (count indicator shown)' : ''}`);
+
+    // "לא נמצאו תוצאות" never flashes while the search is still running.
+    await setDelay(1500, 0);
+    await tid('search-input').fill('קקקקקק');
+    await page.waitForTimeout(900);
+    assert.strictEqual(await tid('search-empty').count(), 0, 'no empty message before the search finishes');
+    await tid('search-empty').waitFor({ timeout: 8000 });
+    assert.ok((await tid('search-empty').innerText()).includes('לא נמצאו תוצאות'));
+    assert.strictEqual(await tid('search-status').count(), 0);
+    // A fast query (no delay) never shows the banner at all.
+    await setDelay(0, 0);
+    await tid('search-input').fill('שבת');
+    await tid('search-result').first().waitFor({ timeout: 15000 });
+    assert.strictEqual(await tid('search-status').count(), 0, 'instant queries show no banner');
+    step('empty state never flashes during a search; fast queries show no banner');
+
     // ---- Scope picker: multi-select over the canonical catalog ------------------------------
     await tid('search-input').fill('ויאמר');
     await tid('search-result').first().waitFor();
@@ -397,6 +473,27 @@ try {
     await advTid('search-result').first().waitFor({ timeout: 30000 });
     step('Advanced Search: multi-select scope picker + chips');
 
+    // Advanced Search progress: same bar / banner / cancel.
+    await tid('adv-edit').click();
+    await setDelay(2200, 0);
+    await tid('adv-query').fill('מצוה');
+    await tid('adv-submit').click();
+    await advTid('search-progress-track').waitFor({ timeout: 2000 });
+    await advTid('adv-status').waitFor({ timeout: 3000 });
+    assert.strictEqual(await advTid('adv-stage').innerText(), 'מחפש בבבלי…', 'the stage names the active corpus scope');
+    assert.ok(/\d+\.\d שניות|שנייה/.test(plain(await advTid('adv-elapsed').innerText())));
+    assert.strictEqual(await advTid('adv-empty').count(), 0);
+    await advTid('adv-cancel').click();
+    await advTid('adv-cancelled').waitFor({ timeout: 2000 });
+    await page.waitForTimeout(2400);
+    assert.strictEqual(await advTid('search-result').count(), 0, 'stale advanced results discarded after cancel');
+    assert.strictEqual(await advTid('adv-empty').count(), 0);
+    await setDelay(0, 0);
+    await advTid('adv-retry').click();
+    await advTid('search-result').first().waitFor({ timeout: 20000 });
+    assert.strictEqual(await advTid('adv-cancelled').count(), 0);
+    step('Advanced Search progress: bar, banner, cancel, retry');
+
     // A result opens the reader at its line with the hit marked.
     const advTarget = (await advTid('search-result').first().innerText()).split('\n')[0];
     await advTid('search-result').first().click();
@@ -426,6 +523,14 @@ try {
     await tid('search-result').first().waitFor({ timeout: 60000 });
     const bg = await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="search-result"]')).backgroundColor);
     assert.strictEqual(bg, 'rgb(42, 42, 42)', 'Dark charcoal surface (#2A2A2A)');
+    {
+      await setDelay(1200, 0);
+      await tid('search-input').fill('מצוה');
+      await searchingBarVisible('search-progress-bar');
+      const colors = await page.evaluate(() => [getComputedStyle(document.querySelector('[data-testid="search-progress-bar"]')).backgroundColor, getComputedStyle(document.querySelector('[data-testid="search-progress-track"]')).backgroundColor]);
+      assert.deepStrictEqual(colors, ['rgb(210, 174, 109)', 'rgb(58, 52, 40)'], 'dark theme bar colors');
+      await setDelay(0, 0);
+    }
     await shot('4-dark');
     step('dark (charcoal) theme');
 

@@ -37,6 +37,8 @@
  *    commentary linked to its daf / amud and ranked #1; traditional Jewish ordering (Tanach, Mishna
  *    sedarim, Shas, Rambam, Shulchan Aruch); base books vs commentaries; commentaries of every era
  *    folder grouped under their base in rank order; multi-select search scope (FTS5 == fallback).
+ * 13. Search progress UI (shared/searchLifecycle.js): lifecycle transitions, request-id race safety,
+ *    cancellation / abort + real progress in shared/search.js, Hebrew RTL elapsed formatting.
  */
 'use strict';
 
@@ -762,9 +764,162 @@ async function main() {
   await advancedSearchTests();
   // 11. Canonical library catalog, Bavli Rashi, multi-select search scope.
   await libraryCatalogTests();
+  // 13. Search progress UI: lifecycle state machine, cancellation, elapsed formatting.
+  await searchProgressTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
+}
+
+/**
+ * Search progress (section 13): shared/searchLifecycle.js state machine, request-id race safety,
+ * abort + real progress in shared/search.js, Hebrew/RTL elapsed formatting, UI wiring.
+ */
+async function searchProgressTests() {
+  const lc = require('../shared/searchLifecycle');
+  const mk = (key, rows) => ({ key, rows: rows || [{ id: 1 }], terms: ['x'], hasMore: false, cursor: null, count: { count: (rows || [1]).length, capped: false }, elapsed: 5 });
+  const run = (actions, st) => actions.reduce((a, x) => lc.lifecycleReducer(a, x), st || lc.initialLifecycle());
+
+  await check('search lifecycle: starting a search enters loading with stage metadata', () => {
+    const st = run([{ type: 'start', id: 1, key: 'k1', now: 1000 }]);
+    assert.deepStrictEqual([st.status, st.id, st.key, st.stage, st.scanned, st.startedAt, st.counting], ['searching', 1, 'k1', 'query', 0, 1000, false]);
+    const prog = run([{ type: 'progress', id: 1, stage: 'verify', scanned: 750 }], st);
+    assert.deepStrictEqual([prog.stage, prog.scanned], ['verify', 750]);
+    assert.strictEqual(lc.stageLabel('query', 0, { kind: 'all' }), 'מחפש בכל הספרייה…');
+    assert.strictEqual(lc.stageLabel('query', 0, { kind: 'books', ids: [1, 2, 3, 4, 5], name: 'x' }), 'מחפש ב-5 ספרים נבחרים…');
+    assert.strictEqual(lc.stageLabel('count', 0, { kind: 'all' }), 'מחשב סך תוצאות…');
+    assert.ok(lc.stageLabel('verify', 12000, { kind: 'all' }).startsWith('מעבד התאמות…') && lc.stageLabel('verify', 12000, { kind: 'all' }).includes('\u206612,000\u2069'));
+    // The phase is "searching" the instant the key changes, before the effect even dispatches.
+    const v = lc.viewOf(lc.initialLifecycle(), 'k1', false);
+    assert.deepStrictEqual([v.phase, v.current], ['searching', null]);
+    assert.strictEqual(lc.viewOf(st, '', true).phase, 'idle');
+  });
+
+  await check('search lifecycle: a newer query discards the stale results of a slower earlier one', () => {
+    const counter = lc.createRequestCounter();
+    const a = counter.next();
+    const b = counter.next();
+    assert.ok(b > a && counter.isCurrent(b) && !counter.isCurrent(a));
+    let st = run([{ type: 'start', id: a, key: 'old', now: 0 }, { type: 'start', id: b, key: 'new', now: 10 }]);
+    // The slow first query answers last: both its page and its count are ignored.
+    st = run([{ type: 'page', id: a, results: mk('old', [{ id: 9 }, { id: 8 }]) }, { type: 'count', id: a, count: { count: 99, capped: false } }], st);
+    assert.deepStrictEqual([st.status, st.id, st.results], ['searching', b, null]);
+    st = run([{ type: 'page', id: b, results: mk('new', [{ id: 1 }]) }], st);
+    assert.strictEqual(st.status, 'done');
+    st = run([{ type: 'page', id: a, results: mk('old') }, { type: 'more', id: a, rows: [{ id: 7 }], hasMore: false, cursor: null }], st);
+    assert.deepStrictEqual(st.results.rows.map((r) => r.id), [1], 'late stale rows never appear');
+    assert.strictEqual(st.results.key, 'new');
+    // Ids never go back.
+    assert.strictEqual(run([{ type: 'start', id: a, key: 'zzz', now: 0 }], st), st);
+  });
+
+  await check('search lifecycle: cancel leaves loading at once and ignores late results; empty never flashes', () => {
+    let st = run([{ type: 'start', id: 1, key: 'k', now: 0 }, { type: 'cancel', id: 1 }]);
+    assert.strictEqual(st.status, 'cancelled');
+    let v = lc.viewOf(st, 'k', false);
+    assert.deepStrictEqual([v.phase, v.current, v.shown], ['cancelled', null, null]);
+    // A page that was already in flight when ביטול was pressed is dropped.
+    st = run([{ type: 'page', id: 1, results: mk('k', []) }], st);
+    assert.strictEqual(st.status, 'cancelled');
+    assert.strictEqual(lc.viewOf(st, 'k', false).current, null, '"לא נמצאו תוצאות" needs a finished (current) result');
+    // Typing a new query leaves the cancelled state immediately, then searching -> done.
+    assert.strictEqual(lc.viewOf(st, 'k2', false).phase, 'searching');
+    st = run([{ type: 'start', id: 2, key: 'k2', now: 5 }, { type: 'page', id: 2, results: mk('k2', []) }], st);
+    v = lc.viewOf(st, 'k2', false);
+    assert.deepStrictEqual([v.phase, v.current.rows.length], ['done', 0]);
+    // While the next query runs the previous rows stay (no empty flash) but `current` is empty.
+    st = run([{ type: 'start', id: 3, key: 'k3', now: 6 }], st);
+    v = lc.viewOf(st, 'k3', false);
+    assert.deepStrictEqual([v.phase, v.current, v.shown && v.shown.key], ['searching', null, 'k2']);
+    // First page rendered, total still counting: cancel stops only the count.
+    st = run([{ type: 'page', id: 3, results: { ...mk('k3'), count: null, hasMore: true } }], st);
+    assert.deepStrictEqual([st.status, st.counting], ['done', true]);
+    st = run([{ type: 'cancel', id: 3 }], st);
+    assert.deepStrictEqual([st.status, st.counting, st.results.rows.length], ['done', false, 1]);
+    st = run([{ type: 'count', id: 3, count: { count: 5, capped: false } }], st);
+    assert.strictEqual(st.results.count, null, 'a cancelled count never lands');
+  });
+
+  await check('search progress: elapsed time formats cleanly in Hebrew RTL', () => {
+    const plain = (t) => t.replace(/[\u2066\u2069]/g, '');
+    assert.strictEqual(plain(lc.formatElapsed(1400)), '1.4 שניות');
+    assert.strictEqual(plain(lc.formatElapsed(300)), '0.3 שניות');
+    assert.strictEqual(plain(lc.formatElapsed(1000)), '1.0 שנייה');
+    assert.strictEqual(plain(lc.formatElapsed(12345)), '12.3 שניות');
+    assert.strictEqual(plain(lc.formatElapsed(65000)), '1:05 דקות');
+    assert.strictEqual(plain(lc.formatElapsed(-5)), '0.0 שניות');
+    // The number is an isolated LTR run; the Hebrew unit stays outside it.
+    assert.strictEqual(lc.formatElapsed(1400), '\u20661.4\u2069 שניות');
+    assert.strictEqual(lc.BANNER_DELAY_MS, 300);
+  });
+
+  const dbFile = path.join(ROOT, 'assets/db/library.db');
+  if (fs.existsSync(dbFile)) {
+    const db = openDb(dbFile);
+    try {
+      await check('searchPlan / countPlan: abort stops the run; verification reports real progress', async () => {
+        const plan = hs.buildQuery({ query: 'שבת', anyOf: '', exclude: '' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'phrase', distance: 3, ordered: true } });
+        const base = await search.searchPlan(db, plan, { fts: true, limit: 5 });
+        assert.ok(base.rows.length > 0);
+        const ctl = new AbortController();
+        ctl.abort();
+        await assert.rejects(search.searchPlan(db, plan, { fts: true, signal: ctl.signal }), { name: 'AbortError' });
+        await assert.rejects(search.countPlan(db, plan, { fts: true, signal: ctl.signal }), { name: 'AbortError' });
+        // Aborting from a progress callback (a user pressing ביטול mid-run) stops the loop.
+        const verifying = hs.buildQuery({ query: 'אמר בשבת', anyOf: '', exclude: '' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'near', distance: 3, ordered: false } });
+        const events = [];
+        const ctl2 = new AbortController();
+        const r = search.countPlan(db, verifying, { fts: true, signal: ctl2.signal, onProgress: (p) => (events.push(p), ctl2.abort()) });
+        await r.then(
+          (v) => assert.ok(events.length === 0 && v.count >= 0, 'a count that fits one batch never reports'),
+          (e) => assert.strictEqual(e.name, 'AbortError'),
+        );
+        const seen = [];
+        await search.searchPlan(db, verifying, { fts: true, onProgress: (p) => seen.push(p) });
+        for (const p of seen) assert.ok(p.stage === 'verify' && p.scanned > 0);
+        // Same rows with or without hooks.
+        const plain = await search.searchPlan(db, plan, { fts: true, limit: 5 });
+        const hooked = await search.searchPlan(db, plan, { fts: true, limit: 5, signal: new AbortController().signal, onProgress: () => {} });
+        assert.deepStrictEqual(hooked, plain);
+      });
+
+      await check('search race: a slow first query that finishes last never replaces the newer query (real DB)', async () => {
+        const slowAll = (ms) => ({ all: async (sql, p) => (await new Promise((r) => setTimeout(r, ms)), db.all(sql, p)) });
+        const counter = lc.createRequestCounter();
+        const exec = async (word, adapter, ms) => {
+          const id = counter.next();
+          return { id, word, page: await search.searchPlan(adapter, hs.buildQuery(word), { fts: true, limit: 5 }), ms };
+        };
+        let st = lc.initialLifecycle();
+        const first = exec('שבת', slowAll(60));
+        st = lc.lifecycleReducer(st, { type: 'start', id: 1, key: 'שבת', now: 0 });
+        const second = exec('ברא', slowAll(0));
+        st = lc.lifecycleReducer(st, { type: 'start', id: 2, key: 'ברא', now: 1 });
+        for (const done of [await second, await first]) {
+          st = lc.lifecycleReducer(st, { type: 'page', id: done.id, results: { key: done.word, rows: done.page.rows, terms: [], hasMore: false, cursor: null, count: { count: done.page.rows.length, capped: false }, elapsed: 0 } });
+        }
+        assert.strictEqual(st.results.key, 'ברא');
+        assert.strictEqual(lc.viewOf(st, 'ברא', false).current.key, 'ברא');
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  await check('search progress UI: both screens use the shared RTL bar + banner, native driver, cancel, paging footer', () => {
+    const ui = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const comp = ui('src/components/search/SearchProgress.tsx');
+    assert.ok(comp.includes('useNativeDriver: Platform.OS') && comp.includes('BANNER_DELAY_MS') && comp.includes('ביטול') && comp.includes('החיפוש בוטל') && comp.includes('טוען תוצאות נוספות…'));
+    assert.ok(/stage: \{[^}]*\.\.\.alignRight/.test(comp) && !/(paddingLeft|paddingRight|marginLeft|marginRight)/.test(comp), 'RTL-safe styles');
+    for (const f of ['src/app/search.tsx', 'src/app/advanced-search.tsx']) {
+      const src = ui(f);
+      assert.ok(src.includes('<SearchProgress') && src.includes('LoadingMoreFooter') && !src.includes('ActivityIndicator'), f);
+    }
+    const hook = ui('src/components/search/usePlanResults.ts');
+    assert.ok(hook.includes('AbortController') && hook.includes('nextFrame') && hook.includes('createRequestCounter'));
+    // The empty-results text only needs a finished result: `current` is null while searching / cancelled.
+    assert.ok(ui('src/app/search.tsx').includes('current && current.rows.length === 0 && !current.hasMore'));
+  });
 }
 
 /** Canonical library catalog (shared/libraryCatalog.js) + Bavli Rashi + multi-select scope. */

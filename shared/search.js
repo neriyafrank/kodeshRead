@@ -646,6 +646,19 @@ async function planCandidates(db, phase, opts, afterId, take) {
  * @param {{ scope?: SearchScope, fts?: boolean, cursor?: { phase: number, afterId: number | null } | null, limit?: number }} [opts]
  * @returns {Promise<{ rows: (SearchRow & { phase: number })[], hasMore: boolean, cursor: { phase: number, afterId: number | null } | null }>}
  */
+function throwIfAborted(opts) {
+  if (opts && opts.signal && opts.signal.aborted) throw Object.assign(new Error('search aborted'), { name: 'AbortError' });
+}
+
+/** Reports real progress and lets the event loop (timers, painting) run between JS verification batches. */
+async function reportProgress(opts, stage, scanned) {
+  throwIfAborted(opts);
+  if (!opts || !opts.onProgress) return;
+  opts.onProgress({ stage, scanned });
+  await new Promise((r) => setTimeout(r, 0));
+  throwIfAborted(opts);
+}
+
 async function searchPlan(db, plan, opts) {
   const limit = (opts && opts.limit) || PAGE_SIZE;
   if (!plan || plan.empty) return { rows: [], hasMore: false, cursor: null };
@@ -658,6 +671,7 @@ async function searchPlan(db, plan, opts) {
     let afterId = phase === start.phase ? start.afterId : null;
     for (;;) {
       const take = ph.verify ? VERIFY_BATCH : limit + 1 - out.length;
+      throwIfAborted(opts);
       const rows = await planCandidates(db, ph, opts, afterId, take);
       for (const r of rows) {
         afterId = r.id;
@@ -671,6 +685,7 @@ async function searchPlan(db, plan, opts) {
         }
       }
       if (rows.length < take) break; // this phase is exhausted
+      if (ph.verify) await reportProgress(opts, 'verify', scanned);
       if (scanned >= MAX_SCAN_PER_PAGE) return { rows: out, hasMore: true, cursor: { phase, afterId } };
     }
   }
@@ -686,6 +701,7 @@ async function countPlan(db, plan, opts) {
     let n = 0;
     for (const s of scopeSources(db, opts && opts.scope)) {
       if (n > cap) break;
+      throwIfAborted(opts);
       const src = planSource(full, opts);
       const r = await s.adapter.all(`SELECT COUNT(*) AS n FROM (SELECT 1 ${src.sql} LIMIT ?)`, [...src.params, cap + 1 - n]);
       n += r[0] ? Number(r[0].n) : 0;
@@ -696,6 +712,7 @@ async function countPlan(db, plan, opts) {
   let scanned = 0;
   let afterId = null;
   for (;;) {
+    throwIfAborted(opts);
     const rows = await planCandidates(db, full, opts, afterId, VERIFY_BATCH);
     for (const r of rows) {
       afterId = r.id;
@@ -703,6 +720,7 @@ async function countPlan(db, plan, opts) {
       if (full.verify(hs.toTokens(r.clean_text || '')) && ++n > cap) return { count: cap, capped: true };
     }
     if (rows.length < VERIFY_BATCH) return { count: n, capped: false };
+    await reportProgress(opts, 'count', scanned);
     if (scanned >= MAX_COUNT_SCAN) return { count: n, capped: true };
   }
 }

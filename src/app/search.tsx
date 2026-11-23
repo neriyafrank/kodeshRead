@@ -15,7 +15,7 @@
 import { FlashList } from '@shopify/flash-list';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { buildQuery } from '../../shared/hebrewSearch';
 import type { SearchRow } from '../../shared/search';
@@ -23,6 +23,7 @@ import { SearchIcon, SlidersIcon } from '../components/Icons';
 import { ResultCard } from '../components/search/ResultCard';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
+import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
 import { alignRight, inputAlignRight } from '../lib/direction';
 import { scopeLabel, useSearch } from '../state/searchStore';
@@ -56,7 +57,7 @@ export default function SearchScreen() {
 
   // Literal plan: no expansion, no operators.
   const plan = useMemo(() => buildQuery(query), [query]);
-  const { current, shown, loading, loadMore, loadingMore } = usePlanResults(plan, scope, DEBOUNCE_MS);
+  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, counting, progress } = usePlanResults(plan, scope, DEBOUNCE_MS);
 
   const openAdvanced = useCallback(() => {
     Keyboard.dismiss();
@@ -135,15 +136,15 @@ export default function SearchScreen() {
             </Pressable>
           ) : null}
           <View style={s.flex} />
-          {loading ? <ActivityIndicator size="small" color={c.accent} /> : null}
           {!loading && current ? (
             <Text style={s.count} testID="search-count">
-              {countLabel(current)}
+              {countLabel(current, counting)}
             </Text>
           ) : null}
         </View>
         <ScopeChips scope={scope} onChange={setScope} />
       </View>
+      {plan.empty ? null : <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} scope={scope} progress={progress} onCancel={cancel} onRetry={rerun} />}
 
       {plan.empty ? (
         <View style={s.help}>
@@ -187,7 +188,7 @@ export default function SearchScreen() {
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           contentContainerStyle={s.list}
-          ListFooterComponent={loadingMore ? <ActivityIndicator style={s.footer} color={c.accent} /> : null}
+          ListFooterComponent={loadingMore ? <LoadingMoreFooter /> : null}
         />
       )}
 
@@ -248,7 +249,6 @@ const createStyles = (c: Palette) =>
     scopeCaret: { fontSize: 12, color: c.accent },
     count: { fontSize: 13, color: c.textMuted, ...alignRight },
     list: { paddingTop: spacing.sm, paddingBottom: spacing.xl },
-    footer: { marginVertical: spacing.lg },
     empty: { color: c.textMuted, fontSize: 15, padding: spacing.xl, textAlign: 'center' },
     help: { padding: spacing.lg, gap: 6 },
     helpTitle: { fontSize: 15, fontWeight: '700', color: c.text, marginTop: spacing.sm, ...alignRight },

@@ -84,6 +84,14 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > Highlight patterns `~x` / `^x` / `%x` go through `makeTermMatcher`. Self-tested in `scripts/selftest.js`
 > (section 10), e2e in `e2e:search`.
 
+> **Search progress UI:** `shared/searchLifecycle.js` (pure state machine: idle -> searching -> done | cancelled; every action
+> carries a monotonic request id so stale / post-cancel results are ignored; Hebrew elapsed formatting with LTR-isolated numbers)
+> drives `usePlanResults` (`src/components/search/`): loading state dispatched first, work starts after the next paint, an
+> `AbortController` per run (`shared/search.js` `signal` / `onProgress`: real verify / count batch counts), first page shown while
+> the total resolves (`counting`). `SearchProgress.tsx` = native-driver sweep bar + banner (scope / stage, live timer and `ביטול`
+> after 300 ms, `החיפוש בוטל` + `חפש שוב`) + `LoadingMoreFooter`, used by Simple and Advanced Search. e2e slows runs with
+> `globalThis.__KODESHREAD_SEARCH_DELAY_MS__` / `__KODESHREAD_COUNT_DELAY_MS__`. Self-tested (section 13), e2e in `e2e:search`.
+
 > **Canonical library catalog & multi-select scope:** `shared/libraryCatalog.js` (pure JS, no schema change) is the
 > single tree behind the Library screen (`LibraryColumns.tsx`: `ספרי בסיס` | `מפרשים לפי ספר`, live filter, inline
 > `מפרשים (N)` pill) and the search Scope Picker (`ScopeSheet.tsx`, multi-select). `is_commentary` is derived: a book

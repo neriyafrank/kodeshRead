@@ -18,6 +18,12 @@ export interface Corpus {
 }
 export const CORPORA: Corpus[];
 
+/** Cancellation + real progress for a plan run: `signal.aborted` -> AbortError; `onProgress` per JS verification batch. */
+export interface PlanRunHooks {
+  signal?: { aborted: boolean };
+  onProgress?: (p: { stage: 'verify' | 'count'; scanned: number }) => void;
+}
+
 export interface PlanCursor {
   phase: number;
   afterId: number | null;
@@ -26,9 +32,9 @@ export interface PlanCursor {
 export function searchPlan(
   db: LibraryDb,
   plan: SearchPlan,
-  opts?: { scope?: SearchScope; fts?: boolean; cursor?: PlanCursor | null; limit?: number },
+  opts?: { scope?: SearchScope; fts?: boolean; cursor?: PlanCursor | null; limit?: number } & PlanRunHooks,
 ): Promise<{ rows: SearchRow[]; hasMore: boolean; cursor: PlanCursor | null }>;
-export function countPlan(db: LibraryDb, plan: SearchPlan, opts?: { scope?: SearchScope; fts?: boolean; cap?: number }): Promise<{ count: number; capped: boolean }>;
+export function countPlan(db: LibraryDb, plan: SearchPlan, opts?: { scope?: SearchScope; fts?: boolean; cap?: number } & PlanRunHooks): Promise<{ count: number; capped: boolean }>;
 
 export type QueryAlt =
   | { type: 'term'; text: string; prefix: boolean }
