@@ -1,9 +1,32 @@
+import type { SearchPlan } from './hebrewSearch';
 import type { LibraryDb } from './sources';
 
 export type SearchScope =
   | { kind: 'all' }
   | { kind: 'category'; path: string; name: string }
-  | { kind: 'book'; bookId: number; title: string };
+  | { kind: 'book'; bookId: number; title: string }
+  /** Advanced Search corpus chips (CORPORA ids, OR-ed). */
+  | { kind: 'corpus'; ids: string[]; name: string };
+
+export interface Corpus {
+  id: string;
+  label: string;
+  include: string[];
+  exclude?: string[];
+}
+export const CORPORA: Corpus[];
+
+export interface PlanCursor {
+  phase: number;
+  afterId: number | null;
+}
+/** One page of a plan: exact matches (phase 0) first, then expanded-only matches (phase 1). */
+export function searchPlan(
+  db: LibraryDb,
+  plan: SearchPlan,
+  opts?: { scope?: SearchScope; fts?: boolean; cursor?: PlanCursor | null; limit?: number },
+): Promise<{ rows: SearchRow[]; hasMore: boolean; cursor: PlanCursor | null }>;
+export function countPlan(db: LibraryDb, plan: SearchPlan, opts?: { scope?: SearchScope; fts?: boolean; cap?: number }): Promise<{ count: number; capped: boolean }>;
 
 export type QueryAlt =
   | { type: 'term'; text: string; prefix: boolean }
@@ -45,6 +68,8 @@ export interface SearchRow {
   display_text: string;
   is_heading: number;
   book_title: string;
+  /** searchPlan: 0 = exact match, 1 = found through an expanded variant only. */
+  phase?: number;
 }
 
 export interface KwicSegment {

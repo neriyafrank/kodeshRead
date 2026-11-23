@@ -1,52 +1,40 @@
 /**
- * Hebrew full-text search (FTS5).
+ * Simple Search ("חיפוש רגיל"): one search bar, results, and the "חיפוש מתקדם" button.
  *
- *  - input goes through the shared normalizeHebrew() + FTS5 sanitization
- *    (shared/search.js), so punctuation can never cause a syntax error;
- *  - words are AND-ed; "quoted text" is an exact phrase;
- *  - "חיפוש מורחב" (default) expands abbreviations (ב"ד <-> בית דין), ktiv male/chaser
- *    and Hebrew prefixes/suffixes; "חיפוש מדויק" matches the typed words only;
+ *  - literal FTS5 matching (shared/hebrewSearch.js SIMPLE_DEFAULTS): every word is matched as
+ *    typed — no prefixes / suffixes, no plene / defective spelling, no acronyms, no Aramaic;
+ *    words are AND-ed and "quoted text" is an exact phrase. Punctuation never breaks a query;
  *  - scope: Entire Library / folder / book (ScopeSheet);
- *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the
- *    line and highlights it for 2 seconds.
+ *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the line and
+ *    highlights it for 2 seconds;
+ *  - "חיפוש מתקדם" opens the dedicated Advanced Search screen (/advanced-search) with the query.
  *
  * Route params (optional): bookId + title preset the scope to that book
  * (used by the reader's search button).
  */
 import { FlashList } from '@shopify/flash-list';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { countMatches, parseSearchQuery, searchParagraphs, type SearchRow, type SearchScope } from '../../shared/search';
-import { SearchIcon } from '../components/Icons';
+import { buildQuery } from '../../shared/hebrewSearch';
+import type { SearchRow } from '../../shared/search';
+import { SearchIcon, SlidersIcon } from '../components/Icons';
 import { ResultCard } from '../components/search/ResultCard';
 import { ScopeSheet } from '../components/search/ScopeSheet';
-import { useLibrary } from '../db/LibraryContext';
+import { countLabel, usePlanResults } from '../components/search/usePlanResults';
+import { alignRight, inputAlignRight } from '../lib/direction';
 import { scopeLabel, useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
 const DEBOUNCE_MS = 250;
 
-interface ResultsState {
-  key: string;
-  rows: SearchRow[];
-  terms: string[];
-  hasMore: boolean;
-  count: { count: number; capped: boolean } | null;
-  elapsed: number;
-  error?: string;
-}
-
-const scopeKey = (s: SearchScope) => (s.kind === 'all' ? 'all' : s.kind === 'category' ? `c:${s.path}` : `b:${s.bookId}`);
-
 export default function SearchScreen() {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const router = useRouter();
   const params = useLocalSearchParams<{ bookId?: string; title?: string }>();
-  const { adapter, fts } = useLibrary();
   const query = useSearch((x) => x.query);
   const setQuery = useSearch((x) => x.setQuery);
   const scope = useSearch((x) => x.scope);
@@ -54,13 +42,10 @@ export default function SearchScreen() {
   const recent = useSearch((x) => x.recent);
   const remember = useSearch((x) => x.remember);
   const clearRecent = useSearch((x) => x.clearRecent);
-  const smart = useSearch((x) => x.smart);
-  const setSmart = useSearch((x) => x.setSmart);
+  const advanced = useSearch((x) => x.advanced);
+  const setAdvanced = useSearch((x) => x.setAdvanced);
   const openBook = useTabs((x) => x.openBook);
   const [scopeOpen, setScopeOpen] = useState(false);
-  const [results, setResults] = useState<ResultsState | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const requestId = useRef(0);
 
   // Preset scope from route params (reader's "search in this book").
   useEffect(() => {
@@ -68,51 +53,17 @@ export default function SearchScreen() {
     if (Number.isFinite(id) && id > 0) setScope({ kind: 'book', bookId: id, title: params.title ?? '' });
   }, [params.bookId, params.title, setScope]);
 
-  const parsed = useMemo(() => parseSearchQuery(query, { smart }), [query, smart]);
-  const key = `${parsed.match}|${scopeKey(scope)}`;
+  // Literal plan: no expansion, no operators.
+  const plan = useMemo(() => buildQuery(query), [query]);
+  const { current, shown, loading, loadMore, loadingMore } = usePlanResults(plan, scope, DEBOUNCE_MS);
 
-  useEffect(() => {
-    const id = ++requestId.current;
-    if (parsed.empty) return;
-    const timer = setTimeout(async () => {
-      const t0 = Date.now();
-      try {
-        const page = await searchParagraphs(adapter, parsed, { scope, fts });
-        if (id !== requestId.current) return;
-        const elapsed = Date.now() - t0;
-        setResults({ key, rows: page.rows, terms: parsed.terms, hasMore: page.hasMore, count: page.hasMore ? null : { count: page.rows.length, capped: false }, elapsed });
-        if (page.hasMore) {
-          const count = await countMatches(adapter, parsed, { scope, fts });
-          if (id === requestId.current) setResults((r) => (r && r.key === key ? { ...r, count } : r));
-        }
-      } catch (e) {
-        if (id !== requestId.current) return;
-        console.warn('search failed', e);
-        setResults({ key, rows: [], terms: parsed.terms, hasMore: false, count: { count: 0, capped: false }, elapsed: 0, error: e instanceof Error ? e.message : String(e) });
-      }
-    }, DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [adapter, fts, parsed, scope, key]);
-
-  const current = !parsed.empty && results && results.key === key ? results : null;
-  const loading = !parsed.empty && !current;
-  // While a new query runs keep showing the previous results instead of flashing an empty list.
-  const shown = current ?? (parsed.empty ? null : results);
-
-  const loadMore = useCallback(async () => {
-    if (!current || !current.hasMore || loadingMore) return;
-    const id = requestId.current;
-    setLoadingMore(true);
-    try {
-      const last = current.rows[current.rows.length - 1];
-      const page = await searchParagraphs(adapter, parsed, { scope, fts, afterId: last.id });
-      if (id === requestId.current) setResults((r) => (r && r.key === current.key ? { ...r, rows: r.rows.concat(page.rows), hasMore: page.hasMore } : r));
-    } catch (e) {
-      console.warn('search paging failed', e);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [adapter, current, fts, loadingMore, parsed, scope]);
+  const openAdvanced = useCallback(() => {
+    Keyboard.dismiss();
+    // Carry the typed words over (the advanced fields keep their own state otherwise).
+    if (query.trim() && !advanced.fields.query.trim()) setAdvanced({ fields: { ...advanced.fields, query } });
+    const book = scope.kind === 'book' ? { bookId: String(scope.bookId), title: scope.title } : undefined;
+    router.push(book ? { pathname: '/advanced-search', params: book } : '/advanced-search');
+  }, [advanced.fields, query, router, scope, setAdvanced]);
 
   const onOpen = useCallback(
     (row: SearchRow) => {
@@ -133,29 +84,41 @@ export default function SearchScreen() {
     <View style={s.screen}>
       <Stack.Screen options={{ title: 'חיפוש בטקסט' }} />
       <View style={s.top}>
-        <View style={s.inputRow}>
-          <View style={s.icon}>
-            <SearchIcon />
+        <View style={s.searchRow}>
+          <View style={s.inputRow}>
+            <View style={s.icon}>
+              <SearchIcon />
+            </View>
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder='חיפוש מילים, או "ביטוי מדויק"'
+              placeholderTextColor={c.textMuted}
+              style={s.input}
+              autoFocus={!query}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+              onSubmitEditing={() => remember(query)}
+              accessibilityLabel="חיפוש בטקסט"
+              testID="search-input"
+            />
+            {query ? (
+              <Pressable onPress={() => setQuery('')} hitSlop={10} accessibilityLabel="נקה" style={s.clear} testID="search-clear">
+                <Text style={s.clearText}>✕</Text>
+              </Pressable>
+            ) : null}
           </View>
-          <TextInput
-            value={query}
-            onChangeText={setQuery}
-            placeholder='חיפוש מילים, או "ביטוי מדויק"'
-            placeholderTextColor={c.textMuted}
-            style={s.input}
-            autoFocus={!query}
-            autoCorrect={false}
-            autoCapitalize="none"
-            returnKeyType="search"
-            onSubmitEditing={() => remember(query)}
-            accessibilityLabel="חיפוש בטקסט"
-            testID="search-input"
-          />
-          {query ? (
-            <Pressable onPress={() => setQuery('')} hitSlop={10} accessibilityLabel="נקה" style={s.clear} testID="search-clear">
-              <Text style={s.clearText}>✕</Text>
-            </Pressable>
-          ) : null}
+          <Pressable
+            onPress={openAdvanced}
+            style={({ pressed }) => [s.advancedBtn, pressed && s.pressed]}
+            accessibilityRole="button"
+            accessibilityLabel="חיפוש מתקדם"
+            testID="open-advanced-search"
+          >
+            <SlidersIcon size={17} color={c.background} />
+            <Text style={s.advancedText}>חיפוש מתקדם</Text>
+          </Pressable>
         </View>
         <View style={s.metaRow}>
           <Pressable onPress={() => setScopeOpen(true)} style={({ pressed }) => [s.scopeBtn, pressed && s.pressed]} accessibilityRole="button" testID="scope-button">
@@ -170,40 +133,23 @@ export default function SearchScreen() {
               <Text style={s.clearText}>✕</Text>
             </Pressable>
           ) : null}
-          <View style={s.modes} accessibilityRole="radiogroup">
-            {([
-              [true, 'חיפוש מורחב', 'search-mode-smart'],
-              [false, 'חיפוש מדויק', 'search-mode-exact'],
-            ] as const).map(([value, label, id]) => (
-              <Pressable
-                key={id}
-                onPress={() => setSmart(value)}
-                style={[s.mode, smart === value && s.modeActive]}
-                accessibilityRole="radio"
-                accessibilityState={{ selected: smart === value }}
-                testID={id}
-              >
-                <Text style={[s.modeText, smart === value && s.modeTextActive]}>{label}</Text>
-              </Pressable>
-            ))}
-          </View>
           <View style={s.flex} />
           {loading ? <ActivityIndicator size="small" color={c.accent} /> : null}
           {!loading && current ? (
             <Text style={s.count} testID="search-count">
-              {current.count ? `${current.count.count}${current.count.capped ? '+' : ''} תוצאות` : `${current.rows.length}+ תוצאות`} · {current.elapsed} ms
+              {countLabel(current)}
             </Text>
           ) : null}
         </View>
       </View>
 
-      {parsed.empty ? (
+      {plan.empty ? (
         <View style={s.help}>
           <Text style={s.helpTitle}>טיפים</Text>
-          <Text style={s.helpText}>• כמה מילים — יימצאו פסקאות שמכילות את כולן.</Text>
+          <Text style={s.helpText}>• כמה מילים — יימצאו פסקאות שמכילות את כולן, בדיוק כפי שהוקלדו.</Text>
           <Text style={s.helpText}>• ביטוי במירכאות — התאמה מדויקת: &quot;שני כחות&quot;</Text>
           <Text style={s.helpText}>• ניקוד, טעמים, אותיות סופיות וגרשיים אינם משנים את החיפוש.</Text>
-          <Text style={s.helpText}>• חיפוש מורחב: ראשי תיבות (ב&quot;ד ↔ בית דין), כתיב מלא/חסר (שולחן ↔ שלחן), אותיות שימוש וסיומות (ובשבת, שבתות).</Text>
+          <Text style={s.helpText}>• תחיליות וסופיות, כתיב מלא/חסר, ראשי תיבות, ארמית, קרבת מילים וסינון לפי מדור — בחיפוש המתקדם.</Text>
           {recent.length ? (
             <>
               <View style={s.recentHeader}>
@@ -224,7 +170,7 @@ export default function SearchScreen() {
         </View>
       ) : current?.error ? (
         <Text style={s.empty}>שגיאה בחיפוש: {current.error}</Text>
-      ) : current && current.rows.length === 0 ? (
+      ) : current && current.rows.length === 0 && !current.hasMore ? (
         <Text style={s.empty} testID="search-empty">
           לא נמצאו תוצאות{scope.kind !== 'all' ? ` ב${scopeLabel(scope)}` : ''}
         </Text>
@@ -253,7 +199,9 @@ const createStyles = (c: Palette) =>
     screen: { flex: 1, backgroundColor: c.background },
     flex: { flex: 1 },
     top: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+    searchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
     inputRow: {
+      flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
       backgroundColor: c.surface,
@@ -265,36 +213,41 @@ const createStyles = (c: Palette) =>
       minHeight: 50,
     },
     icon: { marginEnd: spacing.md },
-    input: { flex: 1, fontSize: 18, color: c.text, paddingVertical: spacing.sm, writingDirection: 'rtl' },
+    input: { flex: 1, fontSize: 18, color: c.text, paddingVertical: spacing.sm, ...inputAlignRight },
     clear: { padding: spacing.sm },
     clearText: { fontSize: 15, color: c.textMuted },
+    advancedBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 50,
+      paddingHorizontal: spacing.md,
+      borderRadius: radius.lg,
+      backgroundColor: c.accent,
+    },
+    advancedText: { fontSize: 14, fontWeight: '700', color: c.background, ...alignRight },
     metaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, minHeight: 32 },
     scopeBtn: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      maxWidth: '45%',
+      maxWidth: '55%',
       paddingHorizontal: spacing.md,
       paddingVertical: 6,
       borderRadius: 999,
       backgroundColor: c.accentSoft,
     },
     pressed: { opacity: 0.7 },
-    scopeLabel: { fontSize: 13, color: c.textMuted },
-    scopeValue: { flexShrink: 1, fontSize: 14, color: c.accent, fontWeight: '700', writingDirection: 'rtl' },
+    scopeLabel: { fontSize: 13, color: c.textMuted, ...alignRight },
+    scopeValue: { flexShrink: 1, fontSize: 14, color: c.accent, fontWeight: '700', ...alignRight },
     scopeCaret: { fontSize: 12, color: c.accent },
-    count: { fontSize: 13, color: c.textMuted },
-    modes: { flexDirection: 'row', borderRadius: 999, borderWidth: 1, borderColor: c.border, overflow: 'hidden' },
-    mode: { paddingHorizontal: spacing.sm, paddingVertical: 5 },
-    modeActive: { backgroundColor: c.accent },
-    modeText: { fontSize: 12, color: c.textMuted },
-    modeTextActive: { color: c.background, fontWeight: '700' },
+    count: { fontSize: 13, color: c.textMuted, ...alignRight },
     list: { paddingTop: spacing.sm, paddingBottom: spacing.xl },
     footer: { marginVertical: spacing.lg },
     empty: { color: c.textMuted, fontSize: 15, padding: spacing.xl, textAlign: 'center' },
     help: { padding: spacing.lg, gap: 6 },
-    helpTitle: { fontSize: 15, fontWeight: '700', color: c.text, marginTop: spacing.sm, writingDirection: 'rtl' },
-    helpText: { fontSize: 14, color: c.textMuted, lineHeight: 21, writingDirection: 'rtl' },
+    helpTitle: { fontSize: 15, fontWeight: '700', color: c.text, marginTop: spacing.sm, ...alignRight },
+    helpText: { fontSize: 14, color: c.textMuted, lineHeight: 21, ...alignRight },
     recentHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     recentClear: { fontSize: 13, color: c.accent },
     chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },

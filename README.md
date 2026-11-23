@@ -41,8 +41,13 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
   text, slate-indigo active verse) applied to the reader, commentary drawer, TOC, search and
   library.
 
-* **Full-text search** (`src/app/search.tsx`, logic in `shared/search.js`): opened from the
-  Library header (חיפוש) or the reader toolbar (🔍 = scoped to the open book).
+* **Full-text search** comes in two experiences over the same offline FTS5 index (query engine:
+  `shared/hebrewSearch.js`, execution: `shared/search.js searchPlan / countPlan`):
+  * **Simple Search** (`src/app/search.tsx`, opened from the Library header or the reader's 🔍):
+    one search bar, literal matching only (no prefixes / suffixes, plene / defective, acronyms or
+    Aramaic), plus a prominent **חיפוש מתקדם** button next to the bar.
+  * **Advanced Search** (`src/app/advanced-search.tsx`, "חיפוש מתקדם" / "חזרה לחיפוש רגיל"): see
+    [Simple vs Advanced Search](#simple-vs-advanced-search) below.
   * Queries go through the same `normalizeHebrew()` as `clean_text` (niqqud, finals, gershayim
     don't matter), then every FTS5 syntax character (`" ' - * ( ) : ^` and any other punctuation)
     is stripped and each token is re-quoted, so no input can raise `fts5: syntax error`.
@@ -54,8 +59,8 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
     matched words emphasized. Results stream in library order (keyset paging, 40 per page);
     the total is counted up to 1000+.
   * Tapping a result opens or re-uses the book's tab, jumps to the line and highlights it for 2 s.
-  * The web preview's SQLite has no FTS5, so there (only) search falls back to a slower
-    substring `LIKE` scan.
+  * The web preview's SQLite has no FTS5, so there (only) search falls back to a slower `LIKE`
+    candidate scan, decided by the same JS evaluator, so it returns exactly the FTS5 results.
 
 * **Parallel commentaries** (`src/components/reader/CommentaryPane.tsx`, queries in
   `shared/commentary.js`):
@@ -122,7 +127,7 @@ Requires **Node ≥ 22.13** (the DB build script uses the built-in `node:sqlite`
 ```bash
 npm install
 npm run db:sample      # raw_library/sample -> assets/db/library.db (tests + web preview)
-npm test               # pipeline, Quick Jump, reader, FTS5 search, dual-DB & release self-test
+npm test               # pipeline, Quick Jump, reader, FTS5 Simple / Advanced search, dual-DB & release self-test
 npm start              # Expo dev server (also auto-builds the sample DB if missing)
 ```
 
@@ -299,9 +304,30 @@ at query time on the index's normalized form, so it needs no schema change or re
 - Proclitic prefixes (`ו ה ב כ ל מ ש`, `וב`, `וה`, `של`, `כש`…) and suffixes (FTS5 prefix queries `"שבת"*`).
   Words of 1–2 letters are never expanded.
 
-The Search screen's **חיפוש מורחב** mode (default) builds an OR-group of variants per word, capped at
-24 per word and 160 per query; **חיפוש מדויק** matches the typed words only. A `"quoted phrase"` is always
-exact. Result cards and the reader mark the variant that actually matched (`ושלחן`, `בית דין`, `ובשבת`).
+## Simple vs Advanced Search
+
+`shared/hebrewSearch.js` (pure JS, no schema change, no native module) builds one query plan for both
+screens: `buildQuery(text)` (Simple Search, `SIMPLE_DEFAULTS`: literal) or
+`buildQuery({ query, anyOf, exclude }, { ...ADVANCED_DEFAULTS, ... })`.
+
+| Advanced Search control | Default | Meaning |
+| --- | --- | --- |
+| מילות החיפוש / ביטוי | — | main words; inline `א\|ב` (OR), `-מילה` (NOT), `מיל*` (prefix), `"ביטוי"` (exact, never expanded) |
+| אחת מהמילים · או | — | at least one of these words (space / comma separated) |
+| ללא המילים · שלילה | — | none of these words (FTS5 `NOT`, with the same morphology) |
+| תחיליות וסופיות (`prefixesAndSuffixes`) | **on** | legal proclitics מש"ה וכל"ב + compounds (`וב`, `של`, `כש`, `ושב`… never `הב` / `בה`) and real suffixes (`ים ין ות י ו ה ך נו כם הם הן יו יה יהם`), feminine ה → ת construct (`תפילה` → `תפילת`, `לתפילתו`, `תפילות`; `מצוה` → `מצות`, `מצוות`, `מצותו`). Words of 1–2 letters are left alone. |
+| כתיב מלא/חסר (`pleneDefective`) | off | curated pairs + medial-mater rules (`מצווה`/`מצוה`, `עניין`/`ענין`, `שולחן`/`שלחן`, `תפילה`/`תפלה`, `אלהים`/`אלוהים`); never an initial ו/י, a final letter, the final syllable (`שלום` ≠ `שלם`) or a 3-letter word (`שיר` ≠ `שר`/`שור`, `עיר` ≠ `ער`) |
+| ראשי תיבות (`acronyms`) | off | bidirectional via `hebrewTorahDict.js` (`שו"ע` ↔ `שולחן ערוך`, `ק"ו` ↔ `קל וחומר`, `יו"ט` ↔ `יום טוב`) |
+| עברית ↔ ארמית (`aramaicEquiv`) | off | curated Talmudic pairs (`מותר`↔`שרי`, `הלכה`↔`הלכתא`, `ספק`↔`ספיקא`, `אדם`↔`איניש`/`גברא`…), with the Aramaic ד-prefix |
+| קרבת מילים | פסקה | `פסקה` (anywhere) · `ביטוי מדויק` (consecutive, in order) · `קרבה` 3 / 5 / 10 words (FTS5 `NEAR` semantics) + `שמור על סדר המילים` |
+| סינון לפי מדור | הכל | `הספר הנוכחי`, `תנ"ך`, `משנה`, `בבלי`, `רמב"ם`, `שולחן ערוך`, `מפרשים` (`search.CORPORA`: Otzaria folder patterns on `category_path`, OR-ed) |
+
+How a plan runs: its FTS5 expression is a candidate set (morphology uses bounded prefix queries,
+≤ 220 terms per word / 640 per query); when needed, `hebrewSearch.evaluate()` decides each candidate
+exactly from its `clean_text` tokens (inflections, proximity, word order, exclusions). Exact matches
+(the typed words only) are always listed first, then the rows only a variant matches; paging uses a
+`{ phase, afterId }` cursor. Result cards and the reader mark exact words and expanded variants alike
+(`~תפילה` marks `לתפילתו`, `^שוע` marks `בשו"ע`).
 
 ## Library storage & updates
 

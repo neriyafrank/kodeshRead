@@ -73,6 +73,17 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > aliyot (`torah.parseParshaQuery`, merged in `quickJump.resolveReference`; the 5 book names stay book
 > references unless `פרשת` / an aliyah word / `מפטיר` is typed).
 
+> **Simple vs Advanced Search:** `shared/hebrewSearch.js` builds every query plan (pure JS, over the existing
+> `paragraphs_fts`, no schema change). Simple Search (`src/app/search.tsx`) is literal (`SIMPLE_DEFAULTS`:
+> no expansion, no operators) with a "חיפוש מתקדם" button; Advanced Search (`src/app/advanced-search.tsx`)
+> has main / אחת מהמילים / ללא המילים fields, inline `a|b`, `-word`, `word*`, `"exact"`, toggles
+> (`ADVANCED_DEFAULTS`: prefixesAndSuffixes on; pleneDefective, acronyms, aramaicEquiv off), proximity
+> (פסקה / ביטוי מדויק / קרבה 3·5·10 + order) and corpus chips (`search.CORPORA`). `shared/search.js`
+> `searchPlan` / `countPlan` run plans: FTS5 candidates, `hebrewSearch.evaluate()` for exactness, exact
+> matches first (`{ phase, afterId }` cursor); the no-FTS5 web fallback returns identical results.
+> Highlight patterns `~x` / `^x` / `%x` go through `makeTermMatcher`. Self-tested in `scripts/selftest.js`
+> (section 10), e2e in `e2e:search`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

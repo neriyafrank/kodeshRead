@@ -19,6 +19,9 @@
  *       counts are capped per word and per query so FTS5 stays fast.
  *  2. searchParagraphs(): scoped query (library / folder / book), keyset paging
  *     in canonical book order (rowid = paragraphs.id, inserted in library order).
+ *  2b. searchPlan() / countPlan(): run a shared/hebrewSearch.js plan (Simple + Advanced Search):
+ *     FTS5 candidates, exact evaluation per row when the plan needs it, exact matches first
+ *     ({ phase, afterId } cursor), corpus scopes (CORPORA) and an identical no-FTS5 fallback.
  *  3. buildKwic() / markTerms(): hit highlighting. `terms` entries are plain tokens
  *     ("שבת"), prefix patterns ("ושלחנ*") or multi-word phrases ("בית דינ"), so the
  *     result card and the reader mark the variant that actually matched.
@@ -28,6 +31,7 @@
 const { normalizeHebrew, stripHtml, decodeEntities, applyVocalization } = require('./hebrew');
 const { sourcesOf, sourceForId, sourcesForCategory } = require('./sources');
 const dict = require('./hebrewTorahDict');
+const hs = require('./hebrewSearch');
 
 /** Characters FTS5 treats as query syntax (spec list). */
 const FTS_RESERVED_RE = /["'\-*():^]/g;
@@ -279,9 +283,46 @@ function likeEscape(s) {
   return String(s).replace(/[\\%_]/g, (c) => '\\' + c);
 }
 
+/**
+ * Corpus sections of the Advanced Search ("סינון לפי מדור"), as Otzaria folder patterns on
+ * category_path (which always ends with "/"). Base texts and their commentaries are separate:
+ * "מפרשים" is every commentary / rishonim / acharonim folder.
+ */
+const CORPORA = [
+  { id: 'tanach', label: 'תנ"ך', include: ['תנך/תורה/%', 'תנך/נביאים/%', 'תנך/כתובים/%'] },
+  { id: 'mishna', label: 'משנה', include: ['משנה/סדר %'] },
+  { id: 'bavli', label: 'בבלי', include: ['תלמוד בבלי/סדר %'] },
+  { id: 'rambam', label: 'רמב"ם', include: ['הלכה/משנה תורה/%'], exclude: ['הלכה/משנה תורה/מפרשים/%'] },
+  { id: 'shulchan-aruch', label: 'שולחן ערוך', include: ['הלכה/שולחן ערוך/'] },
+  { id: 'mefarshim', label: 'מפרשים', include: ['%מפרשים%', '%/ראשונים/%', '%/אחרונים/%', '%/תרגומים/%', '%/מחברי זמננו/%', '%/מחברי זמנינו/%'] },
+];
+
+/** SQL condition on a category_path expression for a set of corpus ids. */
+function corpusCondition(ids, col) {
+  const params = [];
+  const parts = [];
+  for (const c of CORPORA.filter((x) => (ids || []).includes(x.id))) {
+    let sql = '(' + c.include.map(() => `${col} LIKE ?`).join(' OR ') + ')';
+    params.push(...c.include);
+    if (c.exclude && c.exclude.length) {
+      sql += ' AND NOT (' + c.exclude.map(() => `${col} LIKE ?`).join(' OR ') + ')';
+      params.push(...c.exclude);
+    }
+    parts.push('(' + sql + ')');
+  }
+  return parts.length ? { sql: '(' + parts.join(' OR ') + ')', params } : { sql: '0', params: [] };
+}
+
+/** category_path of a paragraph's book (no-FTS fallback, where the FTS column is unavailable). */
+const P_CATEGORY_PATH = "(SELECT COALESCE(c.path || '/', '') FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE b.id = p.book_id)";
+
 /** WHERE fragment + params for a scope (category_path always ends with "/"). */
 function scopeClause(scope) {
   if (!scope || scope.kind === 'all') return { sql: '', params: [] };
+  if (scope.kind === 'corpus') {
+    const c = corpusCondition(scope.ids, 'f.category_path');
+    return { sql: ' AND ' + c.sql, params: c.params };
+  }
   if (scope.kind === 'category') {
     const p = String(scope.path).replace(/\/+$/, '');
     return { sql: " AND f.category_path LIKE ? ESCAPE '\\'", params: [likeEscape(p) + '/%'] };
@@ -337,6 +378,10 @@ function matchSource(q, opts) {
   } else if (scope && scope.kind === 'category') {
     sql += " AND p.book_id IN (SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE c.path || '/' LIKE ? ESCAPE '\\')";
     params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
+  } else if (scope && scope.kind === 'corpus') {
+    const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
+    sql += ' AND ' + c.sql;
+    params.push(...c.params);
   }
   return { sql, params, idCol: 'p.id' };
 }
@@ -424,6 +469,7 @@ function scopeSources(db, scope) {
     const s = srcs.length > 1 ? sourceForId(srcs, scope.bookId) : srcs[0];
     return s ? [s] : [];
   }
+  if (scope.kind !== 'category') return srcs;
   return srcs.length > 1 ? sourcesForCategory(db, scope.path) : srcs;
 }
 
@@ -454,6 +500,159 @@ async function countMatches(db, query, opts) {
     n += r[0] ? Number(r[0].n) : 0;
   }
   return { count: Math.min(n, cap), capped: n > cap };
+}
+
+// ---------------------------------------------------------------------------
+// Plans (shared/hebrewSearch.js): Simple + Advanced Search
+// ---------------------------------------------------------------------------
+
+/** Candidates read per verification batch, and the scan bounds per page / count. */
+const VERIFY_BATCH = 250;
+const MAX_SCAN_PER_PAGE = 20000;
+const MAX_COUNT_SCAN = 40000;
+
+/** LIKE condition of a plan (no-FTS5 web preview): a superset that evaluate() then decides. */
+function planLike(plan, params) {
+  const lg = hs.likeGroups(plan);
+  const orLike = (subs) => {
+    const parts = subs.map((t) => {
+      params.push('%' + likeEscape(t) + '%');
+      return "p.clean_text LIKE ? ESCAPE '\\'";
+    });
+    return parts.length === 1 ? parts[0] : '(' + parts.join(' OR ') + ')';
+  };
+  const parts = lg.must.map(orLike);
+  if (lg.any) parts.push(orLike(lg.any));
+  return parts.join(' AND ');
+}
+
+/** FROM / WHERE of one phase of a plan for one source. */
+function planSource(phase, opts) {
+  const scope = opts && opts.scope;
+  if (!opts || opts.fts !== false) return matchSource({ match: phase.match }, opts);
+  const params = [];
+  let sql = 'FROM paragraphs p WHERE ' + planLike(phase.plan, params);
+  if (scope && scope.kind === 'book') {
+    sql += ' AND p.book_id = ?';
+    params.push(scope.bookId);
+  } else if (scope && scope.kind === 'category') {
+    sql += " AND p.book_id IN (SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE c.path || '/' LIKE ? ESCAPE '\\')";
+    params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
+  } else if (scope && scope.kind === 'corpus') {
+    const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
+    sql += ' AND ' + c.sql;
+    params.push(...c.params);
+  }
+  return { sql, params, idCol: 'p.id' };
+}
+
+/**
+ * Phases of a plan: exact matches first (the typed words only), then the rows that only the
+ * expanded variants match. Each phase is { plan, match, verify(tokens) | null }.
+ */
+function planPhases(plan, fts) {
+  const like = fts === false;
+  const full = { plan, match: plan.match, verify: plan.needsVerify || like ? (t) => hs.evaluate(plan, t) : null };
+  if (!plan.exact || plan.exact.empty) return [full];
+  const ex = plan.exact;
+  const exact = { plan: ex, match: ex.match, verify: ex.needsVerify || like ? (t) => hs.evaluate(ex, t) : null };
+  const rest = {
+    plan,
+    // Exact rows are skipped by SQL when SQL decides them alone, and always by evaluate().
+    match: ex.needsVerify ? plan.match : `(${plan.match}) NOT (${ex.positiveMatch})`,
+    verify: (t) => hs.evaluate(plan, t) && !hs.evaluate(ex, t),
+  };
+  return [exact, rest];
+}
+
+async function planCandidates(db, phase, opts, afterId, take) {
+  const out = [];
+  for (const s of scopeSources(db, opts && opts.scope)) {
+    if (out.length >= take) break;
+    const src = planSource(phase, opts);
+    const hasAfter = afterId != null;
+    const rows = await s.adapter.all(
+      `SELECT p.id AS id, p.book_id AS book_id, p.line_index AS line_index, p.toc_path AS toc_path,
+              p.display_text AS display_text, p.is_heading AS is_heading,${phase.verify ? ' p.clean_text AS clean_text,' : ''}
+              (SELECT title FROM books WHERE id = p.book_id) AS book_title
+         ${src.sql}${hasAfter ? ` AND ${src.idCol} > ?` : ''}
+        ORDER BY ${src.idCol}
+        LIMIT ?`,
+      [...src.params, ...(hasAfter ? [afterId] : []), take - out.length],
+    );
+    out.push(...rows);
+  }
+  return out;
+}
+
+/**
+ * One page of a plan's results: exact matches (phase 0) in library order, then expanded-only
+ * matches (phase 1). Pass the returned `cursor` back to continue.
+ *
+ * @param {{ all: Function }} db
+ * @param {object} plan  hebrewSearch.buildQuery() result
+ * @param {{ scope?: SearchScope, fts?: boolean, cursor?: { phase: number, afterId: number | null } | null, limit?: number }} [opts]
+ * @returns {Promise<{ rows: (SearchRow & { phase: number })[], hasMore: boolean, cursor: { phase: number, afterId: number | null } | null }>}
+ */
+async function searchPlan(db, plan, opts) {
+  const limit = (opts && opts.limit) || PAGE_SIZE;
+  if (!plan || plan.empty) return { rows: [], hasMore: false, cursor: null };
+  const phases = planPhases(plan, opts && opts.fts);
+  const start = (opts && opts.cursor) || { phase: 0, afterId: null };
+  const out = [];
+  let scanned = 0;
+  for (let phase = start.phase; phase < phases.length; phase++) {
+    const ph = phases[phase];
+    let afterId = phase === start.phase ? start.afterId : null;
+    for (;;) {
+      const take = ph.verify ? VERIFY_BATCH : limit + 1 - out.length;
+      const rows = await planCandidates(db, ph, opts, afterId, take);
+      for (const r of rows) {
+        afterId = r.id;
+        scanned++;
+        if (ph.verify && !ph.verify(hs.toTokens(r.clean_text || ''))) continue;
+        const { clean_text, ...row } = r;
+        out.push({ ...row, phase });
+        if (out.length > limit) {
+          const last = out[limit - 1];
+          return { rows: out.slice(0, limit), hasMore: true, cursor: { phase: last.phase, afterId: last.id } };
+        }
+      }
+      if (rows.length < take) break; // this phase is exhausted
+      if (scanned >= MAX_SCAN_PER_PAGE) return { rows: out, hasMore: true, cursor: { phase, afterId } };
+    }
+  }
+  return { rows: out, hasMore: false, cursor: null };
+}
+
+/** Number of paragraphs a plan matches, capped at `cap` (default COUNT_CAP). */
+async function countPlan(db, plan, opts) {
+  if (!plan || plan.empty) return { count: 0, capped: false };
+  const cap = (opts && opts.cap) || COUNT_CAP;
+  const [full] = planPhases({ ...plan, exact: null }, opts && opts.fts);
+  if (!full.verify) {
+    let n = 0;
+    for (const s of scopeSources(db, opts && opts.scope)) {
+      if (n > cap) break;
+      const src = planSource(full, opts);
+      const r = await s.adapter.all(`SELECT COUNT(*) AS n FROM (SELECT 1 ${src.sql} LIMIT ?)`, [...src.params, cap + 1 - n]);
+      n += r[0] ? Number(r[0].n) : 0;
+    }
+    return { count: Math.min(n, cap), capped: n > cap };
+  }
+  let n = 0;
+  let scanned = 0;
+  let afterId = null;
+  for (;;) {
+    const rows = await planCandidates(db, full, opts, afterId, VERIFY_BATCH);
+    for (const r of rows) {
+      afterId = r.id;
+      scanned++;
+      if (full.verify(hs.toTokens(r.clean_text || '')) && ++n > cap) return { count: cap, capped: true };
+    }
+    if (rows.length < VERIFY_BATCH) return { count: n, capped: false };
+    if (scanned >= MAX_COUNT_SCAN) return { count: n, capped: true };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,22 +719,25 @@ function buildKwic(displayText, terms, opts) {
 function makeTermMatcher(terms) {
   const exact = new Set();
   const prefixes = [];
+  const patterns = [];
   const phrases = [];
-  const parse = (w) => (w.endsWith('*') ? { text: w.slice(0, -1), prefix: true } : { text: w, prefix: false });
+  // "~x" (inflected), "^x" / "%x" (prefixed) come from shared/hebrewSearch.js (Advanced Search).
+  const parse = (w) => (/^[~^%]/.test(w) ? { fn: hs.compilePattern(w), text: w.slice(1) } : w.endsWith('*') ? { text: w.slice(0, -1), prefix: true } : { text: w, prefix: false });
   for (const t of terms || []) {
     const words = String(t || '').split(' ').filter(Boolean);
     if (words.length > 1) phrases.push(words.map(parse));
     else if (words.length === 1) {
       const w = parse(words[0]);
       if (!w.text) continue;
-      if (w.prefix) prefixes.push(w.text);
+      if (w.fn) patterns.push(w.fn);
+      else if (w.prefix) prefixes.push(w.text);
       else exact.add(w.text);
     }
   }
-  const tokHit = (tok) => exact.has(tok) || prefixes.some((p) => tok.startsWith(p));
-  const wordMatches = (toks, pw) => toks.some((t) => (pw.prefix ? t.startsWith(pw.text) : t === pw.text));
+  const tokHit = (tok) => exact.has(tok) || prefixes.some((p) => tok.startsWith(p)) || patterns.some((fn) => fn(tok));
+  const wordMatches = (toks, pw) => toks.some((t) => (pw.fn ? pw.fn(t) : pw.prefix ? t.startsWith(pw.text) : t === pw.text));
   return {
-    empty: !exact.size && !prefixes.length && !phrases.length,
+    empty: !exact.size && !prefixes.length && !patterns.length && !phrases.length,
     /** @param {string[][]} words  tokens of each word */
     hits(words) {
       const flags = words.map((toks) => toks.some(tokHit));
@@ -598,6 +800,9 @@ function formatTocPath(tocPath) {
 }
 
 module.exports = {
+  CORPORA,
+  searchPlan,
+  countPlan,
   FTS_RESERVED_RE,
   PAGE_SIZE,
   COUNT_CAP,
