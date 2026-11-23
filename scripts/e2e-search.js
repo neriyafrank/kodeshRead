@@ -5,8 +5,10 @@
  *   npm run web                       # terminal 1 (Metro on :8081, sample DB)
  *   npm run e2e:search [-- --shots=DIR]   # terminal 2
  *
- * Covers Simple Search (literal, no expansion) and the dedicated Advanced Search screen
- * (fields, toggles, proximity, corpus chips, highlighted variants, back to Simple Search).
+ * Covers Simple Search (literal, no expansion), the sleek compact "חיפוש מתקדם" button, the
+ * multi-select Scope Picker (canonical catalog: ספרי בסיס / פרשנים לפי ספר, books + commentaries,
+ * בחר הכל, כל הפרשנים על …, removable chips) and the dedicated Advanced Search screen
+ * (fields, toggles, proximity, corpus chips, picked books, highlighted variants, back to Simple Search).
  *
  * Requires the `playwright` package with a Chromium build (not a project
  * dependency). The web preview's SQLite has no FTS5, so it exercises the
@@ -72,6 +74,24 @@ try {
     // Simple Search stays simple and literal: no mode switch, typed words only.
     assert.strictEqual(await tid('search-mode-smart').count(), 0, 'no expansion toggle on the simple screen');
     assert.strictEqual(await tid('open-advanced-search').innerText(), 'חיפוש מתקדם');
+    {
+      // Sleek, slim ghost button: small tune icon, compact text, the search input keeps its width.
+      const btn = await tid('open-advanced-search').boundingBox();
+      const input = await tid('search-input').boundingBox();
+      const css = await tid('open-advanced-search').evaluate((el) => {
+        const t = getComputedStyle(el);
+        const label = getComputedStyle([...el.querySelectorAll('div')].find((d) => d.innerText === 'חיפוש מתקדם'));
+        return { border: t.borderTopWidth, bg: t.backgroundColor, fontSize: label.fontSize, padX: parseFloat(t.paddingLeft) };
+      });
+      assert.ok(btn.width <= 112, `compact width (${btn.width}px)`);
+      assert.ok(btn.height >= 44 && btn.height <= 56, `same height as the search bar (${btn.height}px)`);
+      assert.deepStrictEqual([css.border, css.bg, css.fontSize], ['1px', 'rgba(0, 0, 0, 0)', '12px'], 'ghost outline, 12px text');
+      assert.ok(css.padX <= 8, `tight padding (${css.padX}px)`);
+      assert.ok(input.width >= 165, `input keeps generous width on a 400px phone (${input.width}px)`);
+      assert.ok(input.x >= btn.x + btn.width - 1 && input.x + input.width <= 400, `the input never runs under the button (${input.x} vs ${btn.x + btn.width})`);
+      await shot('1c-advanced-button');
+    }
+    step('חיפוש מתקדם is a sleek compact ghost button next to a wide search input');
     // Results of the previous query stay on screen while a new one runs: wait for the new state.
     const hitTexts = () => page.evaluate(() => [...document.querySelectorAll('[data-testid="search-hit"]')].map((el) => el.textContent.replace(/[\u0591-\u05C7]/g, '').replace(/[^\u05D0-\u05EA]/g, '')));
     await tid('search-input').fill('שולחן');
@@ -97,13 +117,9 @@ try {
     await tid('search-result').first().waitFor({ timeout: 20000 });
     step('FTS syntax characters are sanitized');
 
-    // Folder scope.
+    // ---- Scope picker: multi-select over the canonical catalog ------------------------------
     await tid('search-input').fill('ויאמר');
     await tid('search-result').first().waitFor();
-    await tid('scope-button').click();
-    await tid('scope-sheet').waitFor();
-    await tid('scope-all').waitFor();
-    await shot('2-scope-sheet');
     // Every visible result belongs to the scope (waits out the previous query's results).
     const allResults = (src) =>
       page.waitForFunction(
@@ -114,19 +130,104 @@ try {
         src,
         { timeout: 30000 },
       );
-    await tid('scope-cat-1').click(); // תנך
+    const openSheet = async () => {
+      await tid('scope-button').click();
+      await tid('scope-sheet').waitFor();
+      await tid('scope-tab-base').click(); // the sheet remembers its last tab
+    };
+    const summary = async () => (await tid('scope-summary').innerText()).trim();
+    await openSheet();
+    assert.strictEqual(await summary(), 'כל הספרייה', 'empty selection = the whole library');
+    assert.strictEqual(await tid('scope-open-book').count(), 0, 'no open book -> no shortcuts');
+    const secs = await page.locator('[data-testid^="scope-toggle-sec:"]').allInnerTexts();
+    assert.ok(/תנ"ך/.test(secs[0]) && /תלמוד בבלי/.test(secs[1]) && secs.length === 2, `canonical sections: ${JSON.stringify(secs)}`);
+    const tabs = await page.locator('[data-testid="scope-sheet"]').innerText();
+    assert.ok(tabs.includes('ספרי בסיס') && tabs.includes('פרשנים לפי ספר'), tabs);
+    await shot('2-scope-sheet');
+    // A whole section with "בחר הכל".
+    await page.locator('[data-testid^="scope-all-sec:/תנ"]').first().click(); // תנ"ך (quote-free prefix selector)
+    assert.strictEqual(await summary(), 'נבחרו 2 ספרים');
+    await tid('scope-apply').click();
     await allResults('^(בראשית|במדבר)');
-    assert.ok((await tid('scope-button').innerText()).includes('תנך'));
-    for (const t of await tid('search-result').allInnerTexts()) assert.ok(/^(בראשית|במדבר)/.test(t), t);
-    step('folder scope');
+    assert.ok((await tid('scope-button').innerText()).includes('נבחרו 2 ספרים'));
+    assert.strictEqual(await tid('scope-chips').locator('[data-testid^="scope-chip-"]').count() >= 2, true);
+    step('בחר הכל on תנ"ך (folder-style multi scope)');
 
-    // Book scope through the sheet's filter.
-    await tid('scope-button').click();
+    // One base book, through the live filter ("clear" empties the draft).
+    await openSheet();
+    assert.strictEqual(await summary(), 'נבחרו 2 ספרים', 'the draft starts from the active scope');
+    await tid('scope-clear').click();
     await tid('scope-filter').fill('במדבר');
     await tid('scope-book-2').click();
+    await tid('scope-apply').click();
     await allResults('^במדבר');
     for (const t of await tid('search-result').allInnerTexts()) assert.ok(t.startsWith('במדבר'), t);
+    assert.strictEqual(await tid('scope-chip-2').count(), 1, 'a removable chip for the picked book');
     step('book scope');
+
+    // 2 base books + 1 commentary (the commentary tab groups commentaries under their base book).
+    await tid('search-input').fill('עשה'); // במדבר 8 · שבת 36 · רש"י על שבת 2 whole-word hits
+    await openSheet();
+    await tid('scope-clear').click();
+    await tid('scope-filter').fill('שבת');
+    await tid('scope-book-11').click();
+    await tid('scope-filter').fill('במדבר');
+    await tid('scope-book-2').click();
+    await tid('scope-tab-comm').click();
+    await tid('scope-filter').fill('שבת');
+    await tid('scope-expand-11').click();
+    await tid('scope-allcomm-11').waitFor();
+    const rankedNames = await page.locator('[data-testid^="scope-comm-"]').allInnerTexts();
+    assert.ok(/^רש"י/.test(rankedNames[0]) && /^תוספות/.test(rankedNames[1]), `commentaries in canonical rank order: ${JSON.stringify(rankedNames)}`);
+    await tid('scope-comm-14').click(); // רש"י על שבת
+    assert.strictEqual(await summary(), 'נבחרו 3 ספרים');
+    await shot('2b-scope-multi');
+    await tid('scope-apply').click();
+    const inScope = '^(שבת|במדבר|רש"י על שבת)';
+    await allResults(inScope);
+    // The list is virtualized: scroll until the second book's results show up.
+    const seen = new Set();
+    await page.mouse.move(200, 600);
+    for (let i = 0; i < 25 && !(seen.has('במדבר') && seen.has('שבת')); i++) {
+      for (const t of await tid('search-result').allInnerTexts()) seen.add(t.split(' ‹')[0].split('\n')[0].trim());
+      await page.mouse.wheel(0, 700);
+      await page.waitForTimeout(150);
+    }
+    assert.ok(seen.has('במדבר') && seen.has('שבת') && [...seen].every((t) => new RegExp(inScope).test(t)), `multi-scope results: ${[...seen]}`);
+    for (const id of ['scope-chip-11', 'scope-chip-2', 'scope-chip-14']) assert.strictEqual(await tid(id).count(), 1, id);
+    step('multi-select: 2 base books + 1 commentary');
+
+    // Removing a chip narrows the scope.
+    await tid('scope-chip-remove-14').click();
+    await allResults('^(שבת|במדבר)');
+    assert.strictEqual(await tid('scope-chip-14').count(), 0);
+    assert.strictEqual(await tid('scope-chip-11').count(), 1);
+    step('removable chips');
+
+    // "כל הפרשנים על שבת".
+    await openSheet();
+    await tid('scope-clear').click();
+    await tid('scope-tab-comm').click();
+    await tid('scope-filter').fill('שבת');
+    await tid('scope-book-11').waitFor();
+    if (!(await tid('scope-allcomm-11').count())) await tid('scope-expand-11').click(); // expansion is remembered between openings
+    await tid('scope-allcomm-11').click();
+    assert.strictEqual(await summary(), 'נבחרו 2 ספרים');
+    await tid('scope-apply').click();
+    await allResults('^(רש"י על שבת|תוספות על שבת)');
+    assert.strictEqual(await tid('scope-chips').locator('[data-testid^="scope-chip-"]').count() >= 2, true);
+    step('כל הפרשנים על שבת');
+    await tid('scope-reset').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
+    await tid('search-input').fill('ויאמר');
+    await tid('scope-chips').waitFor({ state: 'detached' }).catch(() => undefined);
+
+    // A book scope for the reader hand-off below.
+    await openSheet();
+    await tid('scope-filter').fill('במדבר');
+    await tid('scope-book-2').click();
+    await tid('scope-apply').click();
+    await allResults('^במדבר');
 
     // Tap -> reader tab at that line, highlighted.
     const target = await firstLine();
@@ -158,6 +259,10 @@ try {
     await tid('open-advanced-search').click();
     await tid('advanced-search').waitFor({ timeout: 20000 });
     assert.ok(/\/advanced-search/.test(page.url()), page.url());
+    // The picked books carry over from Simple Search as removable chips.
+    await advTid('scope-chip-2').waitFor();
+    await advTid('scope-chip-remove-2').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="advanced-search"] [data-testid="scope-chip-2"]'));
     const advBody = await page.locator('body').innerText();
     for (const label of ['חיפוש מתקדם', 'חזרה לחיפוש רגיל', 'מילות החיפוש / ביטוי', 'אחת מהמילים · או', 'ללא המילים · שלילה', 'אפשרויות לשוניות', 'קרבת מילים', 'סינון לפי מדור', 'חפש', 'נקה הכל']) assert.ok(advBody.includes(label), `advanced screen shows ${label}`);
     for (const id of ['adv-query', 'adv-any', 'adv-exclude', 'adv-submit', 'adv-reset', 'adv-back']) await tid(id).waitFor();
@@ -264,6 +369,33 @@ try {
     const ordered = await runNear(true);
     assert.ok(ordered > 0 && ordered < unordered, `ordered ${ordered} < unordered ${unordered}`);
     step(`קרבה 3 מילים: unordered ${unordered}, ordered ${ordered}`);
+
+    // Books picked in the scope picker apply to Advanced Search too (removable chips).
+    await tid('adv-edit').click();
+    await tid('adv-reset').click();
+    await tid('adv-query').fill('את');
+    await tid('adv-scope-button').click();
+    await tid('scope-sheet').waitFor();
+    assert.strictEqual(await tid('scope-summary').innerText(), 'כל הספרייה');
+    await tid('scope-filter').fill('בראשית');
+    await tid('scope-book-1').click();
+    await tid('scope-apply').click();
+    await advTid('scope-chip-1').waitFor();
+    await tid('adv-submit').click();
+    await page.waitForFunction(
+      () => {
+        const els = [...document.querySelectorAll('[data-testid="advanced-search"] [data-testid="search-result"]')];
+        return els.length > 0 && els.every((el) => /^בראשית/.test(el.innerText));
+      },
+      null,
+      { timeout: 30000 },
+    );
+    await tid('adv-edit').click();
+    await tid('adv-corpus-bavli').click();
+    assert.strictEqual(await advTid('scope-chip-1').count(), 0, 'a corpus chip replaces the picked books');
+    await tid('adv-submit').click();
+    await advTid('search-result').first().waitFor({ timeout: 30000 });
+    step('Advanced Search: multi-select scope picker + chips');
 
     // A result opens the reader at its line with the hit marked.
     const advTarget = (await advTid('search-result').first().innerText()).split('\n')[0];

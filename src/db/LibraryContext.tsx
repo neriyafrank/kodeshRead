@@ -7,7 +7,7 @@ import type { SQLiteDatabase } from 'expo-sqlite';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { loadBookIndex, type BookIndex, type QueryAdapter } from '../../shared/quickJump';
-import { hasFts5 } from '../../shared/search';
+import { booksScope, hasFts5 } from '../../shared/search';
 import { createRouter, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type LibrarySource } from '../../shared/sources';
 import { useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
@@ -137,6 +137,10 @@ function pruneStaleReferences(index: BookIndex) {
   useTabs.getState().pruneTabs((t) => valid(t.bookId, t.bookTitle));
   const scope = useSearch.getState().scope;
   if (scope.kind === 'book' && !valid(scope.bookId, scope.title)) useSearch.getState().setScope({ kind: 'all' });
+  if (scope.kind === 'books') {
+    const picks = (scope.picks ?? []).filter((p) => valid(p.id, p.title));
+    if (picks.length !== (scope.picks ?? []).length) useSearch.getState().setScope(booksScope(picks));
+  }
 }
 
 interface ProviderProps {

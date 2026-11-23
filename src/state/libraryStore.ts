@@ -8,6 +8,14 @@ interface LibraryUiState {
   /** Selected folder in each column of the columns browser, root first (category ids). */
   columnPath: number[];
   setColumnPath: (path: number[]) => void;
+  /** Library browser: base books | commentaries per base book (shared/libraryCatalog.js). */
+  catalogMode: 'base' | 'comm';
+  /** Selected node ids (sections, then a book) in each column of the canonical catalog browser. */
+  catalogPath: string[];
+  setCatalogMode: (mode: 'base' | 'comm') => void;
+  setCatalogPath: (path: string[]) => void;
+  /** Mode and path in one update (e.g. "מפרשים (N)" jumping to a book's commentaries). */
+  showCatalog: (mode: 'base' | 'comm', path: string[]) => void;
   toggle: (categoryId: number) => void;
   expandMany: (ids: number[]) => void;
   collapseAll: () => void;
@@ -19,6 +27,11 @@ export const useLibraryUi = create<LibraryUiState>()(
       expanded: {},
       columnPath: [],
       setColumnPath: (columnPath) => set({ columnPath }),
+      catalogMode: 'base',
+      catalogPath: [],
+      setCatalogMode: (catalogMode) => set({ catalogMode, catalogPath: [] }),
+      setCatalogPath: (catalogPath) => set({ catalogPath }),
+      showCatalog: (catalogMode, catalogPath) => set({ catalogMode, catalogPath }),
       toggle: (id) =>
         set((s) => {
           const next = { ...s.expanded };

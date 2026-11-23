@@ -33,6 +33,10 @@
  *    prefixes / suffixes, smart plene / defective (with strict negatives), acronyms, Hebrew <->
  *    Aramaic, structured fields + inline operators, ordered / unordered proximity, exact-first
  *    ranking + cursor paging, corpus chips, FTS5 == web fallback, fuzzing and latency.
+ * 11. Canonical library catalog (shared/libraryCatalog.js): Rashi on every real Bavli tractate is a
+ *    commentary linked to its daf / amud and ranked #1; traditional Jewish ordering (Tanach, Mishna
+ *    sedarim, Shas, Rambam, Shulchan Aruch); base books vs commentaries; commentaries of every era
+ *    folder grouped under their base in rank order; multi-select search scope (FTS5 == fallback).
  */
 'use strict';
 
@@ -716,9 +720,414 @@ async function main() {
   await parshaQuickJumpTests();
   // 10. Simple vs Advanced Search (shared/hebrewSearch.js).
   await advancedSearchTests();
+  // 11. Canonical library catalog, Bavli Rashi, multi-select search scope.
+  await libraryCatalogTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
+}
+
+/** Canonical library catalog (shared/libraryCatalog.js) + Bavli Rashi + multi-select scope. */
+async function libraryCatalogTests() {
+  const lc = require('../shared/libraryCatalog');
+  const pairing = require('../shared/pairing');
+  const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+
+  /** Catalog input from "dir/dir/title" paths (what loadCatalog returns). */
+  const inputOf = (paths) => {
+    const categories = [];
+    const cid = new Map();
+    const cat = (p) => {
+      if (cid.has(p)) return cid.get(p);
+      const parts = p.split('/');
+      const parent = parts.length > 1 ? cat(parts.slice(0, -1).join('/')) : null;
+      categories.push({ id: categories.length + 1, parent_id: parent, name: parts[parts.length - 1], path: p });
+      cid.set(p, categories.length);
+      return categories.length;
+    };
+    const books = paths.map((p, i) => {
+      const parts = p.split('/');
+      const title = parts.pop();
+      return { id: i + 1, category_id: cat(parts.join('/')), title, aliases: generateBookAliases(parts, title).join('|') };
+    });
+    return { categories, books };
+  };
+  const names = (nodes) => nodes.map((n) => n.name);
+  const section = (nodes, name) => nodes.find((n) => n.name === name);
+
+  // ---- 1. Rashi on Talmud Bavli ------------------------------------------------------------
+  await check('catalog: Rashi variants on Bavli ("רש"י על ברכות", "רש"י על מסכת …", "רשי על …") are commentaries grouped under their tractate, #1 ahead of Tosafot', () => {
+    const paths = [
+      'תלמוד בבלי/סדר זרעים/ברכות',
+      'תלמוד בבלי/סדר מועד/שבת',
+      'תלמוד בבלי/סדר מועד/עירובין',
+      'משנה/סדר זרעים/משנה ברכות',
+      'תלמוד בבלי/ראשונים/רש"י/סדר זרעים/רש"י על ברכות',
+      'תלמוד בבלי/ראשונים/רש"י/סדר מועד/רש"י על מסכת שבת',
+      'תלמוד בבלי/ראשונים/רשי/סדר מועד/רשי על עירובין',
+      'תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות',
+      'תלמוד בבלי/ראשונים/תוספות/סדר מועד/תוספות על מסכת שבת',
+      'תלמוד בבלי/ראשונים/תוספות/סדר מועד/תוספות על עירובין',
+      'תלמוד בבלי/ראשונים/רמבן/סדר זרעים/רמבן על ברכות',
+      'תלמוד בבלי/ראשונים/רשבא/סדר זרעים/רשבא על ברכות',
+      'תלמוד בבלי/ראשונים/רי"ף/סדר זרעים/רי"ף ברכות',
+      'תלמוד בבלי/אחרונים/מהרשא/סדר זרעים/מהרשא על ברכות',
+      'משנה/ראשונים/רש"י/סדר נזיקין/רש"י על משנה אבות',
+    ];
+    const { categories, books } = inputOf(paths);
+    const cat = lc.buildLibraryCatalog({ categories, books });
+    const idOf = (t, cp) => books.find((b) => b.title === t && categories.find((c) => c.id === b.category_id).path.startsWith(cp || '')).id;
+    for (const [rashi, tractate] of [['רש"י על ברכות', 'ברכות'], ['רש"י על מסכת שבת', 'שבת'], ['רשי על עירובין', 'עירובין']]) {
+      const r = idOf(rashi);
+      const base = idOf(tractate, 'תלמוד בבלי/סדר');
+      assert.strictEqual(cat.isCommentary(r), true, `${rashi} is_commentary`);
+      assert.strictEqual(cat.isCommentary(base), false);
+      assert.strictEqual(cat.baseOf(r), base, `${rashi} -> ${tractate} (Bavli, not the Mishnah)`);
+      const list = cat.commentariesOf(base);
+      assert.strictEqual(list[0].name, 'רש"י', `${tractate}: Rashi first: ${list.map((x) => x.name)}`);
+      assert.strictEqual(list[0].tier, 'עיקריים');
+      assert.strictEqual(list[1].name, 'תוספות', 'Tosafot second');
+      assert.ok(list.findIndex((x) => x.name === 'רשב"א') > 1 || list.every((x) => x.name !== 'רשב"א'), 'Rashi and Tosafot before the other Rishonim');
+    }
+  });
+
+  await check('catalog: the commentary drawer ranks Bavli Rashi #1 and keeps it under עיקריים (with or without the book path)', () => {
+    const groups = [
+      { bookId: 1, bookTitle: 'רשבא על ברכות', categoryPath: 'תלמוד בבלי/ראשונים/רשבא/סדר זרעים' },
+      { bookId: 2, bookTitle: 'תוספות על ברכות', categoryPath: 'תלמוד בבלי/ראשונים/תוספות/סדר זרעים' },
+      { bookId: 3, bookTitle: 'רש"י על מסכת ברכות', categoryPath: 'תלמוד בבלי/ראשונים/רש"י/סדר זרעים' },
+      { bookId: 4, bookTitle: 'מהרשא על ברכות', categoryPath: 'תלמוד בבלי/אחרונים/מהרשא/סדר זרעים' },
+      { bookId: 5, bookTitle: 'אבן העוזר על ברכות', categoryPath: 'תלמוד בבלי/אחרונים/אבן העוזר' },
+    ];
+    for (const context of [{ title: 'ברכות' }, { title: 'ברכות', categoryPath: 'תלמוד בבלי/סדר זרעים' }, undefined]) {
+      const ranked = rank.rankCommentaries(groups, { context });
+      assert.deepStrictEqual(ranked.slice(0, 2).map((r) => r.bookId), [3, 2], `Rashi, then Tosafot (${JSON.stringify(context)})`);
+      assert.strictEqual(ranked[0].rank, 0);
+      const core = rank.filterCommentaries(ranked, { view: 'core' });
+      assert.ok(core.length >= 2 && core[0].bookId === 3, 'Rashi under עיקריים');
+      assert.ok(rank.defaultExpandedKeys(ranked).has(ranked[0].key), 'open by default');
+    }
+  });
+
+  if (fs.existsSync(indexPath)) {
+    const paths = fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''));
+    const input = inputOf(paths);
+    const t0 = Date.now();
+    const catalog = await lc.buildLibraryCatalogAsync(input, () => Promise.resolve());
+    const ms = Date.now() - t0;
+    const idOfPath = new Map(paths.map((p, i) => [p, i + 1]));
+
+    await check('catalog: every real Otzaria Bavli Rashi file is a commentary on its tractate, #1 ahead of Tosafot', () => {
+      const rashi = paths.filter((p) => /^תלמוד בבלי\/ראשונים\/רשי\/סדר [^/]+\/רשי על /.test(p));
+      assert.ok(rashi.length >= 36, `${rashi.length} Rashi tractates in the map`);
+      for (const p of rashi) {
+        const id = idOfPath.get(p);
+        const tractate = p.split('/').pop().replace('רשי על ', '');
+        const seder = p.split('/')[3];
+        const baseId = catalog.baseOf(id);
+        assert.strictEqual(catalog.isCommentary(id), true, p);
+        assert.strictEqual(catalog.bookPath(baseId), `תלמוד בבלי/${seder}`, `${p} -> ${catalog.bookPath(baseId)}`);
+        assert.strictEqual(catalog.bookTitle(baseId), tractate, p);
+        const list = catalog.commentariesOf(baseId);
+        assert.strictEqual(list[0].bookId, id, `${tractate}: Rashi is #1 (got ${list[0].title})`);
+        assert.strictEqual(list[0].rank, 0);
+        const tosafot = list.findIndex((x) => x.name === 'תוספות');
+        assert.ok(tosafot === -1 || tosafot > 0, 'Tosafot after Rashi');
+        assert.ok(list.filter((x) => x.core).length >= 1 && list[0].core);
+      }
+      // Rashi is never a standalone book in the base tree.
+      const baseIds = new Set(lc.treeBookIds(catalog.sections));
+      for (const p of rashi) assert.ok(!baseIds.has(idOfPath.get(p)), `${p} must not be listed as a base book`);
+      console.log(`  catalog: ${input.books.length} books in ${ms}ms, ${catalog.generalCommentaries.length} general commentaries`);
+    });
+
+    // ---- 2. Canonical order ----------------------------------------------------------------
+    const present = (list, have) => list.filter((n) => have.has(n));
+    await check('catalog: top sections in canonical order, empty ones hidden', () => {
+      const top = names(catalog.sections);
+      const want = lc.TOP_SECTIONS.filter((n) => top.includes(n));
+      assert.deepStrictEqual(top, want);
+      assert.deepStrictEqual(top.slice(0, 6), ['תנ"ך', 'משנה', 'תלמוד בבלי', 'תלמוד ירושלמי', 'מדרש', 'הלכה']);
+      assert.ok(top.every((n) => section(catalog.sections, n).count > 0));
+      assert.ok(!top.includes('ספרים אישיים'), 'no personal books -> no section');
+    });
+    await check('catalog: תנ"ך = תורה (בראשית..דברים), נביאים (יהושע..מלאכי), כתובים (תהילים..דברי הימים ב)', () => {
+      const tanach = section(catalog.sections, 'תנ"ך');
+      assert.deepStrictEqual(names(tanach.children).slice(0, 3), ['תורה', 'נביאים', 'כתובים']);
+      const titles = (n) => names(section(tanach.children, n).children);
+      assert.deepStrictEqual(titles('תורה'), lc.CANON.TORAH);
+      assert.deepStrictEqual(titles('נביאים'), lc.CANON.NEVIIM);
+      assert.deepStrictEqual(titles('כתובים'), lc.CANON.KETUVIM);
+      assert.deepStrictEqual([titles('כתובים')[0], titles('כתובים').pop()], ['תהילים', 'דברי הימים ב']);
+    });
+    await check('catalog: משנה = six sedarim in order, tractates in canonical order inside each', () => {
+      const m = section(catalog.sections, 'משנה');
+      const sedarim = m.children.filter((c) => /^סדר /.test(c.name));
+      assert.deepStrictEqual(names(sedarim), lc.CANON.SEDARIM.map((x) => 'סדר ' + x));
+      sedarim.forEach((sd, i) => {
+        const have = new Set(names(sd.children).map((n) => n.replace(/^משנה /, '')));
+        const haveKeys = new Set([...have].map(lc.canon));
+        assert.deepStrictEqual(names(sd.children).map((n) => lc.canon(n.replace(/^משנה /, ''))), lc.CANON.MISHNA_TRACTATES[i].map(lc.canon).filter((n) => haveKeys.has(n)), sd.name + ' (מדות = מידות)');
+      });
+      assert.deepStrictEqual(names(sedarim[0].children).slice(0, 3), ['משנה ברכות', 'משנה פאה', 'משנה דמאי']);
+    });
+    await check('catalog: תלמוד בבלי in Shas order (ברכות, שבת, עירובין, פסחים ... נדה)', () => {
+      const b = section(catalog.sections, 'תלמוד בבלי');
+      const tractates = b.children.filter((c) => c.kind === 'book').map((c) => c.title);
+      assert.deepStrictEqual(tractates.slice(0, 5), ['ברכות', 'שבת', 'עירובין', 'פסחים', 'יומא']);
+      assert.deepStrictEqual(tractates, present(lc.CANON.BAVLI_TRACTATES, new Set(tractates)));
+      assert.ok(tractates.length >= 35 && tractates[tractates.length - 1] === 'נדה' && tractates.indexOf('בבא קמא') < tractates.indexOf('בבא מציעא') && tractates.indexOf('מגילה') < tractates.indexOf('יבמות'));
+      const y = section(catalog.sections, 'תלמוד ירושלמי');
+      assert.deepStrictEqual(y.children.slice(0, 3).map((c) => c.title), ['תלמוד ירושלמי ברכות', 'תלמוד ירושלמי פאה', 'תלמוד ירושלמי דמאי']);
+    });
+    await check('catalog: הלכה = משנה תורה (14 ספרים, מדע..שופטים), ארבעה טורים, שולחן ערוך (או"ח, יו"ד, אה"ע, חו"מ)', () => {
+      const h = section(catalog.sections, 'הלכה');
+      assert.deepStrictEqual(names(h.children).slice(0, 3), ['משנה תורה לרמב"ם', 'ארבעה טורים', 'שולחן ערוך']);
+      const mt = section(h.children, 'משנה תורה לרמב"ם');
+      const sefarim = names(mt.children).filter((n) => /^ספר /.test(n));
+      assert.deepStrictEqual(sefarim.map(lc.canon), ['מדע', 'אהבה', 'זמנים', 'נשים', 'קדושה', 'הפלאה', 'זרעים', 'עבודה', 'קרבנות', 'טהרה', 'נזיקין', 'קנין', 'משפטים', 'שופטים'].map((x) => lc.canon('ספר ' + x)), 'real folder spellings (קורבנות, קניין) in order');
+      assert.strictEqual(sefarim.length, 14);
+      assert.strictEqual(mt.children[0].name, 'הקדמה', 'הקדמה first');
+      const zmanim = section(mt.children, 'ספר זמנים').children.map((c) => c.title);
+      assert.deepStrictEqual(zmanim.slice(0, 3), ['משנה תורה, הלכות שבת', 'משנה תורה, הלכות עירובין', 'משנה תורה, הלכות שביתת עשור']);
+      const sa = section(h.children, 'שולחן ערוך').children.filter((c) => c.kind === 'book').map((c) => c.title);
+      assert.deepStrictEqual(sa.slice(-4), ['שולחן ערוך, אורח חיים', 'שולחן ערוך, יורה דעה', 'שולחן ערוך, אבן העזר', 'שולחן ערוך, חושן משפט']);
+      const tur = section(h.children, 'ארבעה טורים');
+      assert.deepStrictEqual(tur.children.map((c) => c.title), ['טור']);
+    });
+    await check('catalog: מדרש (מדרש רבה in order, מדרשי הלכה, תנחומא, ילקוט שמעוני), מחשבה ומוסר, קבלה וחסידות, סדר התפילה', () => {
+      const m = section(catalog.sections, 'מדרש');
+      assert.deepStrictEqual(names(m.children).slice(0, 4), ['מדרש רבה', 'מדרשי הלכה', 'תנחומא', 'ילקוט שמעוני']);
+      assert.deepStrictEqual(names(section(m.children, 'מדרש רבה').children).slice(0, 5), ['בראשית רבה', 'שמות רבה', 'ויקרא רבה', 'במדבר רבה', 'דברים רבה']);
+      assert.deepStrictEqual(names(section(m.children, 'מדרשי הלכה').children).slice(0, 3), ['מכילתא דרבי ישמעאל', 'מכילתא דרבי שמעון בן יוחאי', 'ספרא']);
+      assert.ok(catalog.sections.some((n) => n.name === 'מחשבה ומוסר') && catalog.sections.some((n) => n.name === 'קבלה וחסידות') && catalog.sections.some((n) => n.name === 'סדר התפילה'));
+      assert.strictEqual(names(section(catalog.sections, 'קבלה וחסידות').children)[0], 'קבלה');
+    });
+
+    // ---- 3. Base books vs commentaries -----------------------------------------------------
+    await check('catalog: strict separation (base lists hold no commentaries; each commentary has exactly one parent or is general)', () => {
+      const baseIds = new Set(lc.treeBookIds(catalog.sections));
+      let comms = 0;
+      for (const b of input.books) {
+        if (catalog.isCommentary(b.id)) {
+          comms++;
+          assert.ok(!baseIds.has(b.id), `${b.title} is in a base list`);
+        } else assert.ok(baseIds.has(b.id), `${b.title} (base) is missing from the tree`);
+      }
+      assert.ok(comms > 5800, `${comms} commentaries`);
+      let grouped = 0;
+      for (const id of baseIds) grouped += catalog.commentaryCount(id);
+      assert.strictEqual(grouped + catalog.generalCommentaries.length, comms, 'every commentary is in exactly one group');
+      // The commentary view lists only base books that have commentaries, then "מפרשים כלליים".
+      const commTop = names(catalog.commentarySections);
+      assert.strictEqual(commTop[commTop.length - 1], 'מפרשים כלליים');
+      for (const id of lc.treeBookIds(catalog.commentarySections.filter((n) => n.name !== 'מפרשים כלליים'))) assert.ok(catalog.commentaryCount(id) > 0);
+      // Midrashim on Tanach and Yalkut stay base books.
+      assert.ok(baseIds.has(idOfPath.get('מדרש/אגדה/ילקוט שמעוני על התורה')) && baseIds.has(idOfPath.get('מדרש/אגדה/מדרש רבה/בראשית רבה')));
+      // A corpus-wide commentary is general.
+      assert.ok(catalog.generalCommentaries.some((g) => g.title === 'חידושי מהראל על השס'));
+    });
+    await check('catalog: commentaries from ראשונים / אחרונים / תרגומים are one group under their base, in canonical rank order', () => {
+      const bereshit = idOfPath.get('תנך/תורה/בראשית');
+      const list = catalog.commentariesOf(bereshit);
+      const eraOf = (x) => rank.eraOf(x.categoryPath, null);
+      assert.ok(list.length >= 20, `${list.length} commentaries on בראשית`);
+      const eras = new Set(list.map(eraOf));
+      for (const e of ['rishonim', 'acharonim', 'targum']) assert.ok(eras.has(e), `${e} commentaries grouped together`);
+      assert.deepStrictEqual(list.slice(0, 6).map((x) => x.name), ['אונקלוס', 'תרגום יונתן', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו'].filter((n) => list.some((x) => x.name === n)).slice(0, 6));
+      assert.strictEqual(list.find((x) => x.name === 'רש"י').rank < list.find((x) => x.name === 'רמב"ן').rank, true);
+      const firstNonCore = list.findIndex((x) => !x.core);
+      assert.ok(list.slice(0, firstNonCore).every((x) => x.core) && list.slice(firstNonCore).every((x) => !x.core), 'core commentators first');
+      const order = { targum: 0, rishonim: 1, acharonim: 2, modern: 3 };
+      const rest = list.slice(firstNonCore).filter((x) => eraOf(x));
+      for (let i = 1; i < rest.length; i++) assert.ok(order[eraOf(rest[i - 1])] <= order[eraOf(rest[i])], `era order at ${rest[i].title}`);
+      // Shulchan Aruch אורח חיים: משנה ברורה, מגן אברהם ... lead.
+      const oc = catalog.commentariesOf(idOfPath.get('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים'));
+      assert.deepStrictEqual(oc.slice(0, 2).map((x) => x.name), ['משנה ברורה', 'מגן אברהם']);
+      // Mishna: the Rambam's / Bartenura's commentaries lead.
+      assert.ok(catalog.commentariesOf(idOfPath.get('משנה/סדר זרעים/משנה ברכות'))[0].core);
+    });
+    await check('catalog: unmatched commentaries go to "מפרשים כלליים"; empty sections vanish in a small library', () => {
+      const small = lc.buildLibraryCatalog(
+        inputOf(['תנך/תורה/בראשית', 'תנך/תורה/שמות', 'תנך/מפרשים/רשי על בראשית', 'תנך/מפרשים/ראשונים/ספר שאינו קיים על ספר אחר', 'תלמוד בבלי/סדר מועד/שבת', 'תלמוד בבלי/מפרשים/רשי על שבת']),
+      );
+      assert.deepStrictEqual(names(small.sections), ['תנ"ך', 'תלמוד בבלי']);
+      assert.deepStrictEqual(names(small.sections[0].children), ['תורה']);
+      assert.deepStrictEqual(names(small.commentarySections), ['תנ"ך', 'תלמוד בבלי', 'מפרשים כלליים']);
+      assert.deepStrictEqual(small.generalCommentaries.map((g) => g.title), ['ספר שאינו קיים על ספר אחר']);
+      assert.deepStrictEqual(small.commentariesOf(2).length, 0);
+      assert.deepStrictEqual(small.commentariesOf(1).map((x) => x.name), ['רש"י']);
+      assert.deepStrictEqual(names(small.commentarySections[0].children[0].children), ['בראשית'], 'only books with commentaries in the commentary view');
+      assert.strictEqual(lc.buildLibraryCatalog({ categories: [], books: [] }).sections.length, 0);
+    });
+    await check('catalog: personal books get their own last section; live filter understands abbreviations', () => {
+      const withUser = lc.buildLibraryCatalog({
+        categories: [...input.categories.slice(0, 3), { id: 900000001, parent_id: null, name: 'הספרים שלי', path: 'הספרים שלי' }],
+        books: [...input.books.filter((b) => b.category_id <= 3), { id: 1000000001, category_id: 900000001, title: 'חידושי שלי', aliases: '' }],
+      });
+      assert.strictEqual(names(withUser.sections).pop(), 'ספרים אישיים');
+      assert.deepStrictEqual(lc.treeBookIds(lc.filterTree(catalog.sections, 'שו"ע או"ח')).map((id) => input.books[id - 1].title).includes('שולחן ערוך, אורח חיים'), true);
+      assert.ok(lc.treeBookIds(lc.filterTree(catalog.sections, 'ב"ק')).some((id) => input.books[id - 1].title === 'בבא קמא'));
+      assert.deepStrictEqual(lc.filterTree(catalog.sections, 'zzzz'), []);
+    });
+    await check('catalog: builds the full library fast', () => {
+      assert.ok(ms < 8000, `${ms}ms`);
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 200; i++) catalog.commentariesOf(idOfPath.get('תלמוד בבלי/סדר זרעים/ברכות'));
+      assert.ok(Number(process.hrtime.bigint() - t) / 1e6 < 50, 'cached rank lookups');
+    });
+    void pairing;
+  }
+
+  // ---- 4. daf / amud forms + linking ---------------------------------------------------------
+  await check('refAlign: every daf / amud spelling is one canonical unit (דף ב עמוד א = דף ב. = דף ב, א = ע"א ...)', () => {
+    const k = (t) => refAlign.refKeyOf(refAlign.unitLabels(t));
+    for (const a of ['דף ב עמוד א', 'דף ב.', 'ב.', 'דף ב ע"א', 'דף ב עמ\' א', 'דף ב, א', 'דף ב - עמוד א', 'דף ב ע א', 'דף ב עמוד א.', 'דף ב א']) assert.strictEqual(k(a), 'דף ב|עמוד א', a);
+    for (const b of ['דף ב עמוד ב', 'דף ב:', 'ב:', 'דף ב ע"ב', 'דף ב, ב', 'דף ב - עמוד ב', 'דף ב ע ב', 'דף ב ב']) assert.strictEqual(k(b), 'דף ב|עמוד ב', b);
+    assert.strictEqual(k('דף כ"ג, ב'), 'דף כג|עמוד ב');
+    assert.strictEqual(k('דף יא'), 'דף יא', 'a daf ending in א is not an amud');
+    assert.strictEqual(k('דף יא.'), 'דף יא|עמוד א');
+    assert.strictEqual(k('ע"ב'), 'עמוד ב');
+  });
+  await check('Bavli import: Rashi and Tosafot link to the right daf / amud across mixed heading spellings and rank Rashi #1', async () => {
+    const pipeline = require('../shared/pipeline');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-bavli-'));
+    try {
+      const lib = path.join(tmp, 'אוצריא');
+      const put = (rel, lines) => {
+        fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true });
+        fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n'));
+      };
+      // Base tractates use "דף ב עמוד א" (ברכות) and "דף ב." / "דף ב:" (שבת); the commentaries mix spellings.
+      put('תלמוד בבלי/סדר זרעים/ברכות', ['<h1>ברכות</h1>', '<h2>דף ב עמוד א</h2>', 'גמרא ברכות ב א', '<h2>דף ב עמוד ב</h2>', 'גמרא ברכות ב ב', '<h2>דף ג עמוד א</h2>', 'גמרא ברכות ג א']);
+      put('תלמוד בבלי/ראשונים/רשי/סדר זרעים/רש"י על מסכת ברכות', ['<h1>רש"י על ברכות</h1>', '<h2>דף ב.</h2>', 'רשי ברכות ב א', '<h2>דף ב:</h2>', 'רשי ברכות ב ב1', 'רשי ברכות ב ב2', '<h2>דף ג.</h2>', 'רשי ברכות ג א']);
+      put('תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב ע"א</h2>', 'תוס ברכות ב א', '<h2>דף ב ע"ב</h2>', 'תוס ברכות ב ב']);
+      put('תלמוד בבלי/סדר מועד/שבת', ['<h1>שבת</h1>', '<h2>דף ב.</h2>', 'גמרא שבת ב א', '<h2>דף ב:</h2>', 'גמרא שבת ב ב']);
+      put('תלמוד בבלי/ראשונים/רשי/סדר מועד/רשי על שבת', ['<h1>רשי על שבת</h1>', '<h2>דף ב, א</h2>', 'רשי שבת ב א', '<h2>דף ב, ב</h2>', 'רשי שבת ב ב']);
+      put('תלמוד בבלי/ראשונים/רמבן/סדר מועד/רמבן על שבת', ['<h1>רמבן על שבת</h1>', '<h2>דף ב - עמוד ב</h2>', 'רמבן שבת ב ב']);
+      put('תלמוד בבלי/ראשונים/תוספות/סדר מועד/תוספות על שבת', ['<h1>תוספות על שבת</h1>', '<h2>דף ב עמוד א</h2>', 'תוס שבת ב א', '<h2>דף ב עמוד ב</h2>', 'תוס שבת ב ב']);
+      const db = openWal(path.join(tmp, 'bavli.db'));
+      await indexer.ensureSchema(db.w, { kind: 'core' });
+      await pipeline.runImport(db.w, nodeFs, { source: { kind: 'folder', root: lib }, sourceUri: lib, targetDb: 'core', yieldToUI: () => Promise.resolve(), finalize: false });
+      await pipeline.completeImport(db.w);
+      const id = async (title) => Number((await db.read.all('SELECT id FROM books WHERE title = ?', [title]))[0].id);
+      const lineOf = async (bookId, text) => Number((await db.read.all('SELECT line_index AS l FROM paragraphs WHERE book_id = ? AND display_text = ?', [bookId, text]))[0].l);
+      const view = async (bookTitle, text) => {
+        const bookId = await id(bookTitle);
+        const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, bookId, await lineOf(bookId, text)));
+        const ranked = rank.rankCommentaries(groups, { context: { title: bookTitle } });
+        return ranked.map((g) => [g.displayName, g.entries.map((e) => e.display_text).join('+'), g.core, g.rank]);
+      };
+      assert.deepStrictEqual(await view('ברכות', 'גמרא ברכות ב ב'), [['רש"י', 'רשי ברכות ב ב1+רשי ברכות ב ב2', true, 0], ['תוספות', 'תוס ברכות ב ב', true, 1]], 'ברכות ב: (Rashi "דף ב:", Tosafot "דף ב ע"ב")');
+      assert.deepStrictEqual(await view('ברכות', 'גמרא ברכות ב א'), [['רש"י', 'רשי ברכות ב א', true, 0], ['תוספות', 'תוס ברכות ב א', true, 1]]);
+      assert.deepStrictEqual((await view('ברכות', 'גמרא ברכות ג א')).map((r) => r[0]), ['רש"י'], 'ג. has Rashi only');
+      assert.deepStrictEqual(await view('שבת', 'גמרא שבת ב א'), [['רש"י', 'רשי שבת ב א', true, 0], ['תוספות', 'תוס שבת ב א', true, 1]], 'שבת ב. (Rashi "דף ב, א")');
+      assert.deepStrictEqual((await view('שבת', 'גמרא שבת ב ב')).map((r) => r[0]), ['רש"י', 'תוספות', 'רמב"ן'], 'שבת ב: ("דף ב, ב", "דף ב - עמוד ב")');
+      // The Rashi link goes in both directions.
+      const rashi = await id('רש"י על ברכות');
+      const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, rashi, await lineOf(rashi, 'רשי ברכות ב ב2')));
+      assert.ok(back.some((g) => g.bookTitle === 'ברכות'), 'Rashi -> the tractate');
+      db.raw.close();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // ---- 5. Multi-select scope: FTS5 == web fallback ------------------------------------------
+  const dbFile = path.join(ROOT, 'assets/db/library.db');
+  if (!fs.existsSync(dbFile)) return;
+  const db = openDb(dbFile);
+  try {
+    const idOf = async (title) => Number((await db.all('SELECT id FROM books WHERE title = ?', [title]))[0].id);
+    const [bereshit, shabbat, rashiShabbat] = [await idOf('בראשית'), await idOf('שבת'), await idOf('רש"י על שבת')];
+    const scopeOf = (ids) => search.booksScope(ids.map((id) => ({ id, title: String(id) })));
+    const run = async (plan, scope, fts) => {
+      const out = [];
+      let cursor = null;
+      for (;;) {
+        const page = await search.searchPlan(db, plan, { scope, fts, cursor, limit: 30 });
+        out.push(...page.rows.map((r) => r.id));
+        if (!page.hasMore) return out;
+        cursor = page.cursor;
+      }
+    };
+    await check('multi-select scope: 2 base books + 1 commentary give identical rows in FTS5 and the web fallback (one query)', async () => {
+      const scope = scopeOf([bereshit, shabbat, rashiShabbat]);
+      assert.deepStrictEqual(search.scopeClause(scope).params, [bereshit, shabbat, rashiShabbat]);
+      assert.ok(/f\.book_id IN \(\?,\?,\?\)/.test(search.scopeClause(scope).sql), 'a single IN clause');
+      let nonEmpty = 0;
+      for (const q of ['אמר', 'את', 'בראשית', 'שבת', 'ה', 'שבת רבא', 'אמר רב']) {
+        const plan = hs.buildQuery(q);
+        const fts = await run(plan, scope, true);
+        const like = await run(plan, scope, false);
+        assert.deepStrictEqual(like, fts, q);
+        // == the union of the three single-book searches, in id order.
+        const union = [];
+        for (const id of [bereshit, shabbat, rashiShabbat]) union.push(...(await run(plan, { kind: 'book', bookId: id, title: '' }, true)));
+        assert.deepStrictEqual(fts, union.sort((a, b) => a - b), `${q}: union of single-book searches`);
+        const books = new Set(fts.length ? (await db.all(`SELECT DISTINCT book_id FROM paragraphs WHERE id IN (${fts.join(',')})`)).map((r) => Number(r.book_id)) : []);
+        for (const b of books) assert.ok([bereshit, shabbat, rashiShabbat].includes(b), `${q}: row from outside the scope (${b})`);
+        const c1 = await search.countPlan(db, plan, { scope, cap: 100000, fts: true });
+        const c2 = await search.countPlan(db, plan, { scope, cap: 100000, fts: false });
+        assert.strictEqual(c1.count, fts.length);
+        assert.strictEqual(c2.count, fts.length);
+        if (fts.length) nonEmpty++;
+      }
+      assert.ok(nonEmpty >= 3, `${nonEmpty} non-empty queries`);
+      // The legacy searchParagraphs / countMatches accept it too (FTS5 only: its LIKE fallback is a substring match).
+      const a = await search.searchParagraphs(db, 'שבת', { scope, limit: 500 });
+      assert.ok(a.rows.length > 0 && a.rows.every((r) => [bereshit, shabbat, rashiShabbat].includes(r.book_id)));
+      assert.strictEqual((await search.countMatches(db, 'שבת', { scope, cap: 100000 })).count, a.rows.length);
+    });
+    await check('multi-select scope: empty = whole library, one pick = that book, large selections stay one statement, ids of other databases are ignored', async () => {
+      assert.deepStrictEqual(search.booksScope([]), { kind: 'all' });
+      const one = search.booksScope([{ id: shabbat, title: 'שבת' }, { id: shabbat, title: 'שבת' }]);
+      assert.strictEqual(one.name, 'שבת');
+      assert.deepStrictEqual(one.ids, [shabbat]);
+      assert.strictEqual(scopeOf([1, 2, 3]).name, 'נבחרו 3 ספרים');
+      const many = Array.from({ length: 1200 }, (_, i) => i + 1);
+      const c = search.bookIdsCondition('f.book_id', many);
+      assert.strictEqual(c.params.length, 1200);
+      assert.strictEqual((c.sql.match(/ IN \(/g) || []).length, 3, 'chunks of 500 OR-ed in one condition');
+      const plan = hs.buildQuery('את');
+      const all = await run(plan, { kind: 'all' }, true);
+      const wide = await run(plan, scopeOf(many.concat([shabbat, bereshit])), true);
+      assert.deepStrictEqual(wide, all, 'all sample books in scope -> same rows as the whole library');
+      assert.deepStrictEqual(await run(plan, scopeOf([999999]), true), []);
+    });
+    await check('multi-select scope: routes to the owning databases of a core + personal router', async () => {
+      const router = sources.createRouter([
+        { name: 'core', adapter: db, idBase: 0 },
+        { name: 'user', adapter: { all: async () => [] }, idBase: 1000000000 },
+      ]);
+      const scope = scopeOf([shabbat, 1000000001]);
+      const rows = await search.searchPlan(router, hs.buildQuery('שבת'), { scope, limit: 50 });
+      assert.ok(rows.rows.length > 0 && rows.rows.every((r) => r.book_id === shabbat));
+    });
+  } finally {
+    db.close();
+  }
+
+  await check('UI wiring: Library + ScopeSheet render from the catalog, RTL, with the segmented toggle, multi-select and chips', () => {
+    const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+    const lib = read('src/components/LibraryColumns.tsx');
+    for (const id of ['library-mode-', 'library-filter', 'tree-comm-', 'ספרי בסיס', 'מפרשים לפי ספר', 'מפרשים (']) assert.ok(lib.includes(id), id);
+    assert.ok(lib.includes('useLibraryCatalog') && !lib.includes('loadCatalog('));
+    assert.ok(/\.\.\.inputAlignRight/.test(lib) && /\.\.\.alignRight/.test(lib));
+    const sheet = read('src/components/search/ScopeSheet.tsx');
+    for (const id of ['scope-tab-', 'scope-filter', 'scope-allcomm-', 'scope-open-book-comm', 'scope-apply', 'scope-clear', 'ספרי בסיס', 'פרשנים לפי ספר', 'הספר הפתוח כעת', 'הספר הפתוח + מפרשיו', 'כל הפרשנים על', 'בחר הכל', 'כל הספרייה']) assert.ok(sheet.includes(id), id);
+    assert.ok(sheet.includes('useLibraryCatalog') && sheet.includes('booksScope'));
+    assert.ok(/\.\.\.inputAlignRight/.test(sheet));
+    for (const f of ['src/app/search.tsx', 'src/app/advanced-search.tsx']) assert.ok(read(f).includes('<ScopeChips'), f);
+    assert.ok(read('src/app/advanced-search.tsx').includes('adv-scope-button'));
+    const chips = read('src/components/search/ScopeChips.tsx');
+    for (const id of ['scope-chip-', 'scope-badge', 'נבחרו', 'נקה']) assert.ok(chips.includes(id), id);
+    // Sleek compact Advanced Search button: ghost outline, small tune icon, tight padding.
+    const simple = read('src/app/search.tsx');
+    assert.ok(/advancedBtn: \{[^}]*borderWidth: 1[^}]*backgroundColor: 'transparent'/s.test(simple), 'ghost outline');
+    assert.ok(/paddingHorizontal: 8/.test(simple.slice(simple.indexOf('advancedBtn:'))) && /<SlidersIcon size=\{13\}/.test(simple));
+    assert.ok(/advancedText: \{[^}]*fontSize: 12/.test(simple));
+  });
 }
 
 /** Simple vs Advanced Search: the Hebrew query engine (shared/hebrewSearch.js) + plan execution. */

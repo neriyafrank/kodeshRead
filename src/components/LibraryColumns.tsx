@@ -1,94 +1,97 @@
 /**
- * RTL cascading-columns (Miller columns) library browser.
+ * Main library browser: RTL cascading columns (Miller columns) over the canonical catalog
+ * (shared/libraryCatalog.js), in the traditional Jewish order, not the raw Otzaria folders.
  *
- *   [ ספרים ]  [ תורה ]  [ תנ"ך ]   <- rightmost: root folders
- *   (column 3)  (column 2) (column 1)
+ *   [ ספרים ]  [ תנ"ך ]  [ תורה ]   <- rightmost: top sections (תנ"ך, משנה, תלמוד בבלי, ...)
  *
- * Tapping a folder highlights it and opens its sub-folders and books in the next column to its
- * LEFT; tapping a folder in any earlier column replaces everything to its left, so siblings are
- * one tap away and the active path stays visible (also as a breadcrumb above). Tapping a book
- * opens it. Columns scroll vertically on their own (FlatList); the strip scrolls horizontally.
+ * A segmented switch at the top chooses the view:
+ *   ספרי בסיס          sections -> sub-sections -> base books only. A book with commentaries has a
+ *                      compact "מפרשים (N)" pill that jumps straight to its commentaries;
+ *   מפרשים לפי ספר     the base books that have commentaries (same sections); selecting one opens
+ *                      all of its commentaries together (ראשונים / אחרונים / תרגומים alike) in
+ *                      canonical rank order (רש"י, תוספות, רמב"ן, ...). "מפרשים כלליים" lists the
+ *                      commentaries that name no single base book.
+ * A live filter (abbreviation aware: שו"ע או"ח, ב"ק) flattens either view into a result list.
  *
- * Layout: ~2 columns on a phone, 3–4 on a tablet (from the measured width). The strip itself is
- * laid out LTR with the columns in reverse order (deepest first), so the newest column is always
- * at scroll offset 0 on every platform (RTL scroll offsets differ between browsers and Android);
- * the column contents are RTL. The selected path is persisted (useLibraryUi.columnPath).
+ * Tapping a section highlights it and opens its contents in the next column to its LEFT; tapping a
+ * section in an earlier column replaces everything to its left. Columns scroll vertically on their
+ * own (FlatList); the strip scrolls horizontally, laid out LTR with the columns in reverse order
+ * (deepest first) so the newest column is at scroll offset 0 on every platform (RTL scroll offsets
+ * differ between browsers and Android); the column contents are RTL. Mode and path persist
+ * (useLibraryUi.catalogMode / catalogPath).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
-import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent, type ScrollViewInstance } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type LayoutChangeEvent, type ScrollViewInstance } from 'react-native';
 
-import { loadCatalog } from '../../shared/sources';
-import { useLibrary } from '../db/LibraryContext';
-import { LEFT_CHEVRON, alignRight, nativeDir, setWebDir } from '../lib/direction';
+import { filterTree, titleMatches, type CatalogNode, type LibraryCatalog } from '../../shared/libraryCatalog';
+import { useLibraryCatalog } from '../db/useLibraryCatalog';
+import { LEFT_CHEVRON, alignRight, inputAlignRight, nativeDir, setWebDir } from '../lib/direction';
 import { useLibraryUi } from '../state/libraryStore';
 import { BookIcon, FolderIcon } from './Icons';
-import { spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
+import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
-interface CategoryRow {
-  id: number;
-  parent_id: number | null;
-  name: string;
-}
-interface BookRow {
-  id: number;
-  category_id: number | null;
+type Mode = 'base' | 'comm';
+
+type Row =
+  | { kind: 'section'; key: string; node: CatalogNode }
+  | { kind: 'book'; key: string; node: CatalogNode }
+  | { kind: 'commentary'; key: string; bookId: number; title: string; name: string; tier: string; leaf: boolean }
+  | { kind: 'open-base'; key: string; bookId: number; title: string };
+
+interface Column {
+  depth: number;
+  /** Node id of the selected parent (null: root). */
+  parent: string | null;
   title: string;
-}
-interface Catalog {
-  byId: Map<number, CategoryRow>;
-  childCats: Map<number | null, CategoryRow[]>;
-  childBooks: Map<number | null, BookRow[]>;
-  /** Books under each folder, recursively. */
-  bookCount: Map<number, number>;
-}
-type Row = { kind: 'category'; key: string; cat: CategoryRow; count: number; hasChildren: boolean } | { kind: 'book'; key: string; book: BookRow };
-
-function buildCatalog(cats: CategoryRow[], books: BookRow[]): Catalog {
-  const byId = new Map(cats.map((c) => [c.id, c]));
-  const childCats = new Map<number | null, CategoryRow[]>();
-  const childBooks = new Map<number | null, BookRow[]>();
-  for (const c of cats) childCats.set(c.parent_id, [...(childCats.get(c.parent_id) ?? []), c]);
-  for (const b of books) childBooks.set(b.category_id, [...(childBooks.get(b.category_id) ?? []), b]);
-  const bookCount = new Map<number, number>();
-  const count = (id: number): number => {
-    let n = childBooks.get(id)?.length ?? 0;
-    for (const c of childCats.get(id) ?? []) n += count(c.id);
-    bookCount.set(id, n);
-    return n;
-  };
-  for (const c of childCats.get(null) ?? []) count(c.id);
-  return { byId, childCats, childBooks, bookCount };
+  rows: Row[];
 }
 
-function rowsOf(cat: Catalog, parent: number | null): Row[] {
-  const rows: Row[] = [];
-  for (const c of cat.childCats.get(parent) ?? []) {
-    const n = cat.bookCount.get(c.id) ?? 0;
-    if (!n) continue; // empty folders are noise in a browser
-    rows.push({ kind: 'category', key: `c${c.id}`, cat: c, count: n, hasChildren: (cat.childCats.get(c.id)?.length ?? 0) + (cat.childBooks.get(c.id)?.length ?? 0) > 0 });
-  }
-  for (const b of cat.childBooks.get(parent) ?? []) rows.push({ kind: 'book', key: `b${b.id}`, book: b });
-  return rows;
-}
-
-/** Longest valid prefix of a saved path (folders may have disappeared after a library change). */
-function validPath(cat: Catalog, path: number[]): number[] {
-  const out: number[] = [];
-  let parent: number | null = null;
-  for (const id of path) {
-    const c = cat.byId.get(id);
-    if (!c || c.parent_id !== parent) break;
-    out.push(id);
-    parent = id;
-  }
-  return out;
-}
+const rowOf = (n: CatalogNode): Row => (n.kind === 'section' ? { kind: 'section', key: n.id, node: n } : n.kind === 'commentary' ? leafRow(n) : { kind: 'book', key: n.id, node: n });
+const leafRow = (n: CatalogNode): Row => ({ kind: 'commentary', key: n.id, bookId: n.bookId ?? 0, title: n.title ?? n.name, name: n.title ?? n.name, tier: '', leaf: true });
 
 /** Columns that fit side by side: 2 on phones, 3 on small tablets, 4 on large screens. */
 export function visibleColumnCount(width: number): number {
   if (width >= 1000) return 4;
   if (width >= 680) return 3;
   return 2;
+}
+
+/** node id -> ids from the root down to (and including) it. */
+function indexPaths(nodes: CatalogNode[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const walk = (list: CatalogNode[], prefix: string[]) => {
+    for (const n of list) {
+      const p = [...prefix, n.id];
+      out.set(n.id, p);
+      if (n.kind === 'section' && n.children) walk(n.children, p);
+    }
+  };
+  walk(nodes, []);
+  return out;
+}
+
+/** Longest valid prefix of a saved path, and its columns. */
+function buildColumns(catalog: LibraryCatalog, mode: Mode, saved: string[]): { columns: Column[]; path: string[] } {
+  const tree = mode === 'base' ? catalog.sections : catalog.commentarySections;
+  const columns: Column[] = [{ depth: 0, parent: null, title: 'ספרייה', rows: tree.map(rowOf) }];
+  const path: string[] = [];
+  let nodes = tree;
+  for (const id of saved) {
+    const node = nodes.find((n) => n.id === id);
+    if (!node) break;
+    if (node.kind === 'section' && node.children) {
+      path.push(id);
+      columns.push({ depth: path.length, parent: id, title: node.name, rows: node.children.map(rowOf) });
+      nodes = node.children;
+    } else if (node.kind === 'book' && mode === 'comm' && node.bookId != null) {
+      path.push(id);
+      const rows: Row[] = [{ kind: 'open-base', key: 'open-' + node.id, bookId: node.bookId, title: node.title ?? node.name }];
+      for (const c of catalog.commentariesOf(node.bookId)) rows.push({ kind: 'commentary', key: 'c' + c.bookId, bookId: c.bookId, title: c.title, name: c.name, tier: c.tier, leaf: false });
+      columns.push({ depth: path.length, parent: id, title: `מפרשים על ${node.title ?? node.name}`, rows });
+      break;
+    } else break;
+  }
+  return { columns, path };
 }
 
 interface Props {
@@ -101,40 +104,52 @@ interface Props {
 export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
   const colors = useAppTheme();
   const s = useThemedStyles(createStyles);
-  const { adapter, generation } = useLibrary();
-  const savedPath = useLibraryUi((x) => x.columnPath);
-  const setColumnPath = useLibraryUi((x) => x.setColumnPath);
-  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const catalog = useLibraryCatalog();
+  const mode = useLibraryUi((x) => x.catalogMode);
+  const savedPath = useLibraryUi((x) => x.catalogPath);
+  const setMode = useLibraryUi((x) => x.setCatalogMode);
+  const setPath = useLibraryUi((x) => x.setCatalogPath);
+  const showCatalog = useLibraryUi((x) => x.showCatalog);
+  const [filter, setFilter] = useState('');
   const [width, setWidth] = useState(0);
   const scrollRef = useRef<ScrollViewInstance>(null);
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      // Core library + personal books ("הספרים שלי"); ids never collide.
-      const { categories, books } = await loadCatalog(adapter);
-      if (alive) setCatalog(buildCatalog(categories, books));
-    })().catch((e) => console.warn('library catalog failed', e));
-    return () => {
-      alive = false;
-    };
-  }, [adapter, generation]);
+  const { columns, path } = useMemo(() => (catalog ? buildColumns(catalog, mode, savedPath) : { columns: [] as Column[], path: [] as string[] }), [catalog, mode, savedPath]);
+  const commPaths = useMemo(() => (catalog ? indexPaths(catalog.commentarySections) : new Map<string, string[]>()), [catalog]);
 
-  const path = useMemo(() => (catalog ? validPath(catalog, savedPath) : []), [catalog, savedPath]);
-  // One column per level: the root, then the contents of every selected folder.
-  const columns = useMemo(() => {
-    if (!catalog) return [];
-    const parents: (number | null)[] = [null, ...path];
-    return parents.map((parent, depth) => ({ depth, parent, rows: rowsOf(catalog, parent) }));
-  }, [catalog, path]);
+  /** Filtered results: a flat list of matching books (with their section), in canonical order. */
+  const results = useMemo(() => {
+    if (!catalog || !filter.trim()) return null;
+    const tree = mode === 'base' ? catalog.sections : catalog.commentarySections;
+    const extra = mode === 'comm' ? (n: CatalogNode) => n.kind === 'book' && n.bookId != null && catalog.commentariesOf(n.bookId).some((c) => titleMatches(filter, c.name, c.categoryPath ?? undefined)) : undefined;
+    const out: { row: Row; where: string }[] = [];
+    const walk = (list: CatalogNode[], where: string[]) => {
+      for (const n of list) {
+        if (n.kind === 'section' && n.children) walk(n.children, [...where, n.name]);
+        else out.push({ row: rowOf(n), where: where.join(' › ') });
+      }
+    };
+    walk(filterTree(tree, filter, extra), []);
+    return out;
+  }, [catalog, filter, mode]);
 
   const select = useCallback(
-    (depth: number, id: number) => {
-      // Re-tapping the open folder closes everything to its left.
-      const next = path[depth] === id ? path.slice(0, depth) : [...path.slice(0, depth), id];
-      setColumnPath(next);
+    (depth: number, id: string) => {
+      // Re-tapping the open node closes everything to its left.
+      setPath(path[depth] === id ? path.slice(0, depth) : [...path.slice(0, depth), id]);
     },
-    [path, setColumnPath],
+    [path, setPath],
+  );
+
+  // "מפרשים (N)": jump to the commentaries of that base book.
+  const showCommentaries = useCallback(
+    (bookId: number) => {
+      const p = commPaths.get('book:' + bookId);
+      if (!p) return;
+      setFilter('');
+      showCatalog('comm', p);
+    },
+    [commPaths, showCatalog],
   );
 
   // Reveal the newest (leftmost) column, keeping its parent visible on its right.
@@ -147,17 +162,116 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
   const perScreen = visibleColumnCount(width);
   const colWidth = width ? Math.floor(width / perScreen) : 0;
 
-  const crumbs = path.map((id) => catalog?.byId.get(id)?.name ?? '');
+  const nameOf = (id: string) => {
+    const col = columns.find((c) => c.parent === id);
+    return col ? col.title.replace(/^מפרשים על /, '') : id;
+  };
 
-  const renderColumn = (col: (typeof columns)[number]) => (
-    <View
-      key={`col-${col.depth}-${col.parent ?? 'root'}`}
-      ref={(n) => setWebDir(n, 'rtl')}
-      style={[s.column, nativeDir('rtl'), { width: colWidth }]}
-      testID={`library-column-${col.depth}`}
-    >
+  const renderRow = (row: Row, depth: number, where?: string) => {
+    if (row.kind === 'section') {
+      const active = path[depth] === row.node.id;
+      return (
+        <Pressable
+          onPress={() => select(depth, row.node.id)}
+          style={({ pressed }) => [s.row, active && s.rowActive, pressed && s.pressed]}
+          accessibilityRole="button"
+          aria-selected={active}
+          aria-expanded={active}
+          testID={`tree-sec-${row.node.id}`}
+        >
+          {active ? <View style={s.activeBar} /> : null}
+          <FolderIcon open={active} />
+          <Text style={[s.catName, active && s.catNameActive, depth === 0 && s.catRoot]} numberOfLines={2}>
+            {row.node.name}
+          </Text>
+          <Text style={[s.count, active && s.catNameActive]}>{row.node.count}</Text>
+          {/* RTL: the next column opens to the left. */}
+          <Text style={[s.chevron, active && s.catNameActive]}>{LEFT_CHEVRON}</Text>
+        </Pressable>
+      );
+    }
+    if (row.kind === 'book') {
+      const n = row.node;
+      const bookId = n.bookId ?? 0;
+      const cc = n.commentaryCount ?? 0;
+      if (mode === 'comm') {
+        const active = path[depth] === n.id;
+        return (
+          <Pressable
+            onPress={() => {
+              setFilter('');
+              if (where != null) showCatalog('comm', commPaths.get(n.id) ?? [n.id]);
+              else select(depth, n.id);
+            }}
+            style={({ pressed }) => [s.row, active && s.rowActive, pressed && s.pressed]}
+            accessibilityRole="button"
+            aria-selected={active}
+            testID={`tree-book-${bookId}`}
+          >
+            {active ? <View style={s.activeBar} /> : null}
+            <BookIcon />
+            <View style={s.flex}>
+              <Text style={[s.bookTitle, active && s.catNameActive]} numberOfLines={2}>
+                {n.title}
+              </Text>
+              {where ? <Text style={s.where} numberOfLines={1}>{where}</Text> : null}
+            </View>
+            <Text style={[s.count, active && s.catNameActive]}>{cc}</Text>
+            <Text style={[s.chevron, active && s.catNameActive]}>{LEFT_CHEVRON}</Text>
+          </Pressable>
+        );
+      }
+      return (
+        <View style={s.row}>
+          <Pressable onPress={() => onOpenBook(bookId, n.title ?? n.name)} style={({ pressed }) => [s.rowMain, pressed && s.pressed]} accessibilityRole="link" testID={`tree-book-${bookId}`}>
+            <BookIcon />
+            <View style={s.flex}>
+              <Text style={s.bookTitle} numberOfLines={2}>
+                {n.title}
+              </Text>
+              {where ? <Text style={s.where} numberOfLines={1}>{where}</Text> : null}
+            </View>
+          </Pressable>
+          {cc > 0 ? (
+            <Pressable onPress={() => showCommentaries(bookId)} hitSlop={4} style={({ pressed }) => [s.pill, pressed && s.pressed]} accessibilityRole="button" accessibilityLabel={`מפרשים על ${n.title}`} testID={`tree-comm-${bookId}`}>
+              <Text style={s.pillText}>{`מפרשים (${cc})`}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      );
+    }
+    if (row.kind === 'open-base') {
+      return (
+        <Pressable onPress={() => onOpenBook(row.bookId, row.title)} style={({ pressed }) => [s.row, s.openBase, pressed && s.pressed]} accessibilityRole="link" testID={`tree-open-base-${row.bookId}`}>
+          <BookIcon />
+          <Text style={[s.catName, s.catNameActive]} numberOfLines={2}>
+            {`פתח את ${row.title}`}
+          </Text>
+        </Pressable>
+      );
+    }
+    return (
+      <Pressable onPress={() => onOpenBook(row.bookId, row.title)} style={({ pressed }) => [s.row, pressed && s.pressed]} accessibilityRole="link" testID={`tree-commentary-${row.bookId}`}>
+        <BookIcon />
+        <View style={s.flex}>
+          <Text style={s.bookTitle} numberOfLines={2}>
+            {row.leaf ? row.title : row.name}
+          </Text>
+          {!row.leaf && row.title !== row.name ? <Text style={s.where} numberOfLines={1}>{row.title}</Text> : null}
+        </View>
+        {row.tier ? (
+          <Text style={[s.tier, row.tier === 'עיקריים' && s.tierCore]} numberOfLines={1}>
+            {row.tier}
+          </Text>
+        ) : null}
+      </Pressable>
+    );
+  };
+
+  const renderColumn = (col: Column) => (
+    <View key={`col-${col.depth}-${col.parent ?? 'root'}`} ref={(n) => setWebDir(n, 'rtl')} style={[s.column, nativeDir('rtl'), { width: colWidth }]} testID={`library-column-${col.depth}`}>
       <Text style={s.columnTitle} numberOfLines={1}>
-        {col.parent == null ? 'ספרייה' : catalog?.byId.get(col.parent)?.name}
+        {col.title}
       </Text>
       <FlatList
         data={col.rows}
@@ -166,61 +280,69 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
         windowSize={7}
         keyboardShouldPersistTaps="handled"
         ListEmptyComponent={<Text style={s.emptyCol}>אין ספרים בתיקייה זו</Text>}
-        renderItem={({ item }) => {
-          if (item.kind === 'book') {
-            return (
-              <Pressable
-                onPress={() => onOpenBook(item.book.id, item.book.title)}
-                style={({ pressed }) => [s.row, pressed && s.pressed]}
-                accessibilityRole="link"
-                testID={`tree-book-${item.book.id}`}
-              >
-                <BookIcon />
-                <Text style={s.bookTitle} numberOfLines={2}>
-                  {item.book.title}
-                </Text>
-              </Pressable>
-            );
-          }
-          const active = path[col.depth] === item.cat.id;
-          return (
-            <Pressable
-              onPress={() => select(col.depth, item.cat.id)}
-              style={({ pressed }) => [s.row, active && s.rowActive, pressed && s.pressed]}
-              accessibilityRole="button"
-              aria-selected={active}
-              aria-expanded={active}
-              testID={`tree-cat-${item.cat.id}`}
-            >
-              {active ? <View style={s.activeBar} /> : null}
-              <FolderIcon open={active} />
-              <Text style={[s.catName, active && s.catNameActive, col.depth === 0 && s.catRoot]} numberOfLines={2}>
-                {item.cat.name}
-              </Text>
-              <Text style={[s.count, active && s.catNameActive]}>{item.count}</Text>
-              {/* RTL: the next column opens to the left. */}
-              <Text style={[s.chevron, active && s.catNameActive]}>{LEFT_CHEVRON}</Text>
-            </Pressable>
-          );
-        }}
+        renderItem={({ item }) => renderRow(item, col.depth)}
       />
     </View>
   );
 
+  const libraryEmpty = !!catalog && !catalog.sections.length && !catalog.commentarySections.length;
+
   return (
     <View style={s.root}>
       {header}
-      {path.length ? (
+      <View style={s.tools}>
+        <View style={s.segment} accessibilityRole="tablist">
+          {(
+            [
+              ['base', 'ספרי בסיס'],
+              ['comm', 'מפרשים לפי ספר'],
+            ] as const
+          ).map(([m, label]) => (
+            <Pressable
+              key={m}
+              onPress={() => {
+                setFilter('');
+                if (m !== mode) setMode(m);
+              }}
+              style={[s.segBtn, mode === m && s.segBtnOn]}
+              accessibilityRole="tab"
+              aria-selected={mode === m}
+              testID={`library-mode-${m}`}
+            >
+              <Text style={[s.segText, mode === m && s.segTextOn]}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={s.filterRow}>
+          <TextInput
+            value={filter}
+            onChangeText={setFilter}
+            placeholder={mode === 'base' ? 'סינון ספרים: שו״ע או״ח, ב״ק, רמב״ם…' : 'סינון ספרים ומפרשים: רש״י, תוספות…'}
+            placeholderTextColor={colors.textMuted}
+            style={s.filter}
+            autoCorrect={false}
+            autoCapitalize="none"
+            accessibilityLabel="סינון הספרייה"
+            testID="library-filter"
+          />
+          {filter ? (
+            <Pressable onPress={() => setFilter('')} hitSlop={10} style={s.filterClear} accessibilityLabel="נקה סינון" testID="library-filter-clear">
+              <Text style={s.clearText}>✕</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+      {path.length && !results ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.crumbBar} contentContainerStyle={s.crumbs} testID="library-breadcrumb">
-          <Pressable onPress={() => setColumnPath([])} hitSlop={6} testID="library-crumb-root">
+          <Pressable onPress={() => setPath([])} hitSlop={6} testID="library-crumb-root">
             <Text style={s.crumb}>ספרייה</Text>
           </Pressable>
-          {crumbs.map((name, i) => (
-            <View key={path[i]} style={s.crumbItem}>
+          {path.map((id, i) => (
+            <View key={id} style={s.crumbItem}>
               <Text style={s.crumbSep}>{LEFT_CHEVRON}</Text>
-              <Pressable onPress={() => setColumnPath(path.slice(0, i + 1))} hitSlop={6} testID={`library-crumb-${i}`}>
-                <Text style={[s.crumb, i === crumbs.length - 1 && s.crumbLast]} numberOfLines={1}>
-                  {name}
+              <Pressable onPress={() => setPath(path.slice(0, i + 1))} hitSlop={6} testID={`library-crumb-${i}`}>
+                <Text style={[s.crumb, i === path.length - 1 && s.crumbLast]} numberOfLines={1}>
+                  {nameOf(id)}
                 </Text>
               </Pressable>
             </View>
@@ -230,8 +352,17 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
       <View style={s.strip} onLayout={onLayout}>
         {!catalog ? (
           <ActivityIndicator style={{ marginTop: spacing.xl }} color={colors.accent} />
-        ) : !columns[0]?.rows.length ? (
+        ) : libraryEmpty ? (
           emptyText === '' ? null : <Text style={s.empty}>{emptyText ?? 'הספרייה ריקה. הורידו ספרייה או ייבאו ספרים ממסך ״ניהול״.'}</Text>
+        ) : results ? (
+          <FlatList
+            data={results}
+            keyExtractor={(r) => r.row.key}
+            keyboardShouldPersistTaps="handled"
+            ListEmptyComponent={<Text style={s.emptyCol} testID="library-filter-empty">לא נמצאו ספרים</Text>}
+            renderItem={({ item }) => renderRow(item.row, 0, item.where || 'ספרייה')}
+            testID="library-results"
+          />
         ) : colWidth ? (
           <ScrollView
             ref={(n) => {
@@ -256,7 +387,18 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     root: { flex: 1 },
+    flex: { flex: 1 },
     strip: { flex: 1 },
+    tools: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, gap: spacing.sm },
+    segment: { flexDirection: 'row', backgroundColor: c.surfaceMuted, borderRadius: radius.md, padding: 3, gap: 3 },
+    segBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', minHeight: 36, borderRadius: radius.md - 3 },
+    segBtnOn: { backgroundColor: c.accent },
+    segText: { fontSize: 14, fontWeight: '600', color: c.textMuted },
+    segTextOn: { color: c.background, fontWeight: '700' },
+    filterRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: c.surface, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, paddingStart: spacing.md, paddingEnd: spacing.sm },
+    filter: { flex: 1, minHeight: 40, fontSize: 15, color: c.text, paddingVertical: 6, ...inputAlignRight },
+    filterClear: { padding: spacing.sm },
+    clearText: { fontSize: 15, color: c.textMuted },
     columns: { flexDirection: 'row', justifyContent: 'flex-end', flexGrow: 1 },
     column: { borderStartWidth: StyleSheet.hairlineWidth, borderStartColor: c.border, backgroundColor: c.background },
     columnTitle: {
@@ -279,7 +421,9 @@ const createStyles = (c: Palette) =>
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.border,
     },
+    rowMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, alignSelf: 'stretch', minHeight: 36 },
     rowActive: { backgroundColor: c.accentSoft },
+    openBase: { backgroundColor: c.surfaceMuted },
     activeBar: { position: 'absolute', start: 0, top: 0, bottom: 0, width: 3, backgroundColor: c.accent },
     pressed: { opacity: 0.7 },
     catName: { flex: 1, fontSize: 16, fontWeight: '600', color: c.text, ...alignRight },
@@ -287,7 +431,12 @@ const createStyles = (c: Palette) =>
     catNameActive: { color: c.accent },
     count: { fontSize: 12, color: c.textMuted },
     chevron: { fontSize: 18, color: c.textMuted, width: 12, textAlign: 'center' },
-    bookTitle: { flex: 1, fontSize: 16, color: c.text, ...alignRight },
+    bookTitle: { fontSize: 16, color: c.text, ...alignRight },
+    where: { fontSize: 11, color: c.textMuted, ...alignRight },
+    pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, borderWidth: 1, borderColor: c.accent, backgroundColor: c.accentSoft },
+    pillText: { fontSize: 11, fontWeight: '700', color: c.accent, ...alignRight },
+    tier: { fontSize: 10, color: c.textMuted, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, paddingHorizontal: 6, paddingVertical: 1 },
+    tierCore: { color: c.accent, borderColor: c.accent },
     emptyCol: { padding: spacing.lg, color: c.textMuted, fontSize: 13, textAlign: 'center' },
     empty: { textAlign: 'center', color: c.textMuted, marginTop: spacing.xl },
     crumbBar: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },

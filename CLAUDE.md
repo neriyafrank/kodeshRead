@@ -84,6 +84,17 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > Highlight patterns `~x` / `^x` / `%x` go through `makeTermMatcher`. Self-tested in `scripts/selftest.js`
 > (section 10), e2e in `e2e:search`.
 
+> **Canonical library catalog & multi-select scope:** `shared/libraryCatalog.js` (pure JS, no schema change) is the
+> single tree behind the Library screen (`LibraryColumns.tsx`: `ספרי בסיס` | `מפרשים לפי ספר`, live filter, inline
+> `מפרשים (N)` pill) and the search Scope Picker (`ScopeSheet.tsx`, multi-select). `is_commentary` is derived: a book
+> paired by `shared/pairing.js` (same pairing as the `ref_links` phase) with a base book is a commentary and is grouped
+> under its root base book in `shared/commentaryRank.js` order (תרגומים / ראשונים / אחרונים together); corpus-wide or
+> unpaired commentary-folder books go to "מפרשים כלליים". Base books use the traditional order (תנ"ך, משנה + תוספתא,
+> Shas, ירושלמי, מדרש, הלכה with Rambam's 14 ספרים / ארבעה טורים / שו"ע, ...); empty sections are hidden. Built once per
+> library generation (`src/db/useLibraryCatalog.ts`, async pairing). Search scope kind `books` (`booksScope`,
+> `bookIdsCondition`) is one `book_id IN (...)` condition in FTS5 and the web fallback; chips: `ScopeChips.tsx`.
+> Daf/amud spellings (`דף ב, א`, `דף ב - עמוד ב`, `ע"ב`, `דף ב עמוד א.`) normalize in `refAlign.unitLabels`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

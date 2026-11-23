@@ -5,6 +5,8 @@ export type SearchScope =
   | { kind: 'all' }
   | { kind: 'category'; path: string; name: string }
   | { kind: 'book'; bookId: number; title: string }
+  /** Multi-select scope picker: any mix of base books and commentaries (book ids; an empty selection is `all`). */
+  | { kind: 'books'; ids: number[]; name: string; picks?: { id: number; title: string }[] }
   /** Advanced Search corpus chips (CORPORA ids, OR-ed). */
   | { kind: 'corpus'; ids: string[]; name: string };
 
@@ -91,6 +93,8 @@ export const MAX_QUERY_VARIANTS: number;
 export function splitPhrases(input: string): { text: string; phrase: boolean }[];
 /** `smart`: abbreviation / ktiv / prefix-suffix expansion ("חיפוש מורחב"); default exact. */
 export function parseSearchQuery(input: string, opts?: { smart?: boolean }): ParsedQuery;
+export function booksScope(picks: { id: number; title: string }[]): SearchScope;
+export function bookIdsCondition(col: string, ids: number[]): { sql: string; params: number[] };
 export function scopeClause(scope: SearchScope | null | undefined): { sql: string; params: (string | number)[] };
 /** False on SQLite builds without FTS5 (web preview); the app then uses a LIKE fallback. */
 export function hasFts5(db: LibraryDb): Promise<boolean>;

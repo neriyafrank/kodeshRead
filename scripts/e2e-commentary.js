@@ -9,6 +9,8 @@
  * paragraph, verifies grouping (רש"י / תוספות), the theme, resizing, prev/next sync,
  * and opening a commentary at its line in a tab.
  *
+ * (Talmud Bavli: רש"י is card #1, ahead of תוספות, and both are עיקריים.)
+ *
  * Then בראשית א (8 commentators in the sample: core, ראשונים, אחרונים): priority order and
  * tier badges, smart default expansion (top 3), expanding / collapsing cards, open-all /
  * collapse-all, the commentator pill strip (1-tap jump), the name filter with abbreviations
@@ -70,6 +72,9 @@ try {
     await tid('commentary-group').first().waitFor({ timeout: 10000 });
     const names = await tid('commentary-group-name').allInnerTexts();
     assert.deepStrictEqual(names, ['רש"י', 'תוספות']);
+    // Talmud Bavli: Rashi is #1 (ahead of Tosafot), both under the primary commentators (עיקריים).
+    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים']);
+    assert.ok((await tid('commentary-group').first().innerText()).includes('רש"י'), 'Rashi is the first card');
     // Whole aligned amud block per commentator (6 רש"י + 2 תוספות); the 3 explicitly linked are marked.
     const entries = page.locator('[data-testid^="commentary-entry"]');
     assert.strictEqual(await entries.count(), 8);
@@ -359,6 +364,42 @@ try {
     await page.waitForFunction(() => document.querySelector('[data-testid="commentary-group-name"]')?.innerText === 'אונקלוס');
     assert.deepStrictEqual(await groupNames(), PRIORITY);
     step('pin ⭐ a favorite: pinned to the top, persisted across reloads, unpin restores');
+
+    // Scope picker shortcuts for the open book: "הספר הפתוח כעת" / "הספר הפתוח + מפרשיו".
+    await page.goto(BASE + '/search');
+    await tid('search-input').waitFor({ timeout: 60000 });
+    await tid('search-input').fill('ויאמר');
+    await tid('scope-button').click();
+    await tid('scope-sheet').waitFor();
+    await tid('scope-open-book').waitFor();
+    await tid('scope-open-book-comm').waitFor();
+    assert.ok((await tid('scope-sheet').innerText()).includes('הספר הפתוח + מפרשיו'));
+    assert.strictEqual((await tid('scope-summary').innerText()).trim(), 'כל הספרייה');
+    await tid('scope-open-book').click();
+    assert.strictEqual((await tid('scope-summary').innerText()).trim(), 'נבחרו 1 ספרים');
+    await tid('scope-open-book-comm').click();
+    assert.strictEqual((await tid('scope-summary').innerText()).trim(), 'נבחרו 9 ספרים', 'בראשית + its 8 commentaries');
+    await tid('scope-tab-comm').click();
+    await tid('scope-filter').fill('בראשית');
+    await tid('scope-book-1').waitFor();
+    if (!(await tid('scope-allcomm-1').count())) await tid('scope-expand-1').click();
+    await tid('scope-allcomm-1').waitFor();
+    assert.strictEqual(await tid('scope-allcomm-1').getAttribute('aria-checked'), 'true', '"כל הפרשנים על בראשית" is fully checked');
+    await shot('10-scope-open-book');
+    await tid('scope-apply').click();
+    await tid('scope-badge').waitFor();
+    assert.strictEqual((await tid('scope-badge').innerText()).trim(), 'נבחרו 9 ספרים', 'more than four picks collapse into a badge');
+    await page.waitForFunction(
+      () => {
+        const els = [...document.querySelectorAll('[data-testid="search-result"]')];
+        return els.length > 0 && els.every((el) => /^(בראשית|.+ על בראשית)( |$)/.test(el.innerText.split('\n')[0].split('‹')[0].trim()));
+      },
+      null,
+      { timeout: 30000 },
+    );
+    await tid('scope-chips-clear').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
+    step('scope picker: הספר הפתוח + מפרשיו (9 books) -> badge "נבחרו 9 ספרים" + נקה');
 
     const real = errors.filter((e) => !/favicon|DevTools|Download the React DevTools/.test(e));
     assert.deepStrictEqual(real, [], 'console errors');

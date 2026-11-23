@@ -21,6 +21,7 @@ import { buildQuery } from '../../shared/hebrewSearch';
 import type { SearchRow } from '../../shared/search';
 import { SearchIcon, SlidersIcon } from '../components/Icons';
 import { ResultCard } from '../components/search/ResultCard';
+import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
 import { alignRight, inputAlignRight } from '../lib/direction';
@@ -116,7 +117,7 @@ export default function SearchScreen() {
             accessibilityLabel="חיפוש מתקדם"
             testID="open-advanced-search"
           >
-            <SlidersIcon size={17} color={c.background} />
+            <SlidersIcon size={13} color={c.accent} />
             <Text style={s.advancedText}>חיפוש מתקדם</Text>
           </Pressable>
         </View>
@@ -141,6 +142,7 @@ export default function SearchScreen() {
             </Text>
           ) : null}
         </View>
+        <ScopeChips scope={scope} onChange={setScope} />
       </View>
 
       {plan.empty ? (
@@ -202,6 +204,7 @@ const createStyles = (c: Palette) =>
     searchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
     inputRow: {
       flex: 1,
+      minWidth: 0,
       flexDirection: 'row',
       alignItems: 'center',
       backgroundColor: c.surface,
@@ -213,19 +216,21 @@ const createStyles = (c: Palette) =>
       minHeight: 50,
     },
     icon: { marginEnd: spacing.md },
-    input: { flex: 1, fontSize: 18, color: c.text, paddingVertical: spacing.sm, ...inputAlignRight },
+    input: { flex: 1, minWidth: 0, fontSize: 18, color: c.text, paddingVertical: spacing.sm, ...inputAlignRight },
     clear: { padding: spacing.sm },
     clearText: { fontSize: 15, color: c.textMuted },
     advancedBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 6,
+      gap: 4,
       minHeight: 50,
-      paddingHorizontal: spacing.md,
+      paddingHorizontal: 8,
       borderRadius: radius.lg,
-      backgroundColor: c.accent,
+      borderWidth: 1,
+      borderColor: c.accent,
+      backgroundColor: 'transparent',
     },
-    advancedText: { fontSize: 14, fontWeight: '700', color: c.background, ...alignRight },
+    advancedText: { fontSize: 12, fontWeight: '600', color: c.accent, ...alignRight },
     metaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, minHeight: 32 },
     scopeBtn: {
       flexDirection: 'row',

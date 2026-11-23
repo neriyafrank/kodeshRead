@@ -59,8 +59,21 @@ const NUMERAL_RE = /^[א-ת]{1,4}[.:]?$/;
  *   "הקדמה"             -> [{ type: '', key: 'הקדמה' }]
  *   ""                  -> []
  */
+/**
+ * Daf + amud spellings that carry the amud letter after a comma / dash / "ע" marker ("דף ב, א",
+ * "דף ב - עמוד ב", "דף ב ע א", "דף ב עמוד א.", bare "ע\"ב") -> the canonical "דף ב עמוד א" (the
+ * punctuation-based forms "דף ב." / "דף ב:" and "דף ב ע\"א" are handled below).
+ */
+const DAF_AMUD_RE = /^דף\s+([א-ת]{1,3}(?:["״'׳][א-ת])?)['׳]?(?:\s*[,\-–—]\s*|\s+)(?:(?:עמוד|עמ|ע)['׳.]?\s*)?["״]?([אב])['׳]?\s*[.:]?$/;
+function canonicalDafAmud(plain) {
+  const bare = /^ע["״]([אב])$/.exec(plain);
+  if (bare) return `עמוד ${bare[1]}`;
+  const m = DAF_AMUD_RE.exec(plain);
+  return m ? `דף ${m[1]} עמוד ${m[2]}` : plain;
+}
+
 function unitLabels(title) {
-  const plain = plainHeadingText(title);
+  const plain = canonicalDafAmud(plainHeadingText(title));
   if (!plain) return [];
   const head = plain.split(/\s[-–—]\s|[,;(]/)[0];
   const tokens = normalizeHebrew(head, { keepAmud: true, keepPunctuation: false }).split(' ').filter(Boolean);

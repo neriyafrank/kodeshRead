@@ -20,9 +20,11 @@ import { ActivityIndicator, Keyboard, Pressable, ScrollView, StyleSheet, Text, T
 import { ADVANCED_DEFAULTS, NEAR_DISTANCES, buildQuery, type ProximityMode, type SearchPlan } from '../../shared/hebrewSearch';
 import { CORPORA, type SearchRow, type SearchScope } from '../../shared/search';
 import { ResultCard } from '../components/search/ResultCard';
+import { ScopeChips } from '../components/search/ScopeChips';
+import { ScopeSheet } from '../components/search/ScopeSheet';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
 import { alignRight, inputAlignRight } from '../lib/direction';
-import { advancedDefaults, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
+import { advancedDefaults, scopeLabel, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
 
@@ -45,7 +47,9 @@ interface CurrentBook {
 }
 
 /** Corpus chips -> search scope ("book" needs an open book; several corpora are OR-ed). */
-function scopeOf(corpora: string[], book: CurrentBook | null): SearchScope {
+function scopeOf(corpora: string[], book: CurrentBook | null, picked: SearchScope): SearchScope {
+  // Books / commentaries picked in the scope picker take precedence over the corpus chips.
+  if (picked.kind === 'books') return picked;
   if (corpora.includes('book') && book) return { kind: 'book', bookId: book.bookId, title: book.title };
   const ids = corpora.filter((id) => CORPORA.some((c) => c.id === id));
   if (!ids.length) return { kind: 'all' };
@@ -64,6 +68,9 @@ export default function AdvancedSearchScreen() {
   const advanced = useSearch((x) => x.advanced);
   const setAdvanced = useSearch((x) => x.setAdvanced);
   const resetAdvanced = useSearch((x) => x.resetAdvanced);
+  const picked = useSearch((x) => x.scope);
+  const setPicked = useSearch((x) => x.setScope);
+  const [scopeOpen, setScopeOpen] = useState(false);
   const remember = useSearch((x) => x.remember);
   const openBook = useTabs((x) => x.openBook);
   const activeTab = useTabs(selectActiveTab);
@@ -85,6 +92,7 @@ export default function AdvancedSearchScreen() {
   const setProximity = (p: Partial<AdvancedState['proximity']>) => setAdvanced({ proximity: { ...advanced.proximity, ...p } });
 
   const toggleCorpus = (id: string) => {
+    if (picked.kind === 'books') setPicked({ kind: 'all' });
     if (id === 'all' || id === 'book') return setAdvanced({ corpora: [id] });
     const rest = advanced.corpora.filter((x) => x !== 'all' && x !== 'book');
     const next = rest.includes(id) ? rest.filter((x) => x !== id) : [...rest, id];
@@ -97,9 +105,9 @@ export default function AdvancedSearchScreen() {
     const plan = planOf(advanced);
     if (plan.empty) return;
     remember(advanced.fields.query || advanced.fields.anyOf);
-    setSubmitted({ plan, scope: scopeOf(corpora, book) });
+    setSubmitted({ plan, scope: scopeOf(corpora, book, picked) });
     setFormOpen(false);
-  }, [advanced, book, corpora, remember]);
+  }, [advanced, book, corpora, picked, remember]);
 
   const onReset = useCallback(() => {
     resetAdvanced();
@@ -247,7 +255,7 @@ export default function AdvancedSearchScreen() {
       <Text style={s.section}>סינון לפי מדור</Text>
       <View style={s.chips}>
         {[{ id: 'all', label: 'הכל' }, ...(book ? [{ id: 'book', label: `הספר הנוכחי${book.title ? ` · ${book.title}` : ''}` }] : []), ...CORPORA].map((k) => {
-          const on = corpora.includes(k.id);
+          const on = picked.kind !== 'books' && corpora.includes(k.id);
           return (
             <Pressable
               key={k.id}
@@ -264,6 +272,14 @@ export default function AdvancedSearchScreen() {
           );
         })}
       </View>
+
+      <Pressable onPress={() => setScopeOpen(true)} style={({ pressed }) => [s.scopeBtn, picked.kind === 'books' && s.chipOn, pressed && s.pressed]} accessibilityRole="button" testID="adv-scope-button">
+        <Text style={[s.chipText, picked.kind === 'books' && s.chipTextOn]} numberOfLines={1}>
+          {picked.kind === 'books' ? `ספרים ופרשנים: ${scopeLabel(picked)}` : 'בחירת ספרים ופרשנים…'}
+        </Text>
+        <Text style={s.chipText}>▾</Text>
+      </Pressable>
+      <ScopeChips scope={picked} onChange={setPicked} />
 
       <View style={s.actions}>
         <Pressable
@@ -307,7 +323,7 @@ export default function AdvancedSearchScreen() {
                 {summary}
               </Text>
               <Text style={s.summaryMeta} numberOfLines={1}>
-                {submitted.scope.kind === 'all' ? 'כל הספרייה' : submitted.scope.kind === 'book' ? submitted.scope.title : submitted.scope.kind === 'corpus' ? submitted.scope.name : ''}
+                {submitted.scope.kind === 'all' ? 'כל הספרייה' : submitted.scope.kind === 'book' ? submitted.scope.title : submitted.scope.kind === 'corpus' || submitted.scope.kind === 'books' ? submitted.scope.name : ''}
                 {submitted.plan.hasExpansions ? ' · כולל צורות נוספות' : ''}
               </Text>
             </View>
@@ -352,6 +368,7 @@ export default function AdvancedSearchScreen() {
           )}
         </>
       )}
+      <ScopeSheet visible={scopeOpen} scope={picked} onSelect={setPicked} onClose={() => setScopeOpen(false)} />
     </View>
   );
 }
@@ -446,6 +463,7 @@ const createStyles = (c: Palette) =>
     chips: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm },
     chip: { maxWidth: '100%', borderRadius: 999, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface, paddingHorizontal: spacing.md, paddingVertical: 6 },
     chipOn: { backgroundColor: c.accentSoft, borderColor: c.accent },
+    scopeBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm, marginTop: spacing.sm, marginBottom: spacing.sm, minHeight: 44, paddingHorizontal: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface },
     chipText: { fontSize: 14, color: c.text, ...alignRight },
     chipTextOn: { color: c.accent, fontWeight: '700' },
     actions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg },

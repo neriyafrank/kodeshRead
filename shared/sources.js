@@ -75,7 +75,7 @@ async function loadCatalog(db) {
   for (const s of sourcesOf(db)) {
     const [cats, bks] = await Promise.all([
       s.adapter.all('SELECT id, parent_id, name, path FROM categories ORDER BY id', []),
-      s.adapter.all('SELECT id, category_id, title, total_lines FROM books ORDER BY id', []),
+      s.adapter.all('SELECT id, category_id, title, aliases, total_lines FROM books ORDER BY id', []),
     ]);
     if (!bks.length) continue;
     for (const c of cats) categories.push({ ...c, source: s.name });

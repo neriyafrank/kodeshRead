@@ -275,8 +275,43 @@ function parseSearchQuery(input, opts) {
 // ---------------------------------------------------------------------------
 
 /**
- * @typedef {{ kind: 'all' } | { kind: 'category', path: string, name: string } | { kind: 'book', bookId: number, title: string }} SearchScope
+ * @typedef {{ kind: 'all' } | { kind: 'category', path: string, name: string } | { kind: 'book', bookId: number, title: string }
+ *   | { kind: 'books', ids: number[], name: string }} SearchScope
+ * `books` is the multi-select scope of the scope picker: any mix of base books and commentaries
+ * (an empty selection is `all`).
  */
+
+/** Distinct finite book ids of a `books` scope. */
+function scopeBookIds(scope) {
+  return [...new Set(((scope && scope.ids) || []).map(Number).filter((n) => Number.isFinite(n)))];
+}
+
+/**
+ * A multi-select scope from picks ([{ id, title }]); an empty selection is the whole library.
+ * `name` is the title of a single pick, else "נבחרו N ספרים".
+ */
+function booksScope(picks) {
+  const seen = new Set();
+  const list = (picks || []).filter((p) => p && !seen.has(p.id) && seen.add(p.id));
+  if (!list.length) return { kind: 'all' };
+  return { kind: 'books', ids: list.map((p) => p.id), name: list.length === 1 ? list[0].title : `נבחרו ${list.length} ספרים`, picks: list.map((p) => ({ id: p.id, title: p.title })) };
+}
+
+const IN_CHUNK = 500;
+
+/**
+ * `col IN (...)` for a set of book ids, in ONE condition (chunks of 500 are OR-ed, so the
+ * statement never needs more than the ids themselves as parameters); `0` for an empty set.
+ */
+function bookIdsCondition(col, ids) {
+  if (!ids.length) return { sql: '0', params: [] };
+  const parts = [];
+  for (let i = 0; i < ids.length; i += IN_CHUNK) {
+    const chunk = ids.slice(i, i + IN_CHUNK);
+    parts.push(`${col} IN (${chunk.map(() => '?').join(',')})`);
+  }
+  return { sql: parts.length === 1 ? parts[0] : '(' + parts.join(' OR ') + ')', params: ids };
+}
 
 /** Escape LIKE wildcards in a folder path (used with ESCAPE '\'). */
 function likeEscape(s) {
@@ -326,6 +361,10 @@ function scopeClause(scope) {
   if (scope.kind === 'category') {
     const p = String(scope.path).replace(/\/+$/, '');
     return { sql: " AND f.category_path LIKE ? ESCAPE '\\'", params: [likeEscape(p) + '/%'] };
+  }
+  if (scope.kind === 'books') {
+    const c = bookIdsCondition('f.book_id', scopeBookIds(scope));
+    return { sql: ' AND ' + c.sql, params: c.params };
   }
   return { sql: ' AND f.book_id = ?', params: [scope.bookId] };
 }
@@ -378,6 +417,10 @@ function matchSource(q, opts) {
   } else if (scope && scope.kind === 'category') {
     sql += " AND p.book_id IN (SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE c.path || '/' LIKE ? ESCAPE '\\')";
     params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
+  } else if (scope && scope.kind === 'books') {
+    const c = bookIdsCondition('p.book_id', scopeBookIds(scope));
+    sql += ' AND ' + c.sql;
+    params.push(...c.params);
   } else if (scope && scope.kind === 'corpus') {
     const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
     sql += ' AND ' + c.sql;
@@ -469,6 +512,11 @@ function scopeSources(db, scope) {
     const s = srcs.length > 1 ? sourceForId(srcs, scope.bookId) : srcs[0];
     return s ? [s] : [];
   }
+  if (scope.kind === 'books') {
+    if (srcs.length < 2) return srcs;
+    const owners = new Set(scopeBookIds(scope).map((id) => sourceForId(srcs, id)));
+    return srcs.filter((x) => owners.has(x));
+  }
   if (scope.kind !== 'category') return srcs;
   return srcs.length > 1 ? sourcesForCategory(db, scope.path) : srcs;
 }
@@ -538,6 +586,10 @@ function planSource(phase, opts) {
   } else if (scope && scope.kind === 'category') {
     sql += " AND p.book_id IN (SELECT b.id FROM books b JOIN categories c ON c.id = b.category_id WHERE c.path || '/' LIKE ? ESCAPE '\\')";
     params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
+  } else if (scope && scope.kind === 'books') {
+    const c = bookIdsCondition('p.book_id', scopeBookIds(scope));
+    sql += ' AND ' + c.sql;
+    params.push(...c.params);
   } else if (scope && scope.kind === 'corpus') {
     const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
     sql += ' AND ' + c.sql;
@@ -810,6 +862,8 @@ module.exports = {
   splitPhrases,
   parseSearchQuery,
   scopeClause,
+  bookIdsCondition,
+  booksScope,
   hasFts5,
   searchParagraphs,
   countMatches,

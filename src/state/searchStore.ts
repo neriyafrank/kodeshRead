@@ -121,7 +121,7 @@ export const useSearch = create<SearchState>()(
 );
 
 export function scopeLabel(scope: SearchScope): string {
-  if (scope.kind === 'category' || scope.kind === 'corpus') return scope.name;
+  if (scope.kind === 'category' || scope.kind === 'corpus' || scope.kind === 'books') return scope.name;
   if (scope.kind === 'book') return scope.title;
   return 'כל הספרייה';
 }

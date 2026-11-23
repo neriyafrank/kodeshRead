@@ -30,6 +30,8 @@ export interface CatalogBook {
   id: number;
   category_id: number | null;
   title: string;
+  /** '|'-separated generated aliases (shorthand, acronyms). */
+  aliases?: string;
   total_lines: number;
   source: string;
 }

@@ -109,37 +109,52 @@ try {
     step('import choice opens the manager');
 
     await page.goto(BASE + '/', { timeout: 180000 });
-    await tid('tree-cat-1').waitFor({ timeout: 180000 });
+    const secRows = page.locator('[data-testid^="tree-sec-"]');
+    await secRows.first().waitFor({ timeout: 180000 });
     assert.strictEqual(await tid('onboarding-card').count(), 0);
     step('web preview restores the sample library on reload');
 
-    // --- RTL cascading columns -------------------------------------------------------------
+    // --- Canonical catalog, RTL cascading columns --------------------------------------------
     // (Runs after the manager flow: no saved column path yet.)
-    await tid('tree-cat-1').waitFor({ timeout: 180000 });
     const box = async (id) => tid(id).boundingBox();
+    const sec = (name, scope = '') => page.locator(`${scope} [data-testid^="tree-sec-"]`, { hasText: name }).first();
+    assert.strictEqual(await tid('library-mode-base').getAttribute('aria-selected'), 'true', 'ספרי בסיס is the default view');
+    assert.strictEqual(await tid('library-mode-comm').getAttribute('aria-selected'), 'false');
+    const modes = await page.locator('[data-testid="library-mode-base"], [data-testid="library-mode-comm"]').allInnerTexts();
+    assert.deepStrictEqual(modes, ['ספרי בסיס', 'מפרשים לפי ספר']);
+    const mb = await box('library-mode-base');
+    const mc = await box('library-mode-comm');
+    assert.ok(mb.x > mc.x, 'RTL segmented toggle: ספרי בסיס on the right');
     assert.strictEqual(await tid('library-column-1').count(), 0, 'only the root column at first');
     const root0 = await box('library-column-0');
     assert.ok(root0.x + root0.width > 380, 'root column hugs the right edge');
-    await tid('tree-cat-1').click(); // תנך
+    const rootNames = (await secRows.allInnerTexts()).map((t) => t.split('\n').find((x) => /[א-ת]/.test(x)));
+    assert.deepStrictEqual(rootNames, ['תנ"ך', 'תלמוד בבלי'], 'canonical section order; empty sections hidden');
+    await sec('תנ"ך').click();
     await tid('library-column-1').waitFor();
-    assert.strictEqual(await tid('tree-cat-1').getAttribute('aria-selected'), 'true', 'active folder highlighted');
-    const sub = page.locator('[data-testid="library-column-1"] [data-testid^="tree-cat-"]').first();
+    assert.strictEqual(await sec('תנ"ך').getAttribute('aria-selected'), 'true', 'active section highlighted');
+    const sub = page.locator('[data-testid="library-column-1"] [data-testid^="tree-sec-"]').first();
     const subName = (await sub.innerText()).split('\n')[0];
+    assert.strictEqual(subName, 'תורה');
     await sub.click();
     await tid('library-column-2').waitFor();
     await page.waitForTimeout(500); // auto-scroll to the new column
+    const books2 = await page.locator('[data-testid="library-column-2"] [data-testid^="tree-book-"]').allInnerTexts();
+    assert.deepStrictEqual(books2.map((t) => t.split('\n')[0]), ['בראשית', 'במדבר'], 'Torah order (alphabetical would put במדבר first); base books only');
+    assert.strictEqual((await tid('tree-comm-1').innerText()).trim(), 'מפרשים (8)', 'compact inline pill on the row');
+    assert.strictEqual(await tid('tree-comm-2').count(), 0, 'no pill where there are no commentaries');
     const [c0, c1, c2] = [await box('library-column-0'), await box('library-column-1'), await box('library-column-2')];
     assert.ok(c2.x < c1.x && c1.x < c0.x, `columns flow right-to-left (${c0.x}, ${c1.x}, ${c2.x})`);
     assert.ok(c2.x >= -1 && c1.x + c1.width <= 401, 'new column revealed with its parent beside it');
     assert.ok(c1.width >= 400 * 0.42 && c1.width <= 400 * 0.52, `phone: ~2 columns (${c1.width}px)`);
     const crumbs = await tid('library-breadcrumb').innerText();
-    assert.ok(crumbs.includes('תנך') && crumbs.includes(subName), `breadcrumb: ${crumbs}`);
-    // Column titles and folder / book names: flush right (text-align + rendered text position).
+    assert.ok(crumbs.includes('תנ"ך') && crumbs.includes(subName), `breadcrumb: ${crumbs}`);
+    // Column titles and section / book names: flush right (text-align + rendered text position).
     const colText = await page.evaluate(() =>
       [...document.querySelectorAll('[data-testid^="library-column-"]')].flatMap((col) => {
         const cb = col.getBoundingClientRect();
         return [...col.querySelectorAll('div, span')]
-          .filter((e) => !e.children.length && /[א-ת]{2}/.test(e.innerText || '') && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 60)
+          .filter((e) => !e.children.length && !e.closest('[data-testid^="tree-comm-"]') && /[א-ת]{2}/.test(e.innerText || '') && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 60)
           .map((e) => {
             const r = document.createRange();
             r.selectNodeContents(e);
@@ -150,23 +165,114 @@ try {
     );
     assert.ok(colText.length >= 3, `column labels found (${colText.length})`);
     for (const t of colText) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft, `"${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
+    const filterAlign = await tid('library-filter').evaluate((el) => getComputedStyle(el).textAlign);
+    assert.strictEqual(filterAlign, 'right', 'the live filter is right-aligned');
     await shot('columns');
-    step(`columns open right-to-left: תנך ‹ ${subName} (${Math.round(c1.width)}px each)`);
+    step(`columns open right-to-left in canonical order: תנ"ך ‹ ${subName} ‹ בראשית, במדבר (${Math.round(c1.width)}px each)`);
 
     // A sibling at the root is one tap away (no "back"); the deeper columns are replaced.
     await page.mouse.move(200, 400);
     await page.mouse.wheel(400, 0); // reveal the root column again (it scrolled off to the right)
-    const root = page.locator('[data-testid="library-column-0"] [data-testid^="tree-cat-"]');
-    await root.nth(1).click(); // תלמוד בבלי
+    await sec('תלמוד בבלי', '[data-testid="library-column-0"]').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-2"]'));
-    assert.ok((await tid('library-column-1').innerText()).includes('תלמוד בבלי'));
+    const shas = await page.locator('[data-testid="library-column-1"] [data-testid^="tree-book-"]').allInnerTexts();
+    assert.deepStrictEqual(shas.map((t) => t.split('\n')[0]), ['שבת', 'ראש השנה', 'תענית'], 'Shas order (alphabetical would start with ראש השנה)');
     await tid('library-crumb-root').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-1"]'));
-    step('switch siblings with one tap; breadcrumb jumps back');
+    step('Bavli in Shas order; switch siblings with one tap; breadcrumb jumps back');
+
+    // --- Live filter -----------------------------------------------------------------------------
+    await tid('library-filter').fill('שבת');
+    await tid('library-results').waitFor();
+    const hit = await page.locator('[data-testid="library-results"] [data-testid^="tree-book-"]').allInnerTexts();
+    assert.deepStrictEqual(hit.map((t) => t.split('\n')[0]), ['שבת']);
+    assert.ok(hit[0].includes('תלמוד בבלי'), 'result shows its section');
+    await tid('library-filter').fill('zzzz');
+    await tid('library-filter-empty').waitFor();
+    await tid('library-filter-clear').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="library-results"]'));
+    step('live filter');
+
+    // --- מפרשים לפי ספר ------------------------------------------------------------------------------
+    await tid('library-mode-comm').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="library-mode-comm"]').getAttribute('aria-selected') === 'true');
+    const commRoot = await secRows.allInnerTexts();
+    assert.deepStrictEqual(commRoot.map((t) => t.split('\n').find((x) => /[א-ת]/.test(x))), ['תנ"ך', 'תלמוד בבלי']);
+    await sec('תנ"ך').click();
+    await sec('תורה', '[data-testid="library-column-1"]').click();
+    await tid('tree-book-1').waitFor(); // בראשית: the only base book with commentaries
+    assert.strictEqual(await tid('tree-book-2').count(), 0, 'במדבר has no commentaries: not listed');
+    await tid('tree-book-1').click();
+    await tid('tree-open-base-1').waitFor();
+    const comms = (await page.locator('[data-testid^="tree-commentary-"]').allInnerTexts()).map((t) => t.split('\n')[0]);
+    assert.strictEqual(comms.length, 8, `all commentaries together: ${comms}`);
+    const at = (n) => comms.findIndex((c) => c.includes(n));
+    assert.ok(at('אונקלוס') === 0, `אונקלוס (תרגום) first: ${comms}`);
+    assert.ok(at('רש"י') < at('רמב"ן') && at('רמב"ן') < at('אבן עזרא') && at('אבן עזרא') < at('ספורנו') && at('ספורנו') < at('דעת זקנים') && at('דעת זקנים') < at('גור אריה'), `canonical rank order: ${comms}`);
+    await shot('commentaries-by-book');
+    await tid('tree-commentary-4').click(); // רש"י על בראשית opens in the reader
+    await page.waitForURL(/\/reader/);
+    await page.goBack();
+    await tid('library-mode-comm').waitFor();
+    // Bavli: Rashi first, Tosafot second.
+    await sec('תלמוד בבלי', '[data-testid="library-column-0"]').click().catch(() => undefined);
+    await tid('library-crumb-root').click();
+    await sec('תלמוד בבלי').click();
+    await tid('tree-book-11').click();
+    await tid('tree-open-base-11').waitFor();
+    const shabbat = (await page.locator('[data-testid^="tree-commentary-"]').allInnerTexts()).map((t) => t.split('\n')[0]);
+    assert.ok(shabbat[0].includes('רש"י') && shabbat[1].includes('תוספות'), `Rashi #1 on the Bavli, then Tosafot: ${shabbat}`);
+    assert.ok((await page.locator('[data-testid^="tree-commentary-"]').first().innerText()).includes('עיקריים'), 'tier badge');
+    step('מפרשים לפי ספר: a base book lists all its commentaries together in rank order (Bavli: רש"י #1, תוספות #2)');
+
+    // Commentary filter: a commentator name finds the books it comments on.
+    await tid('library-crumb-root').click();
+    await tid('library-filter').fill('רש"י');
+    await tid('library-results').waitFor();
+    const byRashi = (await page.locator('[data-testid="library-results"] [data-testid^="tree-book-"]').allInnerTexts()).map((t) => t.split('\n')[0]);
+    assert.deepStrictEqual(byRashi, ['בראשית', 'שבת']);
+    await tid('library-filter-clear').click();
+
+    // "מפרשים (N)" pill in the base view jumps to that book's commentaries.
+    await tid('library-mode-base').click();
+    await sec('תנ"ך').click();
+    await sec('תורה', '[data-testid="library-column-1"]').click();
+    await tid('tree-comm-1').click();
+    await tid('tree-open-base-1').waitFor();
+    assert.strictEqual(await tid('library-mode-comm').getAttribute('aria-selected'), 'true');
+    assert.strictEqual(await page.locator('[data-testid^="tree-commentary-"]').count(), 8);
+    step('"מפרשים (8)" pill jumps straight to the commentaries of בראשית');
+    await tid('library-mode-base').click();
+
+    // Themes: the segmented toggle follows the palette (accent fill), RTL stays.
+    const accentOf = () => tid('library-mode-base').evaluate((el) => getComputedStyle(el).backgroundColor);
+    assert.strictEqual(await accentOf(), 'rgb(138, 90, 18)', 'בהיר');
+    for (const [theme, rgb] of [['sepia', 'rgb(139, 74, 28)'], ['dark', 'rgb(210, 174, 109)']]) {
+      await page.evaluate((t) => {
+        const k = 'kodeshread.appearance';
+        const v = JSON.parse(localStorage.getItem(k) || '{"state":{},"version":1}');
+        v.state.theme = t;
+        localStorage.setItem(k, JSON.stringify(v));
+      }, theme);
+      await page.reload();
+      await tid('library-mode-base').last().waitFor({ timeout: 60000 });
+      await page.waitForFunction((c) => getComputedStyle([...document.querySelectorAll('[data-testid="library-mode-base"]')].pop()).backgroundColor === c, rgb, { timeout: 20000 });
+      assert.strictEqual(await tid('library-filter').last().evaluate((el) => getComputedStyle(el).textAlign), 'right');
+      await shot(`library-${theme}`);
+    }
+    await page.evaluate(() => {
+      const k = 'kodeshread.appearance';
+      const v = JSON.parse(localStorage.getItem(k));
+      v.state.theme = 'light';
+      localStorage.setItem(k, JSON.stringify(v));
+    });
+    await page.reload();
+    await tid('library-mode-base').last().waitFor({ timeout: 60000 });
+    step('בהיר / ספיה / כהה themes, RTL filter');
 
     // Persisted path + open a book from a column.
-    await tid('tree-cat-1').click();
-    await page.locator('[data-testid="library-column-1"] [data-testid^="tree-cat-"]').first().click();
+    await sec('תנ"ך').last().click();
+    await page.locator('[data-testid="library-column-1"] [data-testid^="tree-sec-"]').last().first().click();
     await page.reload();
     // After a reload expo-router (web) may keep a hidden copy of the screen under the visible
     // one: always act on the top-most (last) instance.
