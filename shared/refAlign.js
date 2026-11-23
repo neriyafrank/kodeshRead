@@ -94,6 +94,26 @@ function refKeyOf(labels) {
   return labels.map(labelText).join('|');
 }
 
+/** Canonical unit type names (the values of UNIT_TYPES); two-word types first. */
+const CANONICAL_TYPES = [...new Set(UNIT_TYPES.values())].sort((a, b) => b.length - a.length);
+
+/**
+ * Inverse of refKeyOf(): "פרק א|פסוק ג" -> [{ type: 'פרק', key: 'א' }, { type: 'פסוק', key: 'ג' }].
+ * Unambiguous because unitLabels() only leaves a label untyped when its first word is not a unit
+ * word, and every canonical type is itself a unit word. Used to read book_units back.
+ */
+function labelsFromRefKey(refKey) {
+  if (!refKey) return [];
+  return String(refKey)
+    .split('|')
+    .map((seg) => {
+      for (const t of CANONICAL_TYPES) {
+        if (seg.length > t.length + 1 && seg.startsWith(t + ' ')) return { type: t, key: seg.slice(t.length + 1) };
+      }
+      return { type: '', key: seg };
+    });
+}
+
 /**
  * Canonical reference paths of TOC nodes (parents before children, i.e. in start_line order).
  * @param {{ id, parent_id, title }[]} nodes
@@ -389,6 +409,7 @@ module.exports = {
   UNIT_TYPES,
   unitLabels,
   refKeyOf,
+  labelsFromRefKey,
   refPaths,
   bookUnits,
   makeBaseIndex,

@@ -1,31 +1,38 @@
 /**
- * On-device ingestion: the same engine as scripts/build-db.js (shared/indexer.js), fed by
- * expo-file-system and written with expo-sqlite.
+ * On-device ingestion: the streaming pipeline of shared/pipeline.js (same parsing / alignment
+ * engine as scripts/build-db.js), fed by expo-file-system and written with expo-sqlite.
  *
  *  - importUserFiles / importUserFolder: personal books into user_library.db under the
- *    "הספרים שלי" folder (sub-folders preserved as categories; link files in the folder
- *    are matched against all personal books). Re-importing the same path replaces the book.
+ *    "הספרים שלי" folder (sub-folders preserved as categories). Re-importing the same path
+ *    replaces the book.
  *  - buildCoreFromFolder: builds core_library.db from an Otzaria folder (the folder that
- *    contains "אוצריא" + "links", or a books folder) into CORE_BUILD_DB, then stages it as
- *    CORE_TMP_DB for the caller's atomic swap.
+ *    contains "אוצריא", or a books folder) into CORE_BUILD_DB, then stages it as CORE_TMP_DB
+ *    for the caller's atomic swap.
  *
- * Resumable and crash-proof (large 4GB+ libraries, backgrounding, screen-off):
- *  - every run keeps a checkpoint (ingestion_state) in the target DB, committed together
- *    with the books it describes; books commit in small batches (or alone when big);
- *  - phases: books -> links -> finalize. A pause (button, or the app leaving the
- *    foreground) stops after the current book commits; an interrupted run — paused, or
- *    killed by the OS — is resumed by re-running it with `resume: true`: completed books
- *    are skipped without being read, the rest continue;
- *  - a malformed book is rolled back alone, logged to ingestion_errors and skipped;
- *  - the FTS index is filled per book and merged incrementally at the end with WAL
- *    checkpoints in between, so the WAL / memory stay bounded.
+ * Built for the full Otzaria library (7,674+ books) on a phone:
+ *  - phases scan -> books -> links -> finalize, each incremental and checkpointed in the target
+ *    DB (ingestion_state + import_queue), committed together with the rows they describe;
+ *  - scan: breadth-first, one folder per transaction into the SQLite import_queue (no array of
+ *    thousands of SAF URIs in JS); .pdf / .docx / images are counted and skipped unread;
+ *  - books: one book per transaction, text dropped right after, a short yield between books;
+ *    a malformed book is rolled back alone, logged to ingestion_errors and skipped;
+ *  - links: commentary <-> base pairing from folder paths / titles and the persisted heading
+ *    units (book_units), 20 commentaries per transaction with a committed cursor. There are no
+ *    external link files: a "links" folder next to the books is never read;
+ *  - finalize: bounded FTS5 merge steps;
+ *  - WAL + synchronous=NORMAL, 16MB page cache, PASSIVE WAL checkpoints every 150 books and
+ *    TRUNCATE between phases, so memory and the WAL stay bounded;
+ *  - an Android foreground service (src/services/importForegroundService.ts) keeps the process
+ *    alive in the background; a pause / kill resumes at the exact next folder / book / batch.
  */
 import { Directory, File } from 'expo-file-system';
 import { openDatabaseAsync, type SQLiteDatabase } from 'expo-sqlite';
 
 import * as indexer from '../../shared/indexer';
-import type { FsAdapter, IngestionError, IngestionState, LinkStats, ScannedBook, ScannedLinkFile, StopReason, TargetDb, WriterDb } from '../../shared/indexer';
-import { closeQuietly, nextFrame } from '../db/dbUtils';
+import type { IngestionError, IngestionState, StopReason, TargetDb, WriterDb } from '../../shared/indexer';
+import * as pipeline from '../../shared/pipeline';
+import type { PipelineFs, PipelinePhase, PipelineProgress } from '../../shared/pipeline';
+import { closeQuietly, yieldToUI } from '../db/dbUtils';
 import { CORE_BUILD_DB, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toWriter } from '../db/library';
 import { stopRequest, useLibraryJobs } from '../state/libraryJobs';
 
@@ -45,29 +52,52 @@ function entryName(e: Entry): string {
   return slash >= 0 ? n.slice(slash + 1) : n;
 }
 
-const deviceFs: FsAdapter<Entry> = {
-  list: async (dir) =>
-    (dir as Directory).list().map((e) => ({ name: entryName(e), isDir: e instanceof Directory, handle: e })),
+const deviceFs: PipelineFs<Entry> = {
+  list: async (dir) => (dir as Directory).list().map((e) => ({ name: entryName(e), isDir: e instanceof Directory, handle: e })),
   readText: (file) => (file as File).text(),
+  uriOf: (e) => e.uri,
+  fromUri: (uri, isDir) => (isDir ? new Directory(uri) : new File(uri)),
 };
 
-function progress(stage: string, fraction: number | null, detail: string | null = null) {
-  useLibraryJobs.getState().update({ stage, fraction, detail });
-}
+/** Hebrew label of each phase (job stage + notification title). */
+export const PHASE_LABELS: Record<PipelinePhase, string> = {
+  scan: 'סורק תיקיות…',
+  books: 'מייבא ספרייה',
+  links: 'מקשר פרשנים לפי כותרות…',
+  finalize: 'ממטב את האינדקס…',
+};
 
-function bookProgress(stage: string) {
-  return (b: indexer.BookProgress) => {
-    progress(b.skipped ? 'מדלג על ספרים שכבר הושלמו…' : stage, b.total ? b.index / b.total : null, `${b.index} / ${b.total} · ${b.title}`);
-  };
+const fmt = (n: number) => n.toLocaleString('en-US');
+
+function onProgress(p: PipelineProgress) {
+  let detail: string | null = null;
+  let fraction: number | null = null;
+  if (p.phase === 'scan') detail = `${fmt(p.current ?? 0)} תיקיות · ${fmt(p.total ?? 0)} ספרים נמצאו${p.detail ? ` · ${p.detail}` : ''}`;
+  else if (p.phase === 'finalize') detail = p.current ? `שלב ${p.current}` : null;
+  else if (p.total) {
+    fraction = (p.current ?? 0) / p.total;
+    detail = `${fmt(p.current ?? 0)} / ${fmt(p.total)}${p.detail ? ` · ${p.detail}` : ''}`;
+  }
+  useLibraryJobs.getState().update({
+    stage: PHASE_LABELS[p.phase],
+    fraction,
+    detail,
+    phase: p.phase,
+    current: p.phase === 'scan' || p.phase === 'finalize' ? null : p.current,
+    total: p.phase === 'scan' || p.phase === 'finalize' ? null : p.total,
+  });
 }
 
 export interface ImportSummary {
   books: number;
   paragraphs: number;
-  links: LinkStats | null;
-  /** Books completed by the interrupted run (resume). */
+  /** Heading-aligned commentary pairs / units written by the links phase. */
+  refLinks: { pairs: number; units: number } | null;
+  /** Non-text files (.pdf, .docx, images, ...) skipped without being read. */
+  skippedFiles: number;
+  /** Kept for the summary text: books completed by an interrupted run before this one resumed. */
   skipped: number;
-  /** Books that failed and were skipped. */
+  /** Books / folders that failed and were skipped. */
   errors: { path: string; message: string }[];
   /** Set when the run stopped early: 'pause' = resumable checkpoint kept, 'cancel' = discarded. */
   stopped: StopReason | null;
@@ -113,13 +143,11 @@ export function reopenSource(state: IngestionState): Source | null {
 
 // --- helpers --------------------------------------------------------------------------
 
-/** Finds "אוצריא" / "links" inside an Otzaria download folder; otherwise the folder itself. */
-async function resolveLayout(root: Directory): Promise<{ books: Directory; links: Directory | null }> {
+/** The books folder of an Otzaria download ("אוצריא"), otherwise the picked folder itself. */
+async function resolveBooksRoot(root: Directory): Promise<Directory> {
   const entries = await deviceFs.list(root);
-  const dirs = entries.filter((e) => e.isDir);
-  const books = dirs.find((e) => e.name === 'אוצריא' || e.name.toLowerCase() === 'otzaria')?.handle as Directory | undefined;
-  const links = dirs.find((e) => e.name.toLowerCase() === 'links')?.handle as Directory | undefined;
-  return { books: books ?? root, links: links ?? null };
+  const books = entries.find((e) => e.isDir && (e.name === 'אוצריא' || e.name.toLowerCase() === 'otzaria'));
+  return (books?.handle as Directory | undefined) ?? root;
 }
 
 async function readAliases(dir: Directory): Promise<Record<string, string[]>> {
@@ -132,23 +160,24 @@ async function readAliases(dir: Directory): Promise<Record<string, string[]>> {
   }
 }
 
-/** Keeps the WAL file small during long runs (it otherwise grows until the next checkpoint). */
-function walCheckpointer(db: SQLiteDatabase, every: number) {
-  let n = 0;
-  return async () => {
-    if (++n % every !== 0) return;
+/** Low-RAM bulk-write tuning for a database an import writes to. */
+async function tuneForImport(db: SQLiteDatabase): Promise<void> {
+  // WAL + NORMAL: every commit is durable enough to resume from after a crash / OS kill without
+  // fsync-ing every page; a 16MB page cache and in-memory temp B-trees keep memory flat and
+  // predictable; journal_size_limit caps the WAL file after each checkpoint.
+  await db.execAsync(
+    'PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -16000; PRAGMA temp_store = MEMORY; PRAGMA journal_size_limit = 67108864; PRAGMA foreign_keys = OFF;',
+  );
+}
+
+function walCheckpointer(db: SQLiteDatabase) {
+  return async (mode: 'PASSIVE' | 'TRUNCATE') => {
     try {
-      await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE);');
+      await db.execAsync(`PRAGMA wal_checkpoint(${mode});`);
     } catch (e) {
       console.warn('wal checkpoint skipped', e);
     }
   };
-}
-
-async function setPhase(w: WriterDb, phase: 'links' | 'finalize') {
-  await w.exec('BEGIN');
-  await indexer.writeIngestionState(w, { phase, status: 'in_progress' });
-  await w.exec('COMMIT');
 }
 
 /** in_progress -> paused (never revives a completed / cleared checkpoint). */
@@ -161,136 +190,63 @@ async function markPaused(w: WriterDb) {
   }
 }
 
-/** Link phase: throws IngestionStopped between files when a pause / cancel is requested. */
-async function indexLinksWithProgress(db: SQLiteDatabase, files: ScannedLinkFile<Entry>[]): Promise<LinkStats | null> {
-  if (!files.length) return null;
-  return indexer.indexLinks(toWriter(db), deviceFs, files, {
-    onFile: (f) => {
-      progress('מקשר פרשנים…', f.index / f.total, `${f.index} / ${f.total} · ${f.name}`);
-      const stop = stopRequest();
-      if (stop) throw new indexer.IngestionStopped(stop);
-    },
-    onError: (f, e) => console.warn('link file skipped', f.name, e),
-  });
-}
-
-const summaryErrors = (r: { errors: { relPath: string; message: string }[] }) => r.errors.map((e) => ({ path: e.relPath, message: e.message }));
-
-/**
- * Shared run loop for both targets: books (resumable) -> links -> finalize.
- * Returns the summary; `stopped` set when the user paused / cancelled.
- */
-async function runPhases(...args: Parameters<typeof runPhasesInner>): Promise<ImportSummary> {
-  try {
-    return await runPhasesInner(...args);
-  } catch (e) {
-    // Disk full, revoked permission, …: keep the checkpoint so the run can be resumed.
-    await markPaused(toWriter(args[0]));
-    throw e;
-  }
-}
-
-async function runPhasesInner(
+/** Runs / resumes the streaming pipeline for either target. */
+async function runPipeline(
   db: SQLiteDatabase,
   target: TargetDb,
   p: {
+    source: { kind: 'folder'; root: Entry } | { kind: 'files'; files: { name: string; handle: Entry }[] };
     sourceUri: string;
     sourceName: string;
-    sourceKind: 'folder' | 'files';
-    files: ScannedBook<Entry>[];
-    dirs?: string[][];
     idBase: number;
     categoryPrefix?: string[];
     aliasOverrides?: Record<string, string[]>;
-    linkFiles: ScannedLinkFile<Entry>[];
-    stage: string;
     resume: boolean;
-    booksPerTransaction: number;
   },
 ): Promise<ImportSummary> {
   const w = toWriter(db);
-  const prev = p.resume ? await indexer.readIngestionState(w) : null;
-  const resume = p.resume && indexer.isResumableState(prev);
-  const phase = resume ? prev!.phase : 'books';
-  const onCommit = walCheckpointer(db, target === 'core' ? 5 : 20);
-  const out: ImportSummary = { books: 0, paragraphs: 0, links: null, skipped: 0, errors: [], stopped: null };
-
-  if (phase === 'books' || !resume) {
-    const r = await indexer.indexBooks(w, deviceFs, {
-      files: p.files,
-      dirs: p.dirs,
+  const before = p.resume ? await indexer.readIngestionState(w) : null;
+  try {
+    const r = await pipeline.runImport(w, deviceFs, {
+      source: p.source,
+      sourceUri: p.sourceUri,
+      sourceName: p.sourceName,
+      targetDb: target,
       idBase: p.idBase,
       categoryPrefix: p.categoryPrefix,
       aliasOverrides: p.aliasOverrides,
-      booksPerTransaction: p.booksPerTransaction,
-      maxLinesPerTransaction: 20000,
-      ingestion: { sourceUri: p.sourceUri, sourceName: p.sourceName, sourceKind: p.sourceKind, targetDb: target, resume },
+      resume: p.resume,
       shouldStop: stopRequest,
+      onProgress,
       onError: ({ relPath, error }) => console.warn('book skipped', relPath, error),
-      onBook: bookProgress(p.stage),
-      onCommit,
-      yieldEvery: nextFrame,
+      yieldToUI: () => yieldToUI(15),
+      walCheckpoint: walCheckpointer(db),
+      checkpointEvery: 150,
+      linksPerTransaction: 20,
+      finalize: { analyze: target === 'core' },
     });
-    Object.assign(out, { books: r.books, paragraphs: r.paragraphs, skipped: r.skipped, errors: summaryErrors(r), stopped: r.stopped });
-    if (r.stopped) return out;
-    await setPhase(w, 'links');
-  } else {
-    const errs = await indexer.readIngestionErrors(w);
-    out.errors = errs.map((e) => ({ path: e.file_path, message: e.message }));
-  }
-
-  if (phase !== 'finalize') {
-    try {
-      // Heading-based commentary alignment first (idempotent per commentary book, so a resumed
-      // links phase simply redoes it), then the explicit Otzaria link files.
-      const ref = await indexer.indexRefLinks(w, {
-        booksPerTransaction: 20,
-        shouldStop: stopRequest,
-        onBook: (b) => progress('מיישר פרשנים לפי כותרות…', b.index / b.total, `${b.index} / ${b.total} · ${b.title}`),
-        onCommit,
-      });
-      if (ref.stopped) throw new indexer.IngestionStopped(ref.stopped);
-      out.links = await indexLinksWithProgress(db, p.linkFiles);
-    } catch (e) {
-      if (e instanceof indexer.IngestionStopped) {
-        await markPaused(w);
-        out.stopped = e.reason;
-        return out;
-      }
-      throw e;
-    }
-    await setPhase(w, 'finalize');
-  }
-
-  progress('ממטב את האינדקס…', null);
-  await indexer.finalizeIndex(w, {
-    analyze: target === 'core',
-    incremental: true,
-    shouldStop: stopRequest,
-    onStep: async (step) => {
-      progress('ממטב את האינדקס…', null, `שלב ${step}`);
-      await onCommit();
-      await nextFrame();
-    },
-  });
-  const stop = stopRequest();
-  if (stop) {
+    const errors = r.stopped ? (await indexer.readIngestionErrors(w, 50)).map((e) => ({ path: e.file_path, message: e.message })) : r.errors.map((e) => ({ path: e.relPath, message: e.message }));
+    return {
+      books: r.books,
+      paragraphs: r.paragraphs,
+      refLinks: r.phase === 'done' ? r.refLinks : null,
+      skippedFiles: r.skippedFiles,
+      skipped: before && indexer.isResumableState(before) ? Number(before.processed_count) || 0 : 0,
+      errors,
+      stopped: r.stopped,
+    };
+  } catch (e) {
+    // Disk full, revoked permission, …: keep the checkpoint so the run can be resumed.
     await markPaused(w);
-    out.stopped = stop;
-    return out;
+    throw e;
   }
-  return out;
 }
 
 // --- personal library --------------------------------------------------------------
 
 async function finishUser(user: SQLiteDatabase, out: ImportSummary): Promise<ImportSummary> {
-  const w = toWriter(user);
-  if (out.stopped === 'cancel') {
-    await discardUserRun(user);
-  } else if (!out.stopped) {
-    await indexer.writeIngestionState(w, { status: 'completed' });
-  }
+  if (out.stopped === 'cancel') await discardUserRun(user);
+  else if (!out.stopped) await pipeline.completeImport(toWriter(user));
   useLibraryJobs.getState().bumpCheckpoint();
   return out;
 }
@@ -298,23 +254,19 @@ async function finishUser(user: SQLiteDatabase, out: ImportSummary): Promise<Imp
 /** Imports picked .txt files into the root of "הספרים שלי". */
 export async function importUserFiles(user: SQLiteDatabase, picked: File[], opts: RunOptions = {}): Promise<ImportSummary> {
   ensureNative();
-  const files: ScannedBook<Entry>[] = picked
-    .map((f) => ({ handle: f as Entry, name: entryName(f), rel: [entryName(f)], dir: [] as string[] }))
-    .filter((f) => indexer.isBookFileName(f.name));
-  if (!files.length) throw new Error('לא נבחרו קובצי ‎.txt');
+  const files = picked.map((f) => ({ name: entryName(f), handle: f as Entry }));
+  const books = files.filter((f) => indexer.isBookFileName(f.name));
+  if (!books.length) throw new Error('לא נבחרו קובצי ‎.txt');
   const uri = filesUri(picked);
   liveSources.set(uri, { kind: 'files', files: picked });
-  const out = await runPhases(user, 'user', {
+  await tuneForImport(user);
+  const out = await runPipeline(user, 'user', {
+    source: { kind: 'files', files },
     sourceUri: uri,
-    sourceName: files.length === 1 ? files[0].name : `${files.length} קבצים`,
-    sourceKind: 'files',
-    files,
+    sourceName: books.length === 1 ? books[0].name : `${books.length} קבצים`,
     idBase: indexer.USER_ID_BASE,
     categoryPrefix: [indexer.USER_ROOT_NAME],
-    linkFiles: [],
-    stage: 'מייבא ספרים…',
     resume: !!opts.resume,
-    booksPerTransaction: 1,
   });
   return finishUser(user, out);
 }
@@ -322,27 +274,24 @@ export async function importUserFiles(user: SQLiteDatabase, picked: File[], opts
 /** Imports a folder tree (sub-folders become categories) into "הספרים שלי/<folder>". */
 export async function importUserFolder(user: SQLiteDatabase, root: Directory, opts: RunOptions = {}): Promise<ImportSummary> {
   ensureNative();
-  progress('סורק את התיקייה…', null);
-  const layout = await resolveLayout(root);
-  const tree = await indexer.scanBooks(deviceFs, layout.books as Entry);
-  if (!tree.files.length) throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
-  const linkFiles = await indexer.scanLinkFiles(deviceFs, (layout.links ?? layout.books) as Entry);
+  useLibraryJobs.getState().update({ stage: PHASE_LABELS.scan, fraction: null, detail: null, phase: 'scan' });
+  const books = await resolveBooksRoot(root);
   const uri = folderUri(root);
   liveSources.set(uri, { kind: 'folder', dir: root });
-  const out = await runPhases(user, 'user', {
+  await tuneForImport(user);
+  const out = await runPipeline(user, 'user', {
+    source: { kind: 'folder', root: books },
     sourceUri: uri,
     sourceName: entryName(root),
-    sourceKind: 'folder',
-    files: tree.files,
-    dirs: tree.dirs,
     idBase: indexer.USER_ID_BASE,
     categoryPrefix: [indexer.USER_ROOT_NAME, entryName(root)],
-    aliasOverrides: await readAliases(layout.books),
-    linkFiles,
-    stage: 'מייבא ספרים…',
+    aliasOverrides: await readAliases(books),
     resume: !!opts.resume,
-    booksPerTransaction: 1,
   });
+  if (!out.stopped && out.books === 0 && out.skipped === 0 && !out.errors.length) {
+    await finishUser(user, out);
+    throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
+  }
   return finishUser(user, out);
 }
 
@@ -357,6 +306,7 @@ export async function discardUserRun(user: SQLiteDatabase): Promise<void> {
       for (const r of rows) await indexer.deleteBook(w, r.id);
       await indexer.pruneEmptyCategories(w);
     }
+    await w.run('DELETE FROM import_queue', []);
     await indexer.clearIngestionState(w);
   });
 }
@@ -365,12 +315,7 @@ export async function discardUserRun(user: SQLiteDatabase): Promise<void> {
 
 async function openBuildDb(): Promise<SQLiteDatabase> {
   const db = await openDatabaseAsync(CORE_BUILD_DB);
-  // WAL + NORMAL: every commit is durable enough to resume from after a crash / OS kill,
-  // without fsync-ing every page. A bounded page cache and on-disk temp tables keep memory
-  // flat on multi-GB libraries (links staging can hold millions of rows).
-  await db.execAsync(
-    'PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = FILE; PRAGMA cache_size = -16000; PRAGMA journal_size_limit = 67108864; PRAGMA foreign_keys = OFF;',
-  );
+  await tuneForImport(db);
   return db;
 }
 
@@ -383,11 +328,8 @@ async function openBuildDb(): Promise<SQLiteDatabase> {
 export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}): Promise<{ version: string | null; summary: ImportSummary }> {
   ensureNative();
   if (!opts.resume) removeDbFiles(CORE_BUILD_DB);
-  progress('סורק את התיקייה…', null);
-  const layout = await resolveLayout(root);
-  const tree = await indexer.scanBooks(deviceFs, layout.books as Entry);
-  if (!tree.files.length) throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
-  const linkFiles = layout.links ? await indexer.scanLinkFiles(deviceFs, layout.links as Entry) : [];
+  useLibraryJobs.getState().update({ stage: PHASE_LABELS.scan, fraction: null, detail: null, phase: 'scan' });
+  const books = await resolveBooksRoot(root);
   const uri = folderUri(root);
   liveSources.set(uri, { kind: 'folder', dir: root });
 
@@ -395,18 +337,13 @@ export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}
   try {
     const w = toWriter(db);
     await indexer.ensureSchema(w, { kind: 'core' });
-    const summary = await runPhases(db, 'core', {
+    const summary = await runPipeline(db, 'core', {
+      source: { kind: 'folder', root: books },
       sourceUri: uri,
       sourceName: entryName(root),
-      sourceKind: 'folder',
-      files: tree.files,
-      dirs: tree.dirs,
       idBase: 0,
-      aliasOverrides: await readAliases(layout.books),
-      linkFiles,
-      stage: 'בונה ספרייה…',
+      aliasOverrides: await readAliases(books),
       resume: !!opts.resume,
-      booksPerTransaction: 10,
     });
     if (summary.stopped) {
       await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE);').catch(() => undefined);
@@ -418,6 +355,7 @@ export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}
     }
 
     const counts = await indexer.libraryCounts(w);
+    if (!counts.books) throw new Error('לא נמצאו קובצי ‎.txt בתיקייה');
     const version = `local-${Date.now().toString(36)}`;
     await w.exec('BEGIN');
     await indexer.writeMeta(w, {
@@ -432,8 +370,8 @@ export async function buildCoreFromFolder(root: Directory, opts: RunOptions = {}
       links: counts.links,
       toc_nodes: counts.tocNodes,
     });
-    await indexer.writeIngestionState(w, { status: 'completed' });
     await w.exec('COMMIT');
+    await pipeline.completeImport(w);
     // Fold the WAL into the main file so the staged library is one self-contained file.
     await db.execAsync('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;');
     await closeQuietly(db);

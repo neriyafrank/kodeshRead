@@ -2,8 +2,10 @@
  * App lifecycle around long library imports:
  *
  *  - <IngestionLifecycle/> (mounted once under the LibraryProvider) listens to AppState.
- *    When the app leaves the foreground ('background' / 'inactive') during a resumable
- *    import, it asks the job to pause: the import stops right after the current book
+ *    On Android the import runs under a foreground service (importForegroundService.ts), so
+ *    leaving the app does NOT pause it: indexing continues in the background / screen off.
+ *    Only where that service is unavailable (iOS, web, start refused), when the app leaves
+ *    the foreground ('background' / 'inactive') during a resumable import, it asks the job to pause: the import stops right after the current book
  *    commits and its checkpoint is saved as 'paused'. When the app is active again the
  *    import continues automatically (or, if it was still finishing its book, the pause is
  *    simply withdrawn). If the OS killed the app meanwhile, the checkpoint says
@@ -16,6 +18,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 
 import { useLibrary } from '../db/LibraryContext';
 import { useLibraryJobs } from '../state/libraryJobs';
+import * as importService from './importForegroundService';
 import { useLibraryActions } from './libraryActions';
 import { findInterruptedImports, reopenSource, type InterruptedImport } from './localIndexer';
 
@@ -58,7 +61,8 @@ export function IngestionLifecycle() {
       setAppState(next);
       const jobs = useLibraryJobs.getState();
       if (next === 'active') jobs.withdrawAutoPause();
-      else if (jobs.job?.resumable && !jobs.stopRequested) jobs.requestPause(true);
+      // A foreground service keeps the process (and the import) alive: no need to pause.
+      else if (jobs.job?.resumable && !jobs.stopRequested && !importService.isActive()) jobs.requestPause(true);
     });
     return () => sub.remove();
   }, []);

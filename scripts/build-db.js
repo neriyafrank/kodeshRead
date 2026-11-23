@@ -12,8 +12,11 @@
  *   --out=<path>        output DB (default assets/db/library.db; used by the web preview and
  *                       the self-tests. The APK does NOT bundle it any more: the app downloads
  *                       the release artifact, or indexes books on the device.)
- *   --links=<dir>       links folder (default raw_links/<source>/, i.e. raw_links/sample
- *                       or raw_links/full; none for a custom --source folder)
+ *   --links=<dir>       LEGACY explicit link files (CSV / Otzaria JSON). The real library has
+ *                       none: commentaries are linked from folder paths, file names and
+ *                       headings (book_units -> ref_links). Default: raw_links/sample for
+ *                       --source=sample only (a regression fixture for the `links` table);
+ *                       none for full / custom folders, so no link I/O happens at all.
  *   --release[=<dir>]   also write <dir>/core_library.db.gz and <dir>/manifest.json
  *                       (default dir: dist/). Upload both files to a GitHub Release.
  *   --release-url=<url> absolute download URL of the .gz to put in the manifest (optional;
@@ -63,8 +66,8 @@ function parseArgs(argv) {
   }
   const named = ['sample', 'full'].includes(args.source);
   args.sourceDir = named ? path.join(ROOT, 'raw_library', args.source) : path.resolve(args.source);
-  // Links are kept per source so sample line numbers never leak into a full build.
-  if (args.links === undefined) args.links = named ? path.join(ROOT, 'raw_links', args.source) : null;
+  // Explicit link files are a legacy input kept only for the sample fixture.
+  if (args.links === undefined) args.links = args.source === 'sample' ? path.join(ROOT, 'raw_links', 'sample') : null;
   return args;
 }
 
@@ -132,7 +135,7 @@ function loadAliasOverrides(sourceDir) {
 const MAX_LISTED_UNMATCHED = 40;
 
 function reportLinks(stats, linksDir) {
-  if (!linksDir) console.log('[build-db] links: no links folder for this source');
+  if (!linksDir) console.log('[build-db] links: path + heading alignment only (no link files)');
   else if (!fs.existsSync(linksDir)) console.log(`[build-db] links: ${path.relative(ROOT, linksDir) || linksDir} not found, building without commentaries`);
   else {
     console.log(`[build-db] links: ${stats.files} file(s), ${stats.parsed} parsed, ${stats.kept} stored (${stats.duplicates} duplicate/reverse, ${stats.outOfRange} pointing at missing lines, ${stats.invalid} malformed)`);
@@ -235,7 +238,7 @@ async function main() {
 
   const overrides = loadAliasOverrides(args.sourceDir);
   const hash = crypto.createHash('sha1').update(`v${SCHEMA_VERSION}|${args.source}|`);
-  for (const f of ['shared/hebrew.js', 'shared/indexer.js']) hash.update(fs.readFileSync(path.join(ROOT, f)));
+  for (const f of ['shared/hebrew.js', 'shared/indexer.js', 'shared/refAlign.js', 'shared/pairing.js']) hash.update(fs.readFileSync(path.join(ROOT, f)));
   hash.update(fs.readFileSync(__filename));
   hash.update(JSON.stringify(overrides));
 
@@ -250,8 +253,7 @@ async function main() {
     onBook: (b) => console.log(`[build-db] ${b.relPath}: ${b.lines} lines, ${b.tocNodes} TOC nodes`),
   });
 
-  // Links: staged, then de-duplicated (Otzaria stores both directions, one per book's
-  // file) and validated against real paragraph lines in SQL.
+  // Legacy explicit links: staged, de-duplicated and validated against real paragraph lines.
   const linkFiles = args.links && fs.existsSync(args.links) ? await indexer.scanLinkFiles(nodeFs, args.links) : [];
   const linkStats = await indexer.indexLinks(db, nodeFs, linkFiles, {
     onFileRead: (f, text) => hash.update(f.rel.join('/')).update(text),
@@ -280,6 +282,8 @@ async function main() {
     links: counts.links,
     toc_nodes: counts.tocNodes,
   });
+  // book_units / import_queue only serve ingestion: the downloadable release ships without them.
+  if (args.release) raw.exec('DELETE FROM book_units; DELETE FROM import_queue;');
   raw.exec('PRAGMA optimize; VACUUM;');
   raw.close();
 

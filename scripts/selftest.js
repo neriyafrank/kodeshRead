@@ -13,6 +13,10 @@
  * 5. Resumable ingestion: pause / resume checkpoints (ingestion_state), crash recovery,
  *    per-book error isolation (ingestion_errors), non-text file filtering, schema migration,
  *    incremental FTS merge, FTS query sanitization fuzzing and reader hit marking.
+ * 6. Streaming pipeline (schema v6): SQLite import_queue scan -> one-book transactions ->
+ *    book_units links -> finalize, surviving pauses and kills at any statement (mid-scan,
+ *    mid-book, mid-link) with zero duplicates; pure path + book_units alignment over real pairs
+ *    from every corpus of otzaria_index_only.txt; the Android foreground-service plugin.
  */
 'use strict';
 
@@ -21,6 +25,7 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const assert = require('assert');
+const crypto = require('crypto');
 const { normalizeHebrew, extractRefKey, generateBookAliases } = require('../shared/hebrew');
 const { loadBookIndex, resolveReference } = require('../shared/quickJump');
 const reader = require('../shared/reader');
@@ -667,6 +672,10 @@ async function main() {
   await refAlignTests();
   await otzariaSampleTests();
   await otzariaIndexTests();
+  // 6. Schema v6 streaming pipeline (import_queue, book_units) + the Android foreground service.
+  await streamingPipelineTests();
+  await otzariaIndexPipelineTests();
+  await foregroundServicePluginTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -1234,31 +1243,7 @@ async function otzariaIndexTests() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodeshread-otzindex-'));
   try {
     const lib = path.join(tmp, 'אוצריא');
-    const w = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(lib, rel + '.txt')), { recursive: true }); fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n')); };
-    // Tanach: chapters with inline "(א)" verses; Rashi / Ramban with verse headings, several דיבורים each.
-    w('תנך/תורה/בראשית', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '(א) בראשית ברא', '(ב) והארץ היתה', '(ג) ויאמר אלהים', '<h2>פרק ב</h2>', '(א) ויכלו']);
-    w('תנך/ראשונים/רשי/תורה/רשי על בראשית', ['<h1>רשי על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית. רשי א1', 'ברא. רשי א2', '<h3>פסוק ג</h3>', 'ויאמר. רשי ג1', '<h2>פרק ב</h2>', '<h3>פסוק א</h3>', 'ויכלו. רשי ב-א']);
-    w('תנך/ראשונים/רמבן/תורה/רמבן על בראשית', ['<h1>רמבן על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית ברא. רמבן א1', 'אלהים. רמבן א2', 'השמים. רמבן א3', '<h3>פסוק ב</h3>', 'תהו. רמבן ב1']);
-    // Bavli + Tosafot (daf / amud) + Rashi; Mishnah with inline mishnayot + Bartenura.
-    w('תלמוד בבלי/סדר זרעים/ברכות', ['<h1>ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי קורין', 'גמרא', '<h2>דף ב:</h2>', 'תנו רבנן']);
-    w('תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי. תוס 1', 'קורין. תוס 2', '<h2>דף ב:</h2>', 'תנו רבנן. תוס 3']);
-    w('משנה/סדר זרעים/משנה ברכות', ['<h1>משנה ברכות</h1>', '<h2>פרק א</h2>', '(א) מאימתי קורין', '(ב) מאימתי קורין בשחרית']);
-    w('משנה/ראשונים/ברטנורא/סדר זרעים/ברטנורא על משנה ברכות', ['<h1>ברטנורא על משנה ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'מאימתי. ברט א1', 'עד סוף. ברט א2', '<h3>משנה ב</h3>', 'בשחרית. ברט ב1']);
-    w('תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי ברכות', ['<h1>תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'ירושלמי א', '<h3>הלכה ב</h3>', 'ירושלמי ב']);
-    w('תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי/סדר זרעים/פני משה על תלמוד ירושלמי ברכות', ['<h1>פני משה על תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה ב</h3>', 'פני משה ב1', 'פני משה ב2']);
-    // Rambam: chapters with inline halachot; מגיד משנה numbers its דיבורים like the Rambam.
-    w('הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת', ['<h1>משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה ממלאכה', '(ב) כל מקום', '(ג) העושה']);
-    w('הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים/מגיד משנה על משנה תורה, הלכות שבת', ['<h1>מגיד משנה על משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה. מגיד א1', 'עוד שם. מגיד א2', '(ג) העושה. מגיד ג1']);
-    // Shulchan Aruch with inline seifim; משנה ברורה numbers seifim katanim (another sequence).
-    w('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', ['<h1>שולחן ערוך, אורח חיים</h1>', '<h2>סימן א</h2>', '(א) יתגבר כארי', '(ב) המשכים', '<h2>סימן ב</h2>', '(א) לא ילבש']);
-    w('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה', ['<h1>משנה ברורה</h1>', '<h2>סימן א</h2>', '(א) יתגבר. מב סק א', '(ב) כארי. מב סק ב', '(ג) לעבודת. מב סק ג', '<h2>סימן ב</h2>', '(א) לא ילבש. מב ב-א']);
-    // A corpus-wide commentary: one file, a top-level heading per tractate.
-    w('תלמוד בבלי/אחרונים/חידושי מהראל על השס', ['<h1>חידושי מהראל על השס</h1>', '<h2>מסכת ברכות</h2>', '<h3>דף ב:</h3>', 'מהראל ברכות ב:', '<h2>מסכת שבת</h2>', '<h3>דף ב.</h3>', 'מהראל שבת']);
-    // Commentary on a commentary (2-level chain).
-    w('תלמוד בבלי/מחברי זמננו/ביאור חברותא/חברותא על ברכות', ['<h1>חברותא על ברכות</h1>', '<h2>דף ב.</h2>', 'חברותא 1', '<h2>דף ב:</h2>', 'חברותא 2']);
-    w('תלמוד בבלי/מחברי זמננו/הערות על ביאור חברותא/הערות על חברותא על ברכות', ['<h1>הערות על חברותא על ברכות</h1>', '<h2>דף ב:</h2>', 'הערה על חברותא']);
-    // Non-text files Otzaria folders also contain (pdf / docx) are skipped by the indexer.
-    fs.writeFileSync(path.join(lib, 'הלכה', 'מבוא.pdf'), '%PDF');
+    writeOtzariaFixture(lib);
 
     const out = path.join(tmp, 'otz.db');
     const proc = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${lib}`, `--out=${out}`], { encoding: 'utf8' });
@@ -1318,6 +1303,35 @@ async function otzariaIndexTests() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** Base books + commentaries at real Otzaria paths (no link files): all corpora and naming forms. */
+function writeOtzariaFixture(lib) {
+  const w = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(lib, rel + '.txt')), { recursive: true }); fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n')); };
+  // Tanach: chapters with inline "(א)" verses; Rashi / Ramban with verse headings, several דיבורים each.
+  w('תנך/תורה/בראשית', ['<h1>בראשית</h1>', '<h2>פרק א</h2>', '(א) בראשית ברא', '(ב) והארץ היתה', '(ג) ויאמר אלהים', '<h2>פרק ב</h2>', '(א) ויכלו']);
+  w('תנך/ראשונים/רשי/תורה/רשי על בראשית', ['<h1>רשי על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית. רשי א1', 'ברא. רשי א2', '<h3>פסוק ג</h3>', 'ויאמר. רשי ג1', '<h2>פרק ב</h2>', '<h3>פסוק א</h3>', 'ויכלו. רשי ב-א']);
+  w('תנך/ראשונים/רמבן/תורה/רמבן על בראשית', ['<h1>רמבן על בראשית</h1>', '<h2>פרק א</h2>', '<h3>פסוק א</h3>', 'בראשית ברא. רמבן א1', 'אלהים. רמבן א2', 'השמים. רמבן א3', '<h3>פסוק ב</h3>', 'תהו. רמבן ב1']);
+  // Bavli + Tosafot (daf / amud) + Rashi; Mishnah with inline mishnayot + Bartenura.
+  w('תלמוד בבלי/סדר זרעים/ברכות', ['<h1>ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי קורין', 'גמרא', '<h2>דף ב:</h2>', 'תנו רבנן']);
+  w('תלמוד בבלי/ראשונים/תוספות/סדר זרעים/תוספות על ברכות', ['<h1>תוספות על ברכות</h1>', '<h2>דף ב.</h2>', 'מאימתי. תוס 1', 'קורין. תוס 2', '<h2>דף ב:</h2>', 'תנו רבנן. תוס 3']);
+  w('משנה/סדר זרעים/משנה ברכות', ['<h1>משנה ברכות</h1>', '<h2>פרק א</h2>', '(א) מאימתי קורין', '(ב) מאימתי קורין בשחרית']);
+  w('משנה/ראשונים/ברטנורא/סדר זרעים/ברטנורא על משנה ברכות', ['<h1>ברטנורא על משנה ברכות</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'מאימתי. ברט א1', 'עד סוף. ברט א2', '<h3>משנה ב</h3>', 'בשחרית. ברט ב1']);
+  w('תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי ברכות', ['<h1>תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'ירושלמי א', '<h3>הלכה ב</h3>', 'ירושלמי ב']);
+  w('תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי/סדר זרעים/פני משה על תלמוד ירושלמי ברכות', ['<h1>פני משה על תלמוד ירושלמי ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה ב</h3>', 'פני משה ב1', 'פני משה ב2']);
+  // Rambam: chapters with inline halachot; מגיד משנה numbers its דיבורים like the Rambam.
+  w('הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת', ['<h1>משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה ממלאכה', '(ב) כל מקום', '(ג) העושה']);
+  w('הלכה/משנה תורה/מפרשים/מגיד משנה/ספר זמנים/מגיד משנה על משנה תורה, הלכות שבת', ['<h1>מגיד משנה על משנה תורה, הלכות שבת</h1>', '<h2>פרק א</h2>', '(א) שביתה. מגיד א1', 'עוד שם. מגיד א2', '(ג) העושה. מגיד ג1']);
+  // Shulchan Aruch with inline seifim; משנה ברורה numbers seifim katanim (another sequence).
+  w('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', ['<h1>שולחן ערוך, אורח חיים</h1>', '<h2>סימן א</h2>', '(א) יתגבר כארי', '(ב) המשכים', '<h2>סימן ב</h2>', '(א) לא ילבש']);
+  w('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה', ['<h1>משנה ברורה</h1>', '<h2>סימן א</h2>', '(א) יתגבר. מב סק א', '(ב) כארי. מב סק ב', '(ג) לעבודת. מב סק ג', '<h2>סימן ב</h2>', '(א) לא ילבש. מב ב-א']);
+  // A corpus-wide commentary: one file, a top-level heading per tractate.
+  w('תלמוד בבלי/אחרונים/חידושי מהראל על השס', ['<h1>חידושי מהראל על השס</h1>', '<h2>מסכת ברכות</h2>', '<h3>דף ב:</h3>', 'מהראל ברכות ב:', '<h2>מסכת שבת</h2>', '<h3>דף ב.</h3>', 'מהראל שבת']);
+  // Commentary on a commentary (2-level chain).
+  w('תלמוד בבלי/מחברי זמננו/ביאור חברותא/חברותא על ברכות', ['<h1>חברותא על ברכות</h1>', '<h2>דף ב.</h2>', 'חברותא 1', '<h2>דף ב:</h2>', 'חברותא 2']);
+  w('תלמוד בבלי/מחברי זמננו/הערות על ביאור חברותא/הערות על חברותא על ברכות', ['<h1>הערות על חברותא על ברכות</h1>', '<h2>דף ב:</h2>', 'הערה על חברותא']);
+  // Non-text files Otzaria folders also contain (pdf / docx) are skipped by the indexer.
+  fs.writeFileSync(path.join(lib, 'הלכה', 'מבוא.pdf'), '%PDF');
 }
 
 /** Synthetic library for the resumable-ingestion tests: `n` books in two folders + junk files. */
@@ -1788,6 +1802,440 @@ async function releaseTests() {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Streaming pipeline (schema v6): import_queue scan, one-book transactions, book_units links.
+// ---------------------------------------------------------------------------------------------
+
+/** Writable node:sqlite DB in WAL mode (like the device) + a reopen for crash simulation. */
+function openWal(file) {
+  const db = openWritable(file);
+  db.raw.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -16000; PRAGMA temp_store = MEMORY;');
+  return db;
+}
+
+/**
+ * Writer adapter that "kills the process" at its `killAt`-th statement: that statement and every
+ * later one throw, like an OS kill mid-transaction. The caller then closes the connection (an
+ * open transaction is rolled back, as after a real crash) and reopens the file.
+ */
+function killable(w, killAt, log) {
+  let n = 0;
+  let dead = false;
+  const guard = (fn) => async (sql, params) => {
+    if (dead) throw new Error('process is dead');
+    n++;
+    if (log) log.push(String(sql).trim().replace(/\s+/g, ' ').slice(0, 80));
+    if (n === killAt) {
+      dead = true;
+      throw Object.assign(new Error(`killed at statement ${n}`), { killed: true });
+    }
+    return fn(sql, params);
+  };
+  return { exec: guard(w.exec), run: guard(w.run), all: guard(w.all), get count() { return n; } };
+}
+
+/** Node fs adapter that records every list / read (to prove what was never touched). */
+function tracingFs() {
+  const t = { lists: [], reads: [] };
+  t.fsa = {
+    list: async (dir) => (t.lists.push(dir), nodeFs.list(dir)),
+    readText: async (f) => (t.reads.push(f), nodeFs.readText(f)),
+    uriOf: (h) => h,
+    fromUri: (u) => u,
+  };
+  return t;
+}
+
+/** Full content snapshot of a library: identical snapshots == identical libraries. */
+async function librarySnapshot(read) {
+  const all = (sql) => read.all(sql, []);
+  const n = async (sql) => Number((await all(sql))[0].n);
+  return {
+    books: (await all('SELECT b.id, b.file_path, b.title, b.total_lines, b.is_complete, c.path AS cat FROM books b LEFT JOIN categories c ON c.id = b.category_id ORDER BY b.id')).map((r) => Object.values(r).join('|')),
+    categories: (await all('SELECT id, parent_id, path FROM categories ORDER BY id')).map((r) => Object.values(r).join('|')),
+    paragraphs: await n('SELECT COUNT(*) AS n FROM paragraphs'),
+    paragraphHash: crypto.createHash('sha1').update(JSON.stringify(await all('SELECT book_id, line_index, toc_path, display_text, is_heading FROM paragraphs ORDER BY book_id, line_index'))).digest('hex'),
+    toc: await n('SELECT COUNT(*) AS n FROM toc_nodes'),
+    units: (await all('SELECT book_id, ref_key, depth, start_line, end_line, own_end, heading_label FROM book_units ORDER BY book_id, start_line')).map((r) => Object.values(r).join('|')),
+    fts: await n(`SELECT COUNT(*) AS n FROM paragraphs_fts WHERE paragraphs_fts MATCH '"פרק" OR "דף" OR "סימן" OR "שבת"'`),
+    ftsRows: await n('SELECT COUNT(*) AS n FROM paragraphs_fts'),
+    refLinks: (await all('SELECT base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type FROM ref_links ORDER BY comm_book_id, comm_start, base_book_id, base_start')).map((r) => Object.values(r).join('|')),
+  };
+}
+
+/** The real-path Otzaria fixture plus the noise a real download folder contains. */
+function makePipelineFixture() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-pipeline-'));
+  const lib = path.join(tmp, 'אוצריא');
+  writeOtzariaFixture(lib); // also writes הלכה/מבוא.pdf
+  fs.writeFileSync(path.join(lib, 'תנך', 'scan.docx'), 'PK\u0003\u0004');
+  fs.writeFileSync(path.join(lib, 'תלמוד בבלי', 'cover.jpg'), 'ÿØÿ');
+  // A binary file named .txt (malformed): isolated, logged, skipped.
+  fs.writeFileSync(path.join(lib, 'תנך', 'פגום.txt'), Buffer.from([0x3c, 0x68, 0x31, 0x3e, 0, 0, 0, 1, 2, 3]));
+  // Otzaria's external link files: must never be listed or read.
+  fs.mkdirSync(path.join(lib, 'links'), { recursive: true });
+  fs.writeFileSync(path.join(lib, 'links', 'רשי על בראשית_links.json'), '[{"line_index_1":3,"path_2":"בראשית.txt","line_index_2":3}]');
+  // A per-folder order override.
+  fs.writeFileSync(path.join(lib, 'תלמוד בבלי', 'order.json'), JSON.stringify(['אחרונים', 'סדר זרעים']));
+  return { tmp, lib, nonText: 3 };
+}
+
+async function streamingPipelineTests() {
+  const pipeline = require('../shared/pipeline');
+  const fx = makePipelineFixture();
+  const work = path.join(fx.tmp, 'dbs');
+  fs.mkdirSync(work);
+  const opts = (extra) => Object.assign({ source: { kind: 'folder', root: fx.lib }, sourceUri: 'file://' + fx.lib, sourceName: 'אוצריא', targetDb: 'core', idBase: 0, yieldToUI: () => Promise.resolve() }, extra);
+  const fresh = async (name) => {
+    const db = openWal(path.join(work, name));
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    return db;
+  };
+  try {
+    // Reference: the array-based PC path (scanBooks + indexBooks + indexRefLinks), errors isolated.
+    const ref = await fresh('ref.db');
+    const tree = await indexer.scanBooks(nodeFs, fx.lib);
+    tree.files = tree.files.filter((f) => !f.rel.includes('links'));
+    tree.dirs = tree.dirs.filter((d) => d[0] !== 'links');
+    await indexer.indexBooks(ref.w, nodeFs, { files: tree.files, dirs: tree.dirs, booksPerTransaction: 1000, onError: () => undefined });
+    await indexer.indexRefLinks(ref.w, {});
+    await indexer.finalizeIndex(ref.w, {});
+    const refSnap = await librarySnapshot(ref.read);
+    fx.booksCount = tree.files.length - 1; // minus the binary .txt
+
+    let full;
+    await check('pipeline: scan -> books -> links -> finalize == the array-based build (ids, tree order, text, FTS, units, links)', async () => {
+      const db = await fresh('full.db');
+      const t = tracingFs();
+      const phases = new Set();
+      full = await pipeline.runImport(db.w, t.fsa, opts({ onProgress: (p) => phases.add(p.phase) }));
+      assert.strictEqual(full.stopped, null);
+      assert.strictEqual(full.phase, 'done');
+      assert.deepStrictEqual([...phases], ['scan', 'books', 'links', 'finalize']);
+      await pipeline.completeImport(db.w);
+      assert.deepStrictEqual(await librarySnapshot(db.read), refSnap);
+      assert.strictEqual(full.books, fx.booksCount);
+      assert.strictEqual(full.skippedFiles, fx.nonText, '.pdf / .docx / .jpg counted and skipped');
+      assert.strictEqual(full.failed, 1, 'the binary .txt is isolated');
+      assert.ok(/binary/.test(full.errors[0].message) && full.errors[0].relPath.endsWith('פגום.txt'));
+      assert.ok(full.refLinks.pairs >= 10 && full.refLinks.units === refSnap.refLinks.length);
+      // Zero link-file I/O and no non-text reads; every book read exactly once.
+      assert.ok(!t.lists.some((d) => d.split(path.sep).includes('links')), 'links/ folder never listed');
+      assert.ok(!t.reads.some((f) => /links|\.(pdf|docx|jpg)$/.test(f)), 'no link / non-text file read');
+      const bookReads = t.reads.filter((f) => f.endsWith('.txt'));
+      assert.strictEqual(bookReads.length, new Set(bookReads).size, 'no book read twice');
+      assert.strictEqual(bookReads.length, fx.booksCount + 1);
+      const st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(st.status, 'completed');
+      assert.strictEqual(Number(st.processed_count), fx.booksCount + 1);
+      assert.strictEqual(Number(st.links_done), Number(st.links_total));
+      assert.strictEqual(Number(one && (await db.read.all('SELECT COUNT(*) AS n FROM import_queue'))[0].n), 0, 'queue emptied');
+      assert.strictEqual(Number((await db.read.all('SELECT COUNT(*) AS n FROM links'))[0].n), 0, 'no explicit links table rows');
+      await db.read.all("INSERT INTO paragraphs_fts(paragraphs_fts, rank) VALUES('integrity-check', 1)");
+      db.raw.close();
+    });
+
+    await check('pipeline: import_queue is filled breadth-first, one folder per transaction', async () => {
+      const db = await fresh('bfs.db');
+      const log = [];
+      let commitsAtScan = 0;
+      const w = { ...db.w, exec: async (sql) => ((sql === 'COMMIT' && log.length === 0 && commitsAtScan++), db.w.exec(sql)) };
+      let scanned = 0;
+      const r = await pipeline.runImport(w, nodeFs, opts({ onProgress: (p) => p.phase === 'scan' && scanned++, shouldStop: () => (scanned >= 3 ? 'pause' : null) }));
+      assert.strictEqual(r.stopped, 'pause');
+      const st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(st.phase, 'scan');
+      assert.strictEqual(Number(st.scanned_dirs), 3);
+      const dirs = await db.read.all("SELECT rel, status FROM import_queue WHERE kind = 'dir' ORDER BY id");
+      assert.deepStrictEqual(dirs.slice(0, 3).map((d) => d.status), ['done', 'done', 'done']);
+      assert.ok(dirs.slice(3).every((d) => d.status === 'pending'));
+      // BFS: every depth-1 folder is queued before any depth-2 folder.
+      const depths = dirs.map((d) => (d.rel ? d.rel.split('/').length : 0));
+      assert.deepStrictEqual(depths.slice(0, 7), [...depths.slice(0, 7)].sort((a, b) => a - b));
+      assert.ok(!dirs.some((d) => d.rel === 'links'));
+      assert.ok(commitsAtScan >= 4, `one commit per folder (${commitsAtScan})`);
+      db.raw.close();
+    });
+
+    await check('pipeline: pause in every phase, resume converges to the same library', async () => {
+      for (const phase of ['scan', 'books', 'links', 'finalize']) {
+        const db = await fresh(`pause-${phase}.db`);
+        let seen = 0;
+        const r1 = await pipeline.runImport(db.w, nodeFs, opts({ finalize: { mergePages: 2 }, onProgress: (p) => p.phase === phase && seen++, shouldStop: () => (seen >= 2 ? 'pause' : null) }));
+        assert.strictEqual(r1.stopped, 'pause', phase);
+        const st = await indexer.readIngestionState(db.read);
+        assert.strictEqual(st.status, 'paused');
+        assert.strictEqual(st.phase, phase, `paused in ${phase}`);
+        const r2 = await pipeline.runImport(db.w, nodeFs, opts({ resume: true, finalize: { mergePages: 2 } }));
+        assert.strictEqual(r2.stopped, null);
+        await pipeline.completeImport(db.w);
+        assert.deepStrictEqual(await librarySnapshot(db.read), refSnap, `after a pause in ${phase}`);
+        db.raw.close();
+      }
+    });
+
+    await check('pipeline: repeated pauses (every 3 steps) still converge with zero duplicates', async () => {
+      const db = await fresh('pause-many.db');
+      let runs = 0;
+      for (;;) {
+        let steps = 0;
+        const r = await pipeline.runImport(db.w, nodeFs, opts({ resume: runs > 0, onProgress: () => steps++, shouldStop: () => (steps >= 3 ? 'pause' : null) }));
+        runs++;
+        if (!r.stopped) break;
+        assert.ok(runs < 200, 'no progress');
+      }
+      await pipeline.completeImport(db.w);
+      assert.ok(runs > 10, `${runs} runs`);
+      assert.deepStrictEqual(await librarySnapshot(db.read), refSnap);
+      db.raw.close();
+    });
+
+    // --- crash (kill) at any statement ------------------------------------------------------
+    const probe = await fresh('probe.db');
+    const log = [];
+    const counting = killable(probe.w, Infinity, log);
+    await pipeline.runImport(counting, nodeFs, opts());
+    await pipeline.completeImport(probe.w);
+    probe.raw.close();
+    const total = counting.count;
+    const firstIdx = (re, from) => log.findIndex((s, i) => i >= (from || 0) && re.test(s)) + 1;
+    const booksStart = firstIdx(/^INSERT INTO books/);
+    const linksStart = firstIdx(/^DELETE FROM ref_links/);
+    const named = {
+      'mid-scan (queue insert)': firstIdx(/^INSERT OR IGNORE INTO import_queue/) + 1,
+      'mid-scan (2nd folder)': firstIdx(/^INSERT OR IGNORE INTO import_queue/, firstIdx(/^INSERT OR IGNORE INTO import_queue/) + 1),
+      'mid-book (paragraphs)': firstIdx(/^INSERT INTO paragraphs \(/, booksStart + 30),
+      'mid-book (book_units)': firstIdx(/^INSERT INTO book_units/, booksStart + 60),
+      'mid-book (FTS)': firstIdx(/^INSERT INTO paragraphs_fts\(rowid/, booksStart + 90),
+      'mid-book (queue done)': firstIdx(/^UPDATE import_queue SET status = 'done', book_id/, booksStart + 120),
+      'mid-link (delete)': linksStart,
+      'mid-link (insert)': firstIdx(/^INSERT INTO ref_links/, linksStart + 5),
+      'mid-link (cursor)': firstIdx(/^UPDATE ingestion_state SET links_done/),
+      'mid-finalize (merge)': firstIdx(/^INSERT INTO paragraphs_fts\(paragraphs_fts, rank\)/),
+    };
+    for (const [k, v] of Object.entries(named)) assert.ok(v > 0, `no statement for ${k}`);
+
+    const crashAndResume = async (name, killAt) => {
+      const file = path.join(work, name);
+      let db = await fresh(name);
+      const t = tracingFs();
+      const w = killable(db.w, killAt);
+      let err = null;
+      try {
+        await pipeline.runImport(w, t.fsa, opts());
+      } catch (e) {
+        err = e;
+      }
+      assert.ok(err && (err.killed || /dead/.test(err.message)), `${name}: expected a kill at ${killAt}, got ${err && err.message}`);
+      db.raw.close(); // the OS took the process: the open transaction is gone
+      db = openWal(file);
+      await indexer.ensureSchema(db.w, { kind: 'core' });
+      const st = await indexer.readIngestionState(db.read);
+      const r = await pipeline.runImport(db.w, t.fsa, opts({ resume: !!st }));
+      assert.strictEqual(r.stopped, null);
+      await pipeline.completeImport(db.w);
+      const snap = await librarySnapshot(db.read);
+      const dupes = await db.read.all('SELECT file_path FROM books GROUP BY file_path HAVING COUNT(*) > 1');
+      db.raw.close();
+      // At most the one book in flight is read twice (zero wasted work otherwise).
+      const reads = t.reads.filter((f) => f.endsWith('.txt'));
+      return { snap, dupes, rereads: reads.length - new Set(reads).size };
+    };
+
+    await check('pipeline: killed mid-scan / mid-book / mid-link / mid-finalize, resume == uninterrupted', async () => {
+      for (const [label, at] of Object.entries(named)) {
+        const r = await crashAndResume(`kill-${at}.db`, at);
+        assert.deepStrictEqual(r.dupes, [], `${label}: duplicate books`);
+        assert.ok(r.rereads <= 1, `${label}: ${r.rereads} books re-read`);
+        assert.deepStrictEqual(r.snap, refSnap, `${label} (statement ${at})`);
+      }
+    });
+
+    await check(`pipeline: kill at every 9th statement of ${total} converges (stress)`, async () => {
+      let n = 0;
+      for (let at = 1; at <= total; at += 9) {
+        const r = await crashAndResume(`stress-${at}.db`, at);
+        assert.deepStrictEqual(r.dupes, [], `statement ${at} (${log[at - 1]}): duplicates`);
+        assert.deepStrictEqual(r.snap, refSnap, `statement ${at} (${log[at - 1]})`);
+        fs.rmSync(path.join(work, `stress-${at}.db`), { force: true });
+        for (const s of ['-wal', '-shm']) fs.rmSync(path.join(work, `stress-${at}.db${s}`), { force: true });
+        n++;
+      }
+      console.log(`  pipeline crash/resume: ${n} kill points over ${total} statements, all identical to the uninterrupted build`);
+    });
+
+    await check('pipeline: personal files source (idBase, prefix) + re-import replaces, never duplicates', async () => {
+      const db = openWal(path.join(work, 'user.db'));
+      await indexer.ensureSchema(db.w, { kind: 'user' });
+      const files = ['תנך/תורה/בראשית.txt', 'תנך/ראשונים/רשי/תורה/רשי על בראשית.txt', 'הלכה/מבוא.pdf'].map((r) => ({ name: path.basename(r), handle: path.join(fx.lib, r) }));
+      const run = () => pipeline.runImport(db.w, nodeFs, { source: { kind: 'files', files }, sourceUri: 'files', targetDb: 'user', idBase: indexer.USER_ID_BASE, categoryPrefix: [indexer.USER_ROOT_NAME], yieldToUI: () => Promise.resolve() });
+      const r1 = await run();
+      await pipeline.completeImport(db.w);
+      assert.strictEqual(r1.books, 2);
+      assert.strictEqual(r1.skippedFiles, 1);
+      const books = await db.read.all('SELECT id, file_path FROM books ORDER BY id');
+      assert.ok(books.every((b) => b.id > indexer.USER_ID_BASE && b.file_path.startsWith(indexer.USER_ROOT_NAME + '/')));
+      assert.ok(r1.refLinks.units > 0, 'personal commentary aligned by title');
+      await run();
+      await pipeline.completeImport(db.w);
+      assert.strictEqual(Number((await db.read.all('SELECT COUNT(*) AS n FROM books'))[0].n), 2, 're-import replaces');
+      db.raw.close();
+    });
+
+    await check('book_units: persisted units == units derived from toc_nodes; ref_key labels round-trip', async () => {
+      const check1 = async (read) => {
+        const books = await read.all('SELECT id, total_lines FROM books', []);
+        let n = 0;
+        for (const b of books) {
+          const nodes = await read.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [b.id]);
+          const fromToc = refAlign.bookUnits(nodes, b.total_lines);
+          const stored = await indexer.loadBookUnits(read, b.id, b.total_lines, true);
+          const strip = (u) => ({ title: u.title, labels: u.labels, refKey: u.refKey, start: u.start, end: u.end, ownEnd: u.ownEnd });
+          if (fromToc.length) assert.deepStrictEqual(stored.map(strip), fromToc.map(strip), `book ${b.id}`);
+          for (const u of fromToc) assert.deepStrictEqual(refAlign.labelsFromRefKey(u.refKey), u.labels, u.refKey);
+          n += fromToc.length;
+        }
+        return n;
+      };
+      const n1 = await check1(ref.read);
+      const sample = openDb(path.join(ROOT, 'assets/db/library.db'));
+      const n2 = await check1(sample);
+      sample.close();
+      assert.ok(n1 > 30 && n2 > 100, `${n1} / ${n2} units`);
+      assert.deepStrictEqual(refAlign.labelsFromRefKey('סימן א|סעיף קטן ג|הקדמה כללית'), [{ type: 'סימן', key: 'א' }, { type: 'סעיף קטן', key: 'ג' }, { type: '', key: 'הקדמה כללית' }]);
+    });
+
+    await check('schema v5 -> v6: migration adds book_units / import_queue / counters; old books align from toc_nodes', async () => {
+      const db = openWritable(path.join(work, 'v5.db'));
+      const v5Ingestion = indexer.INGESTION_SCHEMA.replace(/\s*skipped_count[^\n]*\n\s*scanned_dirs[^\n]*\n\s*links_done[^\n]*\n\s*links_total[^\n]*/, '');
+      await db.w.exec(indexer.SCHEMA + indexer.REF_LINKS_SCHEMA + v5Ingestion);
+      await db.w.run("INSERT INTO meta (key, value) VALUES ('kind', 'user'), ('script_version', '5')", []);
+      await db.w.run("INSERT INTO ingestion_state (id, source_uri, target_db, status, started_at, updated_at) VALUES (1, 'x', 'user', 'completed', 'a', 'b')", []);
+      assert.ok(!(await db.read.all('PRAGMA table_info(ingestion_state)')).some((c) => c.name === 'links_done'));
+      assert.strictEqual(await indexer.ensureSchema(db.w, { kind: 'user' }), false);
+      const cols = (await db.read.all('PRAGMA table_info(ingestion_state)')).map((c) => c.name);
+      for (const c of ['skipped_count', 'scanned_dirs', 'links_done', 'links_total']) assert.ok(cols.includes(c), c);
+      assert.ok(await indexer.hasTable(db.read, 'book_units'));
+      assert.ok(await indexer.hasTable(db.read, 'import_queue'));
+      await indexer.ensureSchema(db.w, { kind: 'user' }); // idempotent
+      assert.strictEqual(indexer.SCHEMA_VERSION, 6);
+      db.raw.close();
+      // A library indexed before v6 (no book_units rows) aligns identically from toc_nodes.
+      await ref.w.exec('DELETE FROM book_units; DELETE FROM ref_links;');
+      await indexer.indexRefLinks(ref.w, {});
+      assert.deepStrictEqual((await librarySnapshot(ref.read)).refLinks, refSnap.refLinks);
+    });
+    ref.raw.close();
+  } finally {
+    fs.rmSync(fx.tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Pure path + book_units alignment at library scale: real commentary / base pairs sampled from
+ * every corpus of otzaria_index_only.txt, written at their real paths with no link files at all,
+ * imported through the streaming pipeline; every sampled commentary must be aligned with exactly
+ * the base the full-library pairing chose, at the right line ranges.
+ */
+async function otzariaIndexPipelineTests() {
+  const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+  if (!fs.existsSync(indexPath)) return;
+  const pairing = require('../shared/pairing');
+  const pipeline = require('../shared/pipeline');
+  const paths = fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''));
+  const books = paths.map((p, i) => {
+    const parts = p.split('/');
+    const title = parts.pop();
+    return { id: i + 1, title, categoryPath: parts.join('/'), aliases: generateBookAliases(parts, title) };
+  });
+  const pairs = pairing.pairCommentaries(books);
+  // Up to 12 pairs per top-level corpus folder, spread over each corpus.
+  const byTop = new Map();
+  for (const p of pairs) {
+    const top = paths[p.commId - 1].split('/')[0];
+    if (!byTop.has(top)) byTop.set(top, []);
+    byTop.get(top).push(p);
+  }
+  const sample = [];
+  for (const list of byTop.values()) {
+    const step = Math.max(1, Math.floor(list.length / 12));
+    for (let i = 0; i < list.length && sample.filter((s) => s.top === list[0]).length < 12; i += step) sample.push({ ...list[i], top: list[0] });
+  }
+  const files = new Set(sample.flatMap((p) => [paths[p.commId - 1], paths[p.baseId - 1]]));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-otzscale-'));
+  try {
+    const lib = path.join(tmp, 'אוצריא');
+    for (const rel of files) {
+      const title = rel.split('/').pop();
+      fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true });
+      // Same unit structure in every book: simanim with plain paragraphs (no inline markers).
+      fs.writeFileSync(path.join(lib, rel + '.txt'), [`<h1>${title}</h1>`, '<h2>סימן א</h2>', `${title} א1`, `${title} א2`, '<h2>סימן ב</h2>', `${title} ב1`].join('\n'));
+    }
+    const db = openWal(path.join(tmp, 'scale.db'));
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    const r = await pipeline.runImport(db.w, nodeFs, { source: { kind: 'folder', root: lib }, sourceUri: lib, targetDb: 'core', yieldToUI: () => Promise.resolve(), finalize: false });
+    await pipeline.completeImport(db.w);
+    const idOf = new Map((await db.read.all('SELECT id, file_path FROM books')).map((b) => [b.file_path.replace(/\.txt$/, ''), b.id]));
+
+    await check(`otzaria scale: ${sample.length} real pairs from ${byTop.size} corpora align by path + book_units only`, async () => {
+      assert.strictEqual(r.books, files.size);
+      assert.ok(sample.length >= 100, `${sample.length} sampled pairs`);
+      const misses = [];
+      for (const p of sample) {
+        const comm = idOf.get(paths[p.commId - 1]);
+        const base = idOf.get(paths[p.baseId - 1]);
+        const rows = await db.read.all('SELECT base_book_id, base_start, base_end, comm_start, comm_end, ref_key FROM ref_links WHERE comm_book_id = ? ORDER BY comm_start', [comm]);
+        const want = [`${base}|2|4|2|4|סימן א`, `${base}|5|6|5|6|סימן ב`];
+        const got = rows.map((x) => Object.values(x).join('|'));
+        if (JSON.stringify(got) !== JSON.stringify(want)) misses.push(`${paths[p.commId - 1]} -> ${paths[p.baseId - 1]}: ${JSON.stringify(got)}`);
+      }
+      assert.deepStrictEqual(misses, [], `${misses.length} misaligned:\n${misses.slice(0, 10).join('\n')}`);
+      assert.strictEqual(Number((await db.read.all('SELECT COUNT(*) AS n FROM links'))[0].n), 0, 'no link files involved');
+      const units = Number((await db.read.all('SELECT COUNT(*) AS n FROM book_units'))[0].n);
+      assert.strictEqual(units, files.size * 2, 'two siman units per book');
+      console.log(`  otzaria scale: ${sample.length} commentary/base pairs over ${byTop.size} corpora, ${files.size} books, all aligned (${r.refLinks.units} units)`);
+    });
+    db.raw.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** The Android foreground-service config plugin + native module wiring. */
+async function foregroundServicePluginTests() {
+  const plugin = require('../plugins/withImportForegroundService');
+  await check('fgs plugin: manifest gets the 4 permissions + a dataSync service, idempotently', () => {
+    const manifest = { manifest: { $: {}, 'uses-permission': [{ $: { 'android:name': 'android.permission.INTERNET' } }], application: [{ $: { 'android:name': '.MainApplication' }, activity: [] }] } };
+    plugin.applyImportForegroundService(manifest);
+    plugin.applyImportForegroundService(manifest);
+    const perms = manifest.manifest['uses-permission'].map((p) => p.$['android:name']);
+    for (const p of ['android.permission.FOREGROUND_SERVICE', 'android.permission.FOREGROUND_SERVICE_DATA_SYNC', 'android.permission.POST_NOTIFICATIONS', 'android.permission.WAKE_LOCK']) {
+      assert.strictEqual(perms.filter((x) => x === p).length, 1, p);
+    }
+    assert.ok(perms.includes('android.permission.INTERNET'));
+    const services = manifest.manifest.application[0].service;
+    assert.strictEqual(services.length, 1);
+    assert.deepStrictEqual(services[0].$, { 'android:name': plugin.SERVICE_NAME, 'android:exported': 'false', 'android:foregroundServiceType': 'dataSync' });
+  });
+  await check('fgs plugin: registered in app.json; native module class names match the Kotlin sources', () => {
+    const app = JSON.parse(fs.readFileSync(path.join(ROOT, 'app.json'), 'utf8'));
+    assert.ok(app.expo.plugins.includes('./plugins/withImportForegroundService'));
+    const modDir = path.join(ROOT, 'modules', 'import-foreground-service');
+    const cfg = JSON.parse(fs.readFileSync(path.join(modDir, 'expo-module.config.json'), 'utf8'));
+    const ktDir = path.join(modDir, 'android', 'src', 'main', 'java', 'expo', 'modules', 'importforegroundservice');
+    const src = (f) => fs.readFileSync(path.join(ktDir, f), 'utf8');
+    const [pkg, cls] = [cfg.android.modules[0].replace(/\.[^.]+$/, ''), cfg.android.modules[0].split('.').pop()];
+    assert.ok(src(`${cls}.kt`).includes(`package ${pkg}`) && src(`${cls}.kt`).includes(`class ${cls} : Module()`));
+    assert.ok(src(`${cls}.kt`).includes('Name("ImportForegroundService")'));
+    for (const fn of ['start', 'update', 'stop']) assert.ok(src(`${cls}.kt`).includes(`AsyncFunction("${fn}")`), fn);
+    const svc = src('ImportForegroundService.kt');
+    assert.strictEqual(`${pkg}.ImportForegroundService`, plugin.SERVICE_NAME);
+    assert.ok(/FOREGROUND_SERVICE_TYPE_DATA_SYNC/.test(svc) && /PARTIAL_WAKE_LOCK/.test(svc));
+    const js = fs.readFileSync(path.join(ROOT, 'src', 'services', 'importForegroundService.ts'), 'utf8');
+    assert.ok(/requireOptionalNativeModule<NativeImportService>\('ImportForegroundService'\)/.test(js), 'JS looks the module up optionally (web no-op)');
   });
 }
 

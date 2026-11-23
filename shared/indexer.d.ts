@@ -58,12 +58,19 @@ export interface IngestionState {
   source_kind: 'folder' | 'files' | string;
   target_db: TargetDb;
   status: IngestionStatus;
-  phase: 'books' | 'links' | 'finalize' | string;
+  phase: 'scan' | 'books' | 'links' | 'finalize' | string;
   processed_count: number;
   total_count: number;
   error_count: number;
   base_book_id: number;
   last_book_path: string | null;
+  /** v6: non-text files skipped by the scan. */
+  skipped_count?: number;
+  /** v6: folders scanned so far. */
+  scanned_dirs?: number;
+  /** v6: links-phase cursor (commentary jobs committed) / total. */
+  links_done?: number;
+  links_total?: number;
   started_at: string;
   updated_at: string;
 }
@@ -135,6 +142,8 @@ export interface LibraryCounts {
   links: number;
   /** Heading-aligned commentary units (schema v4 ref_links). */
   refLinks: number;
+  /** Persisted heading units (schema v6 book_units). */
+  bookUnits: number;
   tocNodes: number;
 }
 
@@ -146,11 +155,47 @@ export interface RefLinkStats {
   /** ref_links rows written. */
   units: number;
   stopped: 'pause' | 'cancel' | null;
+  /** Jobs committed (resume point). */
+  cursor: number;
+}
+
+export interface BookWriteResult {
+  ok: true;
+  id: number;
+  title: string;
+  lines: number;
+  tocNodes: number;
+  units: number;
+}
+export interface BookWriter {
+  ensureCategory(parts: string[]): Promise<number>;
+  write(job: {
+    file: { name: string; rel: string[]; dir: string[] };
+    relPath: string;
+    oldIds?: number[];
+    read: () => Promise<string>;
+    onFileRead?: (relKey: string, raw: string) => void;
+  }): Promise<BookWriteResult | { ok: false; error: unknown }>;
+  readonly newCategories: number;
+  readonly lastBookId: number;
 }
 
 export const SCHEMA: string;
 export const INGESTION_SCHEMA: string;
 export const REF_LINKS_SCHEMA: string;
+export const BOOK_UNITS_SCHEMA: string;
+export const IMPORT_QUEUE_SCHEMA: string;
+export function createBookWriter(
+  db: WriterDb,
+  opts?: { idBase?: number; categoryPrefix?: string[]; aliasOverrides?: Record<string, string[]>; isolate?: boolean },
+): Promise<BookWriter>;
+export function insertMany<T>(db: WriterDb, head: string, cols: number, items: T[], map?: (item: T, index: number) => unknown[]): Promise<void>;
+export function maxId(db: WriterDb, table: string, base: number): Promise<number>;
+export function hasTable(db: { all: WriterDb['all'] }, name: string): Promise<boolean>;
+export function loadBookUnits(db: WriterDb, bookId: number, totalLines: number, unitsTable: boolean): Promise<unknown[]>;
+export function refLinkJobs(db: WriterDb, bookIds?: number[]): Promise<{ books: unknown[]; jobs: { commId: number; baseId?: number; scope?: unknown }[] }>;
+export function nowIso(): string;
+export function errorMessage(e: unknown): string;
 export class IngestionStopped extends Error {
   constructor(reason?: StopReason);
   reason: StopReason;
@@ -194,9 +239,12 @@ export function indexRefLinks(
   opts?: {
     bookIds?: number[];
     booksPerTransaction?: number;
+    cursor?: number;
     shouldStop?: () => 'pause' | 'cancel' | null | undefined;
+    beforeCommit?: (next: number, total: number) => Promise<void>;
     onBook?: (p: { index: number; total: number; title: string }) => void;
     onCommit?: () => Promise<void>;
+    yieldEvery?: () => Promise<void>;
   },
 ): Promise<RefLinkStats>;
 export function indexLinks<H>(

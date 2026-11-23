@@ -25,6 +25,8 @@ export const UNIT_TYPES: Map<string, string>;
 export const KNOWN_BASES: Record<string, string[]>;
 export function unitLabels(title: string): UnitLabel[];
 export function refKeyOf(labels: UnitLabel[]): string;
+/** Inverse of refKeyOf (reads book_units.ref_key back into labels). */
+export function labelsFromRefKey(refKey: string): UnitLabel[];
 export function refPaths(nodes: { id: number; parent_id: number | null; title: string }[]): Map<number, { labels: UnitLabel[]; refKey: string }>;
 export function bookUnits(nodes: { id: number; parent_id: number | null; level: number; title: string; start_line: number }[], totalLines: number): BookUnit[];
 export function makeBaseIndex(units: BookUnit[]): { units: BookUnit[]; find(labels: UnitLabel[]): BookUnit | null };

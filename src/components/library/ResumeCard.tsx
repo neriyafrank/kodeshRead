@@ -43,7 +43,7 @@ function ResumeCard({ item }: { item: InterruptedImport }) {
   const core = item.target === 'core';
   const total = Number(st.total_count) || 0;
   const done = Math.min(Number(st.processed_count) || 0, total);
-  const phase = st.phase === 'links' ? ' · שלב קישור הפרשנים' : st.phase === 'finalize' ? ' · שלב מיטוב האינדקס' : '';
+  const phase = st.phase === 'scan' ? ' · שלב סריקת התיקיות' : st.phase === 'links' ? ' · שלב קישור הפרשנים' : st.phase === 'finalize' ? ' · שלב מיטוב האינדקס' : '';
   const killed = st.status === 'in_progress';
 
   const onDiscard = () =>

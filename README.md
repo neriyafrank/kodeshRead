@@ -84,8 +84,8 @@ it shows the sample library as the core library and disables download / import.
 
 | Folder | Tracked in git | Build command |
 | --- | --- | --- |
-| `raw_library/sample/` + `raw_links/sample/` | yes | `npm run db:sample` |
-| `raw_library/full/` + `raw_links/full/` | no (put the full Otzaria library here) | `npm run db:full` |
+| `raw_library/sample/` (+ legacy fixture `raw_links/sample/`) | yes | `npm run db:sample` |
+| `raw_library/full/` | no (put the full Otzaria library here) | `npm run db:full` |
 
 Layout: `raw_library/<source>/<Category>/<SubCategory>/<Book>.txt`. Headings use
 `<h1>` (title) … `<h6>`; every other non-empty line is a paragraph. Optional:
@@ -93,11 +93,11 @@ Layout: `raw_library/<source>/<Category>/<SubCategory>/<Book>.txt`. Headings use
 * `raw_library/aliases.json`: extra shorthand per book, e.g. `{ "שולחן ערוך אורח חיים": ["שו\"ע או\"ח"] }`
 * `<folder>/order.json`: explicit display order of that folder's entries (well-known
   Tanach/Shas/Shulchan Aruch orders are built in)
-* `raw_links/<source>/`: commentary links for that source (`raw_links/sample/` or
-  `raw_links/full/`, so sample line numbers never leak into a full build; `--links=<dir>`
-  overrides). Either Otzaria's `<Book>_links.json` (`line_index_1` in that book,
-  `line_index_2` in `path_2`, `Conection Type`), or CSV/JSON with
-  `source_book,source_line,target_book,target_line,link_type`. Any sub-folder layout works.
+* Commentary links need **no link files**: they come from each book's folder path + file name
+  (`shared/pairing.js`) and its headings (`book_units` -> `ref_links`, see below). Explicit link
+  files are a legacy input used only by the sample fixture (`raw_links/sample/`, the default for
+  `--source=sample`) or an explicit `--links=<dir>`: Otzaria's `<Book>_links.json` or CSV/JSON with
+  `source_book,source_line,target_book,target_line,link_type`.
   * Book names are matched after normalization (niqqud, `"`/`״`/`''`, final letters, `.txt`,
     `_links` and folders ignored, aliases accepted, leading `מסכת`/`ספר`/`תלמוד בבלי`
     dropped). A name only matches a longer title as whole words and only if that is unique,
@@ -198,8 +198,15 @@ note when the seif has none. Lookups use covering `(book, partner, start, end)` 
 each commentator's **whole block** for the selected verse/amud, plus explicit Otzaria line links. Explicit
 links that fall inside a block are merged into it and marked, never duplicated. **פתח בספר** opens the block
 in the commentary, highlighting all of it. From a commentary, the drawer shows the base text of its unit.
-Schema v4; older read-only libraries keep working with line links only. Re-running the phase is idempotent,
-so pause/resume just redoes the remaining books.
+Schema v4; older read-only libraries keep working with line links only. Re-running the phase is idempotent.
+
+Schema v6: every book's heading units are persisted in the books phase (`book_units`: `book_id`,
+`ref_key`, `depth`, `start_line`, `end_line`, `own_end`, `heading_label`), in the same transaction as
+the book. The links phase never loads the library's texts: it pairs commentaries on the metadata list
+(id, title, aliases, folder) only, then aligns 20 commentaries per transaction from `book_units` (a few
+base books cached), reading base text only when a verse / seif must be resolved inline. Its cursor
+(`ingestion_state.links_done`) is committed with each batch, so a resume continues at the next batch.
+Books indexed before v6 have no `book_units` rows and are aligned from `toc_nodes` (same result).
 
 ## Hebrew Torah linguistic engine (search)
 
@@ -251,33 +258,49 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
     be cancelled, and `user_library.db` is never touched. The release URL is editable: a
     `manifest.json`, or a direct `.gz` / `.zip` / `.db` link (no SHA-256 check then). The
     default is `expo.extra.libraryManifestUrl` in `app.json`.
-  * **בנה ספרייה מתיקיית אוצריא במכשיר**: pick the Otzaria folder (the one containing `אוצריא/`
-    and `links/`, or just a books folder). The library is indexed into the staging file with live
+  * **בנה ספרייה מתיקיית אוצריא במכשיר**: pick the Otzaria folder (the one containing `אוצריא/`,
+    or just a books folder; a `links/` folder is never read). The library is indexed into the staging file with live
     progress (file count + current book) and swapped in only when complete.
   * *Personal books*: **ייבוא קובץ ספר (.txt)** (one or more files) and **ייבוא תיקיית ספרים**
-    (sub-folders become categories; link CSV/JSON files in the folder, an `aliases.json` and
-    `order.json` are honoured). Re-importing the same file replaces it. Books or whole folders
+    (sub-folders become categories; `aliases.json` and `order.json` are honoured; commentaries
+    are linked by path + headings). Re-importing the same file replaces it. Books or whole folders
     can be deleted (text, TOC, FTS rows and links are removed).
   * Jobs keep running if you leave the screen (a progress banner shows on the Library screen),
     and the device is kept awake (`expo-keep-awake`) while one runs.
+  * **Android background execution.** Imports and builds run under a real foreground service
+    (`modules/import-foreground-service`, `foregroundServiceType="dataSync"`, added to the manifest
+    by `plugins/withImportForegroundService.js` with `FOREGROUND_SERVICE`,
+    `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS`, `WAKE_LOCK`): an ongoing notification shows
+    the phase and `מייבא ספרייה: 1,240 / 7,674` with a progress bar, and a partial WakeLock keeps the
+    CPU running with the screen off, so leaving the app no longer pauses the import. Android 13+ is
+    asked for the notification permission first (a refusal only hides the notification). The JS
+    wrapper (`src/services/importForegroundService.ts`) is a no-op on web / iOS, where the app still
+    pauses on background as before.
 * **Resumable, crash-proof imports** (core builds and personal imports, built for 4GB+ Otzaria
   folders):
+  * *Streaming phases* (`shared/pipeline.js`, schema v6): **scan** walks the folder breadth-first,
+    one folder per transaction, persisting sub-folders and book files in the SQLite `import_queue`
+    (no in-memory list of thousands of SAF URIs; non-text files are counted in `skipped_count` and
+    never read); **books** takes the queue's next file in canonical order and writes it — lines,
+    TOC, `book_units`, FTS rows, queue row `done`, checkpoint — in **one transaction per book**,
+    then drops its text and yields (15 ms) so the UI stays at 60fps; **links** and **finalize** as
+    below. A kill at any statement resumes at the exact next folder / book / batch (self-tested
+    by killing the import at every 9th SQL statement).
   * *Checkpoints.* Each target DB has an `ingestion_state` row (`source_uri`, `target_db`,
-    `status` = `in_progress` / `paused` / `completed`, `phase` = books / links / finalize,
+    `status` = `in_progress` / `paused` / `completed`, `phase` = scan / books / links / finalize,
     `processed_count` / `total_count`, `last_book_path`, `base_book_id`, `updated_at`) and an
     `ingestion_errors` log. They are written **in the same transaction** as the books they
     describe, so after a crash the checkpoint always matches what is on disk.
-  * *Small commits.* Core builds commit every 10 books, personal imports every book, and any
-    batch commits early once 20,000 paragraphs are pending (huge tractates). Every book is
-    inserted with `books.is_complete = 0` and flipped to `1` only after its paragraphs, TOC and
-    FTS rows are in.
-  * *Idempotent resume.* Resuming the same folder skips books that the interrupted run already
-    completed (same `file_path`, `is_complete = 1`, id above the run's `base_book_id`) without
-    reading them, and redoes anything half-written. A finished link or finalize phase is not
-    repeated.
-  * *Pause / background.* **השהה** in the progress card, or the app going to the background
-    (`AppState` `background` / `inactive`), stops the job right after the current book commits
-    (status `paused`). When the app is active again the job continues automatically. If the OS
+  * *Small commits.* On the device every book is its own transaction; every book is inserted with
+    `books.is_complete = 0` and flipped to `1` only after its paragraphs, TOC, units and FTS rows
+    are in. (The PC build and `indexBooks()` batch books and commit early once 20,000 paragraphs
+    are pending.)
+  * *Exact resume.* A queue row is marked `done` in the same transaction as its book, so a resumed
+    import continues at the next pending row without re-reading anything finished. A finished
+    scan, link or finalize phase is not repeated.
+  * *Pause.* **השהה** in the progress card stops the job right after the current book commits
+    (status `paused`). Where no foreground service is available (iOS / web), the app going to the
+    background (`AppState`) pauses it the same way and it continues when the app is active again. If the OS
     killed the app instead, the next launch shows **המשך בנייה שנעצרה** / **המשך ייבוא שנעצר**
     (Library screen + manager) with `X / Y ספרים הושלמו` and **המשך** / **מחק ואפס**. If the
     folder permission did not survive the restart, you are asked to pick the same folder again.
@@ -286,9 +309,10 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
     rolled back alone, logged (`ingestion_errors`, shown in the result card) and skipped.
     Hidden files, `__MACOSX`, `Thumbs.db`, Office lock files and every non-`.txt` file (pdf,
     jpg, epub, ...) are filtered by name before anything is read.
-  * *Bounded memory.* A UI yield after every book; the core build file uses WAL with
-    `synchronous = NORMAL`, a 16 MB page cache and on-disk temp tables, and runs
-    `wal_checkpoint(TRUNCATE)` every few commits. FTS rows are added per book and merged at the
+  * *Bounded memory.* A UI yield after every folder / book / link batch (a microtask hop in the
+    background, where React Native pauses JS timers); import DBs use WAL with
+    `synchronous = NORMAL`, `cache_size = -16000`, `temp_store = MEMORY`, a PASSIVE
+    `wal_checkpoint` every 150 books and `TRUNCATE` between phases, so the WAL never grows unbounded. FTS rows are added per book and merged at the
     end with incremental FTS5 `merge` steps (each its own short transaction + WAL checkpoint)
     instead of one giant `optimize`.
   * The on-device core build lives in `SQLite/core_library.build.db` (kept across restarts);
@@ -304,9 +328,8 @@ Build the full library on a PC (Node ≥ 22.13) and upload two files to a GitHub
 ```bash
 # 1. Put the Otzaria sources in place (once)
 #   Windows (PowerShell):  Copy-Item -Recurse "C:\otzaria\אוצריא\*" raw_library\full\
-#                          Copy-Item -Recurse "C:\otzaria\links\*" raw_links\full\
 #   macOS / Linux:         cp -R ~/otzaria/אוצריא/* raw_library/full/
-#                          cp -R ~/otzaria/links/* raw_links/full/
+#   (no links folder needed: commentaries are linked by folder path + headings)
 
 # 2. Build the DB and the release artifact
 npm run db:release      # -> assets/db/library.db, dist/core_library.db.gz, dist/manifest.json

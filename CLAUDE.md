@@ -21,6 +21,16 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > base pairing: `shared/pairing.js`, calibrated on the full library map `otzaria_index_only.txt` (regression-tested
 > in `scripts/selftest.js`). Query-time Hebrew abbreviation/morphology engine: `shared/hebrewTorahDict.js`.
 
+> **Streaming ingestion (schema v6):** `shared/pipeline.js` runs scan -> books -> links -> finalize. The scan
+> persists folders/files breadth-first in the SQLite `import_queue` (one folder per transaction, non-text files
+> counted in `skipped_count`, never read); books are written one per transaction (lines, TOC, FTS and the
+> heading units in `book_units`) with the queue row marked done in the same transaction; the links phase pairs
+> commentaries by folder path + title only (no external link files; `links/` is never read) and aligns them
+> from `book_units`, 20 per transaction with a committed cursor. Android imports run under a foreground service
+> (`modules/import-foreground-service` + `plugins/withImportForegroundService.js`, dataSync + WakeLock + progress
+> notification; JS wrapper `src/services/importForegroundService.ts`, no-op on web). Kill/resume is self-tested
+> at every 9th SQL statement in `scripts/selftest.js`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

@@ -1,0 +1,7 @@
+{
+  "name": "import-foreground-service",
+  "version": "1.0.0",
+  "description": "Android foreground service (dataSync) + partial wake lock that keeps long library imports running with the screen off or the app in the background.",
+  "private": true,
+  "main": "index.ts"
+}

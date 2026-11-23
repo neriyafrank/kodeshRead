@@ -4,8 +4,11 @@
  * Manager, the first-launch onboarding card and the "resume interrupted import" card.
  *
  * Every job keeps the device awake (expo-keep-awake) while it runs, so a long build does not
- * stall when the screen would dim. Ingestion jobs are resumable: see IngestionLifecycle for
- * the background / foreground handling and localIndexer.ts for the checkpoints.
+ * stall when the screen would dim. Ingestion jobs additionally run under an Android foreground
+ * service (ongoing progress notification + partial WakeLock, src/services/importForegroundService.ts)
+ * so they keep going with the app in the background or the screen off. They are resumable too:
+ * see IngestionLifecycle for the fallback when the service is unavailable, and localIndexer.ts
+ * for the checkpoints.
  */
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Directory, File } from 'expo-file-system';
@@ -14,9 +17,10 @@ import { Alert, Platform } from 'react-native';
 
 import type { IngestionState } from '../../shared/indexer';
 import { useLibrary, useLibraryController } from '../db/LibraryContext';
-import { CancelledError, useLibraryJobs, type JobKind, type JobResult } from '../state/libraryJobs';
+import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
+import * as importService from './importForegroundService';
 import {
   buildCoreFromFolder,
   deleteUserBooks,
@@ -64,11 +68,38 @@ function notice(title: string, message: string): Promise<void> {
 
 type JobOutcome = string | Omit<JobResult, 'kind' | 'ok'>;
 
+/** Notification title / text of the running ingestion job ("מייבא ספרייה: 1,240 / 7,674"). */
+function notificationFor(job: JobProgress): [string, string, number, number] {
+  const count = importService.formatCount(job.current, job.total);
+  const title = job.phase === 'books' && count ? `${job.stage}: ${count}` : count ? `${job.stage} ${count}` : job.stage;
+  const name = job.detail && job.detail.includes(' · ') ? job.detail.slice(job.detail.lastIndexOf(' · ') + 3) : (job.detail ?? '');
+  return [title, name, job.current ?? 0, job.total ?? 0];
+}
+
+/**
+ * Starts the Android foreground service for an ingestion job and mirrors the job's progress into
+ * its notification. Returns the cleanup. Web / iOS: no-op (the lifecycle pauses on background).
+ */
+async function startImportService(stage: string): Promise<() => Promise<void>> {
+  if (!importService.isAvailable()) return async () => undefined;
+  // Android 13+: ask before the bulk import; a refusal only hides the notification.
+  await importService.ensureNotificationPermission();
+  if (!(await importService.start(stage, '', 0, 0))) return async () => undefined;
+  const unsubscribe = useLibraryJobs.subscribe((s, prev) => {
+    if (s.job && s.job !== prev.job) importService.update(...notificationFor(s.job));
+  });
+  return async () => {
+    unsubscribe();
+    await importService.stop();
+  };
+}
+
 /** Runs one job at a time (device kept awake); returns false when another job is running. */
 async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome>, after?: () => Promise<void>, resumable = false): Promise<boolean> {
   const jobs = useLibraryJobs.getState();
   if (!jobs.start(kind, stage, { resumable })) return false;
   await activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch((e) => console.warn('keep-awake unavailable', e));
+  const stopService = resumable ? await startImportService(stage).catch((e) => (console.warn('import service failed', e), async () => undefined)) : null;
   try {
     const out = await fn();
     useLibraryJobs.getState().finish(typeof out === 'string' ? { ok: true, message: out } : { ok: true, ...out });
@@ -77,6 +108,7 @@ async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome
     const message = e instanceof CancelledError ? 'הפעולה בוטלה' : e instanceof Error ? e.message : String(e);
     useLibraryJobs.getState().finish({ ok: false, message });
   } finally {
+    if (stopService) await stopService().catch(() => undefined);
     await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
     if (after) await after().catch((e) => console.warn('library refresh failed', e));
   }
@@ -84,10 +116,10 @@ async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome
 }
 
 function describeImport(s: ImportSummary): string {
-  let msg = `יובאו ${s.books} ספרים (${s.paragraphs.toLocaleString('he-IL')} שורות)`;
-  if (s.skipped) msg += `, ${s.skipped} ספרים הושלמו כבר קודם`;
-  if (s.links) msg += `, ${s.links.kept} קישורי פרשנים`;
-  if (s.links?.unmatched.size) msg += ` (${s.links.unmatched.size} שמות ספרים לא זוהו)`;
+  let msg = `יובאו ${s.books.toLocaleString('he-IL')} ספרים (${s.paragraphs.toLocaleString('he-IL')} שורות)`;
+  if (s.skipped) msg += `, ${s.skipped.toLocaleString('he-IL')} ספרים הושלמו כבר קודם`;
+  if (s.refLinks) msg += `, ${s.refLinks.pairs.toLocaleString('he-IL')} פרשנים קושרו (${s.refLinks.units.toLocaleString('he-IL')} יחידות)`;
+  if (s.skippedFiles) msg += `. ${s.skippedFiles.toLocaleString('he-IL')} קבצים שאינם טקסט דולגו`;
   if (s.errors.length) msg += `. ${s.errors.length} קבצים פגומים דולגו`;
   return msg;
 }

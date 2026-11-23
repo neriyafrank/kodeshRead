@@ -23,8 +23,12 @@ const refAlign = require('./refAlign');
  * Bump when the schema or the parsing rules change (stored in meta.script_version).
  * 3: books.is_complete + ingestion_state / ingestion_errors (resumable imports). Readers never
  *    depend on them, so version-2 libraries stay fully usable.
+ * 6: book_units (heading units persisted in the books phase, read back one book at a time by
+ *    the links phase) + import_queue (SQLite-backed BFS scan queue of a streaming import) +
+ *    ingestion_state.skipped_count / scanned_dirs / links_done / links_total. Readers ignore
+ *    all of them, so v5 libraries stay fully usable (migrateSchema adds them to writable DBs).
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 /** First id of the personal library's namespace (core ids stay below it). */
 const USER_ID_BASE = 1000000000;
 /** Root folder of the personal library in the merged tree. */
@@ -152,6 +156,10 @@ CREATE TABLE IF NOT EXISTS ingestion_state (
   error_count INTEGER NOT NULL DEFAULT 0,
   base_book_id INTEGER NOT NULL DEFAULT 0,
   last_book_path TEXT,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  scanned_dirs INTEGER NOT NULL DEFAULT 0,
+  links_done INTEGER NOT NULL DEFAULT 0,
+  links_total INTEGER NOT NULL DEFAULT 0,
   started_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -162,6 +170,62 @@ CREATE TABLE IF NOT EXISTS ingestion_errors (
   at TEXT NOT NULL
 );
 `;
+
+/**
+ * Heading units of every book (schema v6), written in the books phase in the same transaction as
+ * the book: one row per TOC node that has a canonical reference (refAlign.bookUnits):
+ *   ref_key        canonical path "פרק א|פסוק א" (labels are recovered with refAlign.labelsFromRefKey)
+ *   depth          number of labels in ref_key
+ *   start_line     line of the heading
+ *   end_line       last line of the unit's subtree (before the next heading of the same / higher level)
+ *   own_end        last line of the unit's own text (before the next heading of any level)
+ *   heading_label  the plain heading ("סימן א", "מסכת ברכות")
+ * The links phase aligns commentaries from these rows (one book at a time) instead of re-reading
+ * TOCs or texts, so no book is ever held in memory beyond the pair being aligned.
+ */
+const BOOK_UNITS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS book_units (
+  id INTEGER PRIMARY KEY,
+  book_id INTEGER NOT NULL,
+  ref_key TEXT NOT NULL,
+  depth INTEGER NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  own_end INTEGER NOT NULL,
+  heading_label TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_book_units_book ON book_units(book_id, start_line);
+`;
+
+/**
+ * Streaming import queue (schema v6, shared/pipeline.js): the scan phase walks the source folder
+ * breadth-first, one folder per transaction, persisting every sub-folder and book file it finds
+ * instead of collecting thousands of URIs in a JS array. sort_key ("00003.00012") reproduces the
+ * depth-first, canonically sorted order of scanBooks(), so books get the same ids / tree order.
+ * A row is marked done / failed in the same transaction that writes its book, so a killed import
+ * resumes at the exact next row.
+ */
+const IMPORT_QUEUE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS import_queue (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  uri TEXT NOT NULL,
+  rel TEXT NOT NULL,
+  sort_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  book_id INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_import_queue_rel ON import_queue(kind, rel);
+CREATE INDEX IF NOT EXISTS idx_import_queue_next ON import_queue(kind, status, sort_key);
+`;
+
+/** ingestion_state columns added after v3 (name -> DDL), applied by migrateSchema(). */
+const INGESTION_COLUMNS_V6 = {
+  skipped_count: 'INTEGER NOT NULL DEFAULT 0',
+  scanned_dirs: 'INTEGER NOT NULL DEFAULT 0',
+  links_done: 'INTEGER NOT NULL DEFAULT 0',
+  links_total: 'INTEGER NOT NULL DEFAULT 0',
+};
 
 const FTS_TABLE_RE = /CREATE VIRTUAL TABLE paragraphs_fts[\s\S]*?\);\n/;
 
@@ -185,7 +249,7 @@ async function ensureSchema(db, opts) {
     await migrateSchema(db);
     return false;
   }
-  const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + REF_LINKS_SCHEMA + INGESTION_SCHEMA;
+  const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + REF_LINKS_SCHEMA + INGESTION_SCHEMA + BOOK_UNITS_SCHEMA + IMPORT_QUEUE_SCHEMA;
   // DDL is transactional in SQLite: a failure never leaves a half-created schema behind.
   await db.exec('BEGIN');
   try {
@@ -201,7 +265,9 @@ async function ensureSchema(db, opts) {
 
 /**
  * Brings a writable library created by an older version up to the current schema
- * (adds books.is_complete, the ingestion tables and ref_links). Idempotent and cheap.
+ * (adds books.is_complete, the ingestion tables, ref_links, book_units and import_queue).
+ * Idempotent and cheap. Books indexed before v6 have no book_units rows: the links phase then
+ * derives their units from toc_nodes (see loadBookUnits).
  */
 async function migrateSchema(db) {
   const cols = await db.all('PRAGMA table_info(books)', []);
@@ -209,7 +275,14 @@ async function migrateSchema(db) {
     await db.exec('ALTER TABLE books ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 1');
   }
   await db.exec(INGESTION_SCHEMA);
+  // v3..v5 -> v6: new checkpoint counters (CREATE TABLE IF NOT EXISTS keeps the old shape).
+  const stateCols = new Set((await db.all('PRAGMA table_info(ingestion_state)', [])).map((c) => c.name));
+  for (const [name, ddl] of Object.entries(INGESTION_COLUMNS_V6)) {
+    if (!stateCols.has(name)) await db.exec(`ALTER TABLE ingestion_state ADD COLUMN ${name} ${ddl}`);
+  }
   await db.exec(REF_LINKS_SCHEMA);
+  await db.exec(BOOK_UNITS_SCHEMA);
+  await db.exec(IMPORT_QUEUE_SCHEMA);
   // v4 -> v5: the covering (start, end) indexes replace the start-only ones.
   await db.exec('DROP INDEX IF EXISTS idx_ref_links_base; DROP INDEX IF EXISTS idx_ref_links_comm;');
 }
@@ -604,15 +677,22 @@ function parseLinkFile(fileName, raw) {
 // ---------------------------------------------------------------------------
 // Writing
 // ---------------------------------------------------------------------------
-const PARA_BATCH = 150; // rows per multi-row INSERT (6 params each)
+const PARA_BATCH = 150; // rows per multi-row INSERT (<= 8 params each)
 
-async function insertMany(db, head, cols, rows) {
+/**
+ * Multi-row INSERTs in chunks of PARA_BATCH. `map(item, index)` (optional) turns an item into its
+ * row, so a big book's paragraphs are converted chunk by chunk instead of into a second full array.
+ */
+async function insertMany(db, head, cols, items, map) {
   const one = '(' + new Array(cols).fill('?').join(', ') + ')';
-  for (let i = 0; i < rows.length; i += PARA_BATCH) {
-    const chunk = rows.slice(i, i + PARA_BATCH);
+  for (let i = 0; i < items.length; i += PARA_BATCH) {
+    const end = Math.min(items.length, i + PARA_BATCH);
     const params = [];
-    for (const r of chunk) params.push(...r);
-    await db.run(`${head} VALUES ${new Array(chunk.length).fill(one).join(', ')}`, params);
+    for (let j = i; j < end; j++) {
+      const r = map ? map(items[j], j) : items[j];
+      for (let k = 0; k < cols; k++) params.push(r[k]);
+    }
+    await db.run(`${head} VALUES ${new Array(end - i).fill(one).join(', ')}`, params);
   }
 }
 
@@ -626,7 +706,7 @@ async function hasTable(db, name) {
   return (await db.all("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?", [name])).length > 0;
 }
 
-/** Removes one book (its FTS entries, paragraphs, TOC and links) from a database. */
+/** Removes one book (its FTS entries, paragraphs, TOC, units and links) from a database. */
 async function deleteBook(db, bookId) {
   await db.run(
     `INSERT INTO paragraphs_fts(paragraphs_fts, rowid, clean_text, book_id, category_path, line_index)
@@ -635,6 +715,7 @@ async function deleteBook(db, bookId) {
   );
   await db.run('DELETE FROM paragraphs WHERE book_id = ?', [bookId]);
   await db.run('DELETE FROM toc_nodes WHERE book_id = ?', [bookId]);
+  if (await hasTable(db, 'book_units')) await db.run('DELETE FROM book_units WHERE book_id = ?', [bookId]);
   await db.run('DELETE FROM links WHERE book_a_id = ? OR book_b_id = ?', [bookId, bookId]);
   if (await hasTable(db, 'ref_links')) await db.run('DELETE FROM ref_links WHERE base_book_id = ? OR comm_book_id = ?', [bookId, bookId]);
   await db.run('DELETE FROM books WHERE id = ?', [bookId]);
@@ -666,12 +747,143 @@ class IngestionStopped extends Error {
 
 const errorMessage = (e) => String((e && e.message) || e).slice(0, 500);
 
+/** A file that is not text (a binary renamed .txt, a PDF, ...): NUL bytes never occur in Otzaria books. */
+function assertTextContent(raw) {
+  if (raw.slice(0, 4096).indexOf('\u0000') !== -1) throw new Error('not a text file (binary content)');
+}
+
+/** Persisted heading units of a parsed book (refAlign.bookUnits over its TOC). */
+function parsedUnits(parsed) {
+  const nodes = parsed.toc.map((n, i) => ({ id: i, parent_id: n.parentIdx, level: n.level, title: n.title, start_line: n.startLine }));
+  return refAlign.bookUnits(nodes, parsed.totalLines);
+}
+
+/**
+ * Writes books into a database, one at a time (the engine behind indexBooks() and the streaming
+ * queue of shared/pipeline.js). Allocates ids in the caller's namespace (idBase), creates
+ * categories on demand, and writes each book's paragraphs, TOC, heading units (book_units) and
+ * FTS rows. The caller owns the transaction; with `isolate`, each book is wrapped in a SAVEPOINT
+ * and a failing book is rolled back alone ({ ok: false, error }).
+ *
+ * Memory: the file text and the parsed book live only inside write(); it returns counts.
+ */
+async function createBookWriter(db, opts) {
+  const o = opts || {};
+  const idBase = o.idBase || 0;
+  const prefix = o.categoryPrefix || [];
+  const overrides = o.aliasOverrides || {};
+  const isolate = !!o.isolate;
+  const unitsTable = await hasTable(db, 'book_units');
+
+  let catId = await maxId(db, 'categories', idBase);
+  let bookId = await maxId(db, 'books', idBase);
+  let tocId = await maxId(db, 'toc_nodes', idBase);
+  let paraId = await maxId(db, 'paragraphs', idBase);
+
+  const catIds = new Map(); // 'a/b' -> id
+  for (const r of await db.all('SELECT id, path FROM categories', [])) catIds.set(r.path, r.id);
+  let bookCats = null; // categories created by the book being written (forgotten on rollback)
+  const state = { newCats: 0 };
+
+  const ensureCategory = async (parts) => {
+    const p = parts.join('/');
+    if (catIds.has(p)) return catIds.get(p);
+    const parentId = parts.length > 1 ? await ensureCategory(parts.slice(0, -1)) : null;
+    const id = ++catId;
+    await db.run('INSERT INTO categories (id, parent_id, name, path) VALUES (?, ?, ?, ?)', [id, parentId, parts[parts.length - 1], p]);
+    catIds.set(p, id);
+    if (bookCats) bookCats.push(p);
+    state.newCats++;
+    return id;
+  };
+
+  /** Parses + writes one book; returns its counts. Throws on any failure. */
+  const writeParsed = async (file, relPath, oldIds, raw) => {
+    assertTextContent(raw);
+    const fallback = file.name.replace(/\.[^.]+$/, '');
+    const parsed = parseBook(raw, fallback);
+    const relKey = file.rel.join('/');
+    const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(relKey)] || [], overrides[aliasKey(fallback)] || []);
+    const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
+
+    for (const old of oldIds || []) await deleteBook(db, old);
+    const dirParts = prefix.concat(file.dir);
+    const categoryId = dirParts.length ? await ensureCategory(dirParts) : null;
+    const id = ++bookId;
+    // Stored as "|a|b|c|" so a single alias can also be matched in SQL with LIKE '%|alias|%'.
+    await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines, is_complete) VALUES (?, ?, ?, ?, ?, ?, 0)', [
+      id, categoryId, parsed.title, '|' + aliases.join('|') + '|', relPath, parsed.totalLines,
+    ]);
+    const tocIds = [];
+    for (let i = 0; i < parsed.toc.length; i++) tocIds.push(++tocId);
+    await insertMany(db, 'INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line)', 7, parsed.toc, (n, i) => [
+      tocIds[i], id, n.parentIdx == null ? null : tocIds[n.parentIdx], n.level, n.title, n.refKey, n.startLine,
+    ]);
+    await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, parsed.paragraphs, (p) => [
+      ++paraId, id, p.lineIndex, p.tocPath, p.display, p.clean, p.isHeading ? 1 : 0,
+    ]);
+    let units = 0;
+    if (unitsTable) {
+      const rows = parsedUnits(parsed);
+      units = rows.length;
+      await insertMany(db, 'INSERT INTO book_units (book_id, ref_key, depth, start_line, end_line, own_end, heading_label)', 7, rows, (u) => [
+        id, u.refKey, u.labels.length, u.start, u.end, u.ownEnd, u.title,
+      ]);
+    }
+    await db.run(
+      `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
+       SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE book_id = ?`,
+      [id],
+    );
+    await db.run('UPDATE books SET is_complete = 1 WHERE id = ?', [id]);
+    return { id, title: parsed.title, lines: parsed.paragraphs.length, tocNodes: parsed.toc.length, units };
+  };
+
+  /**
+   * @param {{ file: { name, rel: string[], dir: string[] }, relPath: string, oldIds?: number[],
+   *           read: () => Promise<string>, onFileRead?: (relKey, raw) => void }} job
+   * @returns {Promise<{ ok: true, id, title, lines, tocNodes, units } | { ok: false, error }>}
+   */
+  const write = async (job) => {
+    if (isolate) await db.exec('SAVEPOINT book');
+    bookCats = [];
+    try {
+      let raw = await job.read();
+      if (job.onFileRead) job.onFileRead(job.file.rel.join('/'), raw);
+      const r = await writeParsed(job.file, job.relPath, job.oldIds, raw);
+      raw = null; // drop the text before the caller yields
+      if (isolate) await db.exec('RELEASE book');
+      return Object.assign({ ok: true }, r);
+    } catch (e) {
+      if (!isolate) throw e;
+      await db.exec('ROLLBACK TO book');
+      await db.exec('RELEASE book');
+      for (const p of bookCats) catIds.delete(p);
+      state.newCats -= bookCats.length;
+      return { ok: false, error: e };
+    } finally {
+      bookCats = null;
+    }
+  };
+
+  return {
+    ensureCategory,
+    write,
+    get newCategories() {
+      return state.newCats;
+    },
+    get lastBookId() {
+      return bookId;
+    },
+  };
+}
+
 /**
  * Indexes book files into a database that already has the schema.
  *
  * Resumable & crash-safe:
  *  - every book is written inside its own SAVEPOINT and flagged books.is_complete = 1 only
- *    after its paragraphs, TOC and FTS rows are in; a book that throws (malformed file,
+ *    after its paragraphs, TOC, units and FTS rows are in; a book that throws (malformed file,
  *    read error) is rolled back alone, reported through onError / stats.errors and skipped;
  *  - transactions are committed every `booksPerTransaction` books, or earlier once
  *    `maxLinesPerTransaction` paragraphs are pending (big books), so progress keeps
@@ -682,6 +894,9 @@ const errorMessage = (e) => String((e && e.message) || e).slice(0, 500);
  *    file_path, is_complete = 1, id > the run's base_book_id) are skipped without reading;
  *  - `shouldStop()` is polled between books: on 'pause' / 'cancel' the pending books are
  *    committed (checkpoint status 'paused') and indexBooks returns with `stopped` set.
+ *
+ * The device uses the streaming queue of shared/pipeline.js instead (no file list in memory);
+ * this array-based form serves the PC build (scripts/build-db.js) and small imports.
  *
  * @param {object} db     writer adapter { exec, run, all }
  * @param {object} fsa    file adapter { list, readText }
@@ -703,41 +918,19 @@ const errorMessage = (e) => String((e && e.message) || e).slice(0, 500);
  * @returns {Promise<{ books, paragraphs, tocNodes, categories, bookIds, skipped, failed, errors, processed, stopped }>}
  */
 async function indexBooks(db, fsa, opts) {
-  const idBase = opts.idBase || 0;
   const prefix = opts.categoryPrefix || [];
-  const overrides = opts.aliasOverrides || {};
   const perTx = Math.max(1, opts.booksPerTransaction || 1);
   const maxLines = Math.max(1, opts.maxLinesPerTransaction || 20000);
   const replace = opts.replaceExisting !== false;
   const ing = opts.ingestion || null;
   const isolate = typeof opts.onError === 'function';
 
-  let catId = await maxId(db, 'categories', idBase);
-  let bookId = await maxId(db, 'books', idBase);
-  let tocId = await maxId(db, 'toc_nodes', idBase);
-  let paraId = await maxId(db, 'paragraphs', idBase);
-
-  const catIds = new Map(); // 'a/b' -> id
-  for (const r of await db.all('SELECT id, path FROM categories', [])) catIds.set(r.path, r.id);
-  let newCats = 0;
-  let bookCats = null; // categories created by the book being written (forgotten on rollback)
-  const ensureCategory = async (parts) => {
-    const p = parts.join('/');
-    if (catIds.has(p)) return catIds.get(p);
-    const parentId = parts.length > 1 ? await ensureCategory(parts.slice(0, -1)) : null;
-    const id = ++catId;
-    await db.run('INSERT INTO categories (id, parent_id, name, path) VALUES (?, ?, ?, ?)', [id, parentId, parts[parts.length - 1], p]);
-    catIds.set(p, id);
-    if (bookCats) bookCats.push(p);
-    newCats++;
-    return id;
-  };
-
+  const writer = await createBookWriter(db, { idBase: opts.idBase, categoryPrefix: prefix, aliasOverrides: opts.aliasOverrides, isolate });
   const files = opts.files || [];
   const stats = { books: 0, paragraphs: 0, tocNodes: 0, categories: 0, bookIds: [], skipped: 0, failed: 0, errors: [], processed: 0, stopped: null };
 
   // --- checkpoint -------------------------------------------------------------
-  let baseBookId = bookId;
+  let baseBookId = writer.lastBookId;
   let resume = false;
   let pendingErrors = [];
   let lastPath = null;
@@ -793,8 +986,8 @@ async function indexBooks(db, fsa, opts) {
         await writeIngestionState(db, { status: 'in_progress', source_uri: String(ing.sourceUri || ''), total_count: files.length });
       }
     }
-    if (prefix.length) await ensureCategory(prefix);
-    for (const parts of opts.dirs || []) await ensureCategory(prefix.concat(parts));
+    if (prefix.length) await writer.ensureCategory(prefix);
+    for (const parts of opts.dirs || []) await writer.ensureCategory(prefix.concat(parts));
     await commit();
 
     for (let fi = 0; fi < files.length; fi++) {
@@ -819,66 +1012,30 @@ async function indexBooks(db, fsa, opts) {
         continue;
       }
 
-      if (isolate) await db.exec('SAVEPOINT book');
-      bookCats = [];
-      let parsed;
-      try {
-        const raw = await fsa.readText(file.handle);
-        if (opts.onFileRead) opts.onFileRead(file.rel.join('/'), raw);
-        const fallback = file.name.replace(/\.[^.]+$/, '');
-        parsed = parseBook(raw, fallback);
-        const extra = [].concat(overrides[aliasKey(parsed.title)] || [], overrides[aliasKey(file.rel.join('/'))] || [], overrides[aliasKey(fallback)] || []);
-        const aliases = generateBookAliases(prefix.concat(file.dir), parsed.title, extra);
-
-        if (replace || resume) for (const o of old) await deleteBook(db, o.id);
-        const dirParts = prefix.concat(file.dir);
-        const categoryId = dirParts.length ? await ensureCategory(dirParts) : null;
-        const id = ++bookId;
-        // Stored as "|a|b|c|" so a single alias can also be matched in SQL with LIKE '%|alias|%'.
-        await db.run('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines, is_complete) VALUES (?, ?, ?, ?, ?, ?, 0)', [
-          id, categoryId, parsed.title, '|' + aliases.join('|') + '|', relPath, parsed.totalLines,
-        ]);
-        const tocIds = [];
-        const tocRows = [];
-        for (const n of parsed.toc) {
-          const nid = ++tocId;
-          tocIds.push(nid);
-          tocRows.push([nid, id, n.parentIdx == null ? null : tocIds[n.parentIdx], n.level, n.title, n.refKey, n.startLine]);
-        }
-        await insertMany(db, 'INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line)', 7, tocRows);
-        const paraRows = parsed.paragraphs.map((p) => [++paraId, id, p.lineIndex, p.tocPath, p.display, p.clean, p.isHeading ? 1 : 0]);
-        await insertMany(db, 'INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading)', 7, paraRows);
-        await db.run(
-          `INSERT INTO paragraphs_fts(rowid, clean_text, book_id, category_path, line_index)
-           SELECT id, clean_text, book_id, category_path, line_index FROM paragraphs_fts_source WHERE book_id = ?`,
-          [id],
-        );
-        await db.run('UPDATE books SET is_complete = 1 WHERE id = ?', [id]);
-        if (isolate) await db.exec('RELEASE book');
+      const r = await writer.write({
+        file,
+        relPath,
+        oldIds: replace || resume ? old.map((x) => x.id) : [],
+        read: () => fsa.readText(file.handle),
+        onFileRead: opts.onFileRead,
+      });
+      if (r.ok) {
         stats.books++;
-        stats.paragraphs += parsed.paragraphs.length;
-        stats.tocNodes += parsed.toc.length;
-        stats.bookIds.push(id);
-        pendingLines += parsed.paragraphs.length;
-      } catch (e) {
-        if (!isolate) throw e;
-        await db.exec('ROLLBACK TO book');
-        await db.exec('RELEASE book');
-        for (const p of bookCats) catIds.delete(p);
-        newCats -= bookCats.length;
+        stats.paragraphs += r.lines;
+        stats.tocNodes += r.tocNodes;
+        stats.bookIds.push(r.id);
+        pendingLines += r.lines;
+      } else {
         stats.failed++;
-        const err = { relPath, message: errorMessage(e) };
+        const err = { relPath, message: errorMessage(r.error) };
         stats.errors.push(err);
         pendingErrors.push(err);
-        opts.onError({ relPath, error: e });
-        parsed = null;
-      } finally {
-        bookCats = null;
+        opts.onError({ relPath, error: r.error });
       }
       stats.processed = fi + 1;
       lastPath = relPath;
       pendingBooks++;
-      if (parsed && opts.onBook) opts.onBook({ index: fi + 1, total: files.length, relPath, title: parsed.title, lines: parsed.paragraphs.length, tocNodes: parsed.toc.length });
+      if (r.ok && opts.onBook) opts.onBook({ index: fi + 1, total: files.length, relPath, title: r.title, lines: r.lines, tocNodes: r.tocNodes });
       if (pendingBooks >= perTx || pendingLines >= maxLines) await commit();
       if (opts.yieldEvery) await opts.yieldEvery();
     }
@@ -888,7 +1045,7 @@ async function indexBooks(db, fsa, opts) {
     if (inTx) await db.exec('ROLLBACK').catch(() => undefined);
     throw e;
   }
-  stats.categories = newCats;
+  stats.categories = writer.newCategories;
   return stats;
 }
 
@@ -993,50 +1150,90 @@ async function indexLinks(db, fsa, linkFiles, opts) {
 }
 
 /**
- * Heading-based reference alignment (Otzaria): pairs every commentary book with its base
- * book (shared/refAlign.js pairCommentaries) and stores, for each commentary unit with its
- * own text, the base unit with the same canonical ref_key as a `ref_links` row of two line
- * ranges. Runs in the links phase, after all books are indexed.
- *
- * Idempotent and resumable: each commentary book's rows are replaced (DELETE + INSERT) in the
- * transaction that writes them, transactions are committed every `booksPerTransaction`
- * commentaries, and `shouldStop()` (polled between books) ends the run early with
- * `stopped` set; re-running the phase simply redoes the remaining books.
- *
- * @param {object} db  writer adapter
- * @param {{ bookIds?: number[], booksPerTransaction?: number, shouldStop?: () => any,
- *           onBook?: (p: { index, total, title }) => void, onCommit?: () => Promise<void> }} [opts]
- *   bookIds: only (re)align pairs that involve these books (a personal import).
- * @returns {Promise<{ pairs, aligned, units, stopped }>}
+ * Heading units of one book for alignment, read from book_units (schema v6). Books indexed before
+ * v6 have no rows there: their units are derived from toc_nodes instead (same result).
  */
-async function indexRefLinks(db, opts) {
-  const o = opts || {};
-  const stats = { pairs: 0, aligned: 0, units: 0, stopped: null };
-  if (!(await hasTable(db, 'ref_links'))) return stats;
+async function loadBookUnits(db, bookId, totalLines, unitsTable) {
+  if (unitsTable) {
+    const rows = await db.all('SELECT id, ref_key, depth, start_line, end_line, own_end, heading_label FROM book_units WHERE book_id = ? ORDER BY start_line, depth', [bookId]);
+    if (rows.length) {
+      return rows.map((r) => ({
+        id: 'u' + r.id,
+        title: r.heading_label,
+        labels: refAlign.labelsFromRefKey(r.ref_key),
+        refKey: r.ref_key,
+        start: r.start_line,
+        end: r.end_line,
+        ownEnd: r.own_end,
+      }));
+    }
+  }
+  const nodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [bookId]);
+  return refAlign.bookUnits(nodes, totalLines);
+}
+
+/**
+ * The deterministic commentary -> base job list of a library: pure path / title pairing
+ * (shared/pairing.js) over lightweight metadata only (id, title, aliases, folder path).
+ * One job per commentary -> base pair (Otzaria "X על Y"), or per corpus-wide commentary
+ * ("… על השס"), whose top-level headings each name a base (resolved when it is aligned).
+ */
+async function refLinkJobs(db, bookIds) {
   const rows = await db.all(
     `SELECT b.id, b.title, b.aliases, b.total_lines, COALESCE(c.path, '') AS category_path
        FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE b.is_complete = 1 ORDER BY b.id`,
     [],
   );
   const books = rows.map((r) => ({ id: r.id, title: r.title, aliases: String(r.aliases).split('|').filter(Boolean), categoryPath: r.category_path, totalLines: r.total_lines }));
-  const byId = new Map(books.map((b) => [b.id, b]));
   const paired = refAlign.pairCommentaries(books);
-  // Jobs: one commentary -> one base (Otzaria "X על Y"), or a corpus-wide commentary ("… על השס")
-  // whose top-level book headings each name a base (resolved below, once its TOC is loaded).
   let jobs = paired.map((p) => ({ commId: p.commId, baseId: p.baseId }));
   for (const m of paired.multi || []) jobs.push({ commId: m.commId, scope: m.scope });
-  if (o.bookIds) {
-    const only = new Set(o.bookIds);
+  if (bookIds) {
+    const only = new Set(bookIds);
     jobs = jobs.filter((j) => only.has(j.commId) || (j.baseId != null ? only.has(j.baseId) : true));
   }
+  return { books, jobs };
+}
+
+/**
+ * Heading-based reference alignment (Otzaria): pairs every commentary book with its base
+ * book by folder path + file name only (no external link files), and stores, for each
+ * commentary unit with its own text, the base unit with the same canonical ref_key as a
+ * `ref_links` row of two line ranges. Runs in the links phase, after all books are indexed.
+ *
+ * Memory: only the metadata list (id, title, aliases, folder) is held for the whole library;
+ * units come from book_units one book at a time (a few base books are cached, as many
+ * commentaries share one base), base texts are read per unit only when a verse / seif has to
+ * be resolved inline, and the commentary's own lines as (line, first 12 chars).
+ *
+ * Resumable: jobs are processed in small transactions (`booksPerTransaction`, default 20); each
+ * job's rows are replaced (DELETE + INSERT), so a redo is harmless. `cursor` skips the first jobs
+ * (committed by an interrupted run) and `beforeCommit(nextCursor, total)` is awaited inside each
+ * transaction so the caller's checkpoint is committed atomically with the rows it describes.
+ * `shouldStop()` (polled between jobs) ends the run early with `stopped` set.
+ *
+ * @param {object} db  writer adapter
+ * @param {{ bookIds?: number[], booksPerTransaction?: number, cursor?: number,
+ *           shouldStop?: () => any, beforeCommit?: (next: number, total: number) => Promise<void>,
+ *           onBook?: (p: { index, total, title }) => void, onCommit?: () => Promise<void>,
+ *           yieldEvery?: () => Promise<void> }} [opts]
+ *   bookIds: only (re)align pairs that involve these books (a personal import).
+ * @returns {Promise<{ pairs, aligned, units, stopped, cursor }>}
+ */
+async function indexRefLinks(db, opts) {
+  const o = opts || {};
+  const stats = { pairs: 0, aligned: 0, units: 0, stopped: null, cursor: 0 };
+  if (!(await hasTable(db, 'ref_links'))) return stats;
+  const unitsTable = await hasTable(db, 'book_units');
+  const { books, jobs } = await refLinkJobs(db, o.bookIds);
+  const byId = new Map(books.map((b) => [b.id, b]));
   stats.pairs = jobs.length;
   // Base books are reused by many commentaries (רש"י, רמב"ן, ... על בראשית): keep a few cached.
   const unitCache = new Map();
   const unitsOf = async (id) => {
     let u = unitCache.get(id);
     if (!u) {
-      const nodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [id]);
-      u = refAlign.bookUnits(nodes, byId.get(id).totalLines);
+      u = await loadBookUnits(db, id, byId.get(id).totalLines, unitsTable);
       if (unitCache.size > 16) unitCache.delete(unitCache.keys().next().value);
       unitCache.set(id, u);
     }
@@ -1044,20 +1241,25 @@ async function indexRefLinks(db, opts) {
   };
   const baseContentOf = (baseId) => (unit) =>
     db
-      .all('SELECT line_index AS line, clean_text AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end])
-      .then((r) => r.map((x) => ({ line: x.line, text: String(x.text).slice(0, 12) })));
+      .all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end]);
   const perTx = Math.max(1, o.booksPerTransaction || 20);
   let inTx = false;
   let pending = 0;
-  const commit = async () => {
+  const start = Math.max(0, Math.min(jobs.length, Number(o.cursor) || 0));
+  stats.cursor = start;
+  const commit = async (next) => {
     if (!inTx) return;
+    if (o.beforeCommit) await o.beforeCommit(next, jobs.length);
     await db.exec('COMMIT');
     inTx = false;
     pending = 0;
+    stats.cursor = next;
     if (o.onCommit) await o.onCommit();
+    if (o.yieldEvery) await o.yieldEvery();
   };
+  let i = start;
   try {
-    for (let i = 0; i < jobs.length; i++) {
+    for (; i < jobs.length; i++) {
       const stop = o.shouldStop ? o.shouldStop() : null;
       if (stop) {
         stats.stopped = stop;
@@ -1065,33 +1267,35 @@ async function indexRefLinks(db, opts) {
       }
       const job = jobs[i];
       const { commId } = job;
-      const commNodes = await db.all('SELECT id, parent_id, level, title, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [commId]);
-      const commUnits = refAlign.bookUnits(commNodes, byId.get(commId).totalLines);
-      // Line numbers + the first characters (inline "(ב)" markers split a unit per seif / verse).
-      const content = await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND is_heading = 0', [commId]);
-      const parts = job.baseId != null ? new Map([[job.baseId, commUnits]]) : refAlign.multiUnits(commUnits, refAlign.multiTargets(books, job.scope));
-      const rowsOut = [];
-      for (const [baseId, units] of parts) {
-        const aligned = await refAlign.alignUnits(await unitsOf(baseId), units, content, baseContentOf(baseId), {
-          splitMarkers: refAlign.sharesInlineNumbering(byId.get(baseId).title),
-        });
-        for (const a of aligned) rowsOut.push([baseId, a.baseStart, a.baseEnd, commId, a.commStart, a.commEnd, a.refKey, refAlign.linkTypeFor(byId.get(commId).title)]);
+      const commUnits = await loadBookUnits(db, commId, byId.get(commId).totalLines, unitsTable);
+      let rowsOut = [];
+      if (commUnits.length) {
+        // Line numbers + the first characters (inline "(ב)" markers split a unit per seif / verse).
+        const content = await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND is_heading = 0 ORDER BY line_index', [commId]);
+        const parts = job.baseId != null ? new Map([[job.baseId, commUnits]]) : refAlign.multiUnits(commUnits, refAlign.multiTargets(books, job.scope));
+        for (const [baseId, units] of parts) {
+          const aligned = await refAlign.alignUnits(await unitsOf(baseId), units, content, baseContentOf(baseId), {
+            splitMarkers: refAlign.sharesInlineNumbering(byId.get(baseId).title),
+          });
+          for (const a of aligned) rowsOut.push([baseId, a.baseStart, a.baseEnd, commId, a.commStart, a.commEnd, a.refKey, refAlign.linkTypeFor(byId.get(commId).title)]);
+        }
       }
       if (!inTx) {
         await db.exec('BEGIN');
         inTx = true;
       }
-      // Idempotent per job (a resumed links phase simply redoes it).
+      // Idempotent per job (a resumed links phase may redo it).
       if (job.baseId != null) await db.run('DELETE FROM ref_links WHERE comm_book_id = ? AND base_book_id = ?', [commId, job.baseId]);
       else await db.run('DELETE FROM ref_links WHERE comm_book_id = ?', [commId]);
       await insertMany(db, 'INSERT INTO ref_links (base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type)', 8, rowsOut);
       stats.aligned++;
       stats.units += rowsOut.length;
+      rowsOut = null;
       pending++;
       if (o.onBook) o.onBook({ index: i + 1, total: jobs.length, title: byId.get(commId).title });
-      if (pending >= perTx) await commit();
+      if (pending >= perTx) await commit(i + 1);
     }
-    await commit();
+    await commit(i);
   } catch (e) {
     if (inTx) await db.exec('ROLLBACK').catch(() => undefined);
     throw e;
@@ -1145,6 +1349,7 @@ async function libraryCounts(db) {
     paragraphs: await one('SELECT COUNT(*) AS n FROM paragraphs'),
     links: await one('SELECT COUNT(*) AS n FROM links'),
     refLinks: (await hasTable(db, 'ref_links')) ? await one('SELECT COUNT(*) AS n FROM ref_links') : 0,
+    bookUnits: (await hasTable(db, 'book_units')) ? await one('SELECT COUNT(*) AS n FROM book_units') : 0,
     tocNodes: await one('SELECT COUNT(*) AS n FROM toc_nodes'),
   };
 }
@@ -1153,6 +1358,16 @@ module.exports = {
   SCHEMA,
   INGESTION_SCHEMA,
   REF_LINKS_SCHEMA,
+  BOOK_UNITS_SCHEMA,
+  IMPORT_QUEUE_SCHEMA,
+  createBookWriter,
+  insertMany,
+  maxId,
+  hasTable,
+  loadBookUnits,
+  refLinkJobs,
+  nowIso,
+  errorMessage,
   IngestionStopped,
   migrateSchema,
   readIngestionState,

@@ -22,6 +22,11 @@ export interface JobProgress {
   detail: string | null;
   /** Ingestion job: can be paused and resumed later. */
   resumable: boolean;
+  /** Ingestion phase (scan / books / links / finalize), for the Android progress notification. */
+  phase?: string | null;
+  /** Items done / total of the current phase (null when unknown). */
+  current?: number | null;
+  total?: number | null;
 }
 
 export interface JobResult {
