@@ -38,6 +38,8 @@ interface OverlayProps {
   /** SideDrawer: widest size in dp (default 380) and share of the screen (default 0.86). */
   maxWidth?: number;
   widthRatio?: number;
+  /** SideDrawer: fit-to-content width (clamped to the bounds above); changes animate. */
+  width?: number;
 }
 
 export function BottomSheet({ visible, onClose, children, testID }: OverlayProps) {
@@ -66,15 +68,31 @@ export function BottomSheet({ visible, onClose, children, testID }: OverlayProps
   );
 }
 
-export function SideDrawer({ visible, onClose, children, testID, maxWidth = 380, widthRatio = 0.86 }: OverlayProps) {
+/** Follows `target`, animating every change after the first value. */
+function useAnimatedNumber(target: number) {
+  const [value] = useState(() => new Animated.Value(target));
+  useEffect(() => {
+    // Not an "interaction": lists inside (FlatList) would otherwise hold back rendering until it ends.
+    const anim = Animated.timing(value, { toValue: target, duration: DURATION, easing: Easing.out(Easing.cubic), useNativeDriver: false, isInteraction: false });
+    anim.start();
+    return () => anim.stop();
+  }, [target, value]);
+  return value;
+}
+
+export function SideDrawer({ visible, onClose, children, testID, maxWidth = 380, widthRatio = 0.86, width: fitWidth }: OverlayProps) {
   const c = useAppTheme();
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const { progress, mounted } = useAnimatedVisibility(visible);
-  if (!mounted) return null;
   const drawerWidth = Math.min(maxWidth, width * widthRatio);
+  // Width is a layout prop (JS-driven) while the slide is native-driven: separate views.
+  const animatedWidth = useAnimatedNumber(Math.round(fitWidth != null ? Math.min(drawerWidth, fitWidth) : drawerWidth));
+  if (!mounted) return null;
   // The drawer is anchored at `start` (right edge in RTL); hidden = pushed past that edge.
-  const rtl = I18nManager.isRTL;
+  // The web preview flips the document direction instead of I18nManager, where `start` still
+  // resolves to the left: anchor it to the right explicitly there.
+  const rtl = I18nManager.isRTL || Platform.OS === 'web';
   const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [rtl ? drawerWidth : -drawerWidth, 0] });
   return (
     <Modal transparent visible animationType="none" onRequestClose={onClose} statusBarTranslucent navigationBarTranslucent>
@@ -84,11 +102,11 @@ export function SideDrawer({ visible, onClose, children, testID, maxWidth = 380,
       <Animated.View
         testID={testID}
         style={[
-          styles.drawer,
-          { width: drawerWidth, backgroundColor: c.surface, borderColor: c.border, paddingTop: insets.top, paddingBottom: insets.bottom, transform: [{ translateX }] },
+          Platform.OS === 'web' ? styles.drawerWeb : styles.drawer,
+          { backgroundColor: c.surface, borderColor: c.border, paddingTop: insets.top, paddingBottom: insets.bottom, transform: [{ translateX }] },
         ]}
       >
-        {children}
+        <Animated.View style={{ flex: 1, width: animatedWidth }}>{children}</Animated.View>
       </Animated.View>
     </Modal>
   );
@@ -107,4 +125,5 @@ const styles = StyleSheet.create({
   },
   grabber: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, marginBottom: 8 },
   drawer: { position: 'absolute', top: 0, bottom: 0, start: 0, borderEndWidth: StyleSheet.hairlineWidth },
+  drawerWeb: { position: 'absolute', top: 0, bottom: 0, right: 0, borderLeftWidth: StyleSheet.hairlineWidth },
 });

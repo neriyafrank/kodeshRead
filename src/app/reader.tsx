@@ -1,7 +1,10 @@
 /**
- * Reading workspace: two compact bars over the active tab's windowed reader.
- *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher)
- *   row 2: תוכן עניינים · search · טעמים / ניקוד · Aa
+ * Reading workspace: a slim bar over the active tab's windowed reader.
+ *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher) · tools
+ *   row 2 (folded away by default, toggled by the tools button): תוכן עניינים · search ·
+ *          טעמים / ניקוד · Aa
+ * The text gets the full height while row 2 is collapsed; the breadcrumb above the text still
+ * opens the TOC.
  * The TOC (RTL cascading columns) is a slide-over drawer on phones and a docked panel beside the
  * text on wide screens. Only the active tab's reader is mounted; the others are restored from
  * their saved positions when re-activated.
@@ -11,7 +14,8 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { SearchIcon } from '../components/Icons';
+import { Collapsible } from '../components/Collapsible';
+import { SearchIcon, SlidersIcon } from '../components/Icons';
 import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
 import { TabStrip } from '../components/reader/TabStrip';
@@ -30,6 +34,8 @@ export default function ReaderWorkspace() {
   const [tocOpen, setTocOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // Reader tools (row 2) start folded so the text gets the full height.
+  const [toolsOpen, setToolsOpen] = useState(false);
   const { width } = useWindowDimensions();
   // Tablets / desktop: the TOC docks beside the text and stays open after a jump.
   const docked = width >= 900;
@@ -39,13 +45,25 @@ export default function ReaderWorkspace() {
   return (
     <View style={s.screen}>
       <Stack.Screen options={{ headerShown: false, title: activeTab?.bookTitle ?? 'קורא' }} />
-      <View style={[s.toolbar, { paddingTop: insets.top + spacing.xs }]}>
+      <View style={[s.toolbar, { paddingTop: insets.top + 2 }]}>
         <Pressable onPress={goLibrary} hitSlop={8} style={s.iconBtn} accessibilityRole="button" accessibilityLabel="חזרה לספרייה" testID="reader-back">
           <Text style={s.iconText}>→</Text>
         </Pressable>
         <TabStrip onOpenSwitcher={() => setSwitcherOpen(true)} />
+        <Pressable
+          onPress={() => setToolsOpen((v) => !v)}
+          hitSlop={6}
+          style={({ pressed }) => [s.toolsBtn, toolsOpen && s.toolsBtnOn, pressed && s.pressed]}
+          accessibilityRole="button"
+          aria-expanded={toolsOpen}
+          accessibilityState={{ expanded: toolsOpen }}
+          accessibilityLabel={toolsOpen ? 'הסתר כלי קריאה' : 'הצג כלי קריאה'}
+          testID="reader-tools-toggle"
+        >
+          <SlidersIcon size={18} />
+        </Pressable>
       </View>
-      <View style={s.displayBar}>
+      <Collapsible open={toolsOpen} style={s.displayBar} testID="reader-tools">
         <Pressable
           onPress={() => setTocOpen((v) => !v)}
           disabled={!activeTab}
@@ -84,7 +102,7 @@ export default function ReaderWorkspace() {
         >
           <Text style={s.aaText}>Aa</Text>
         </Pressable>
-      </View>
+      </Collapsible>
 
       {activeTab ? (
         <View style={s.body}>
@@ -137,9 +155,9 @@ const createStyles = (c: Palette) =>
     toolbar: {
       flexDirection: 'row',
       alignItems: 'center',
-      paddingHorizontal: spacing.sm,
-      paddingBottom: spacing.xs,
-      gap: spacing.xs,
+      paddingHorizontal: spacing.xs,
+      paddingBottom: 2,
+      gap: 2,
       backgroundColor: c.surface,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.border,
@@ -159,7 +177,10 @@ const createStyles = (c: Palette) =>
     body: { flex: 1, flexDirection: 'row' },
     flex: { flex: 1 },
     barLabel: { fontSize: 13, fontWeight: '600', color: c.accent },
-    iconBtn: { minWidth: 40, height: 36, paddingHorizontal: 4, flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
+    toolsBtn: { width: 34, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
+    toolsBtnOn: { backgroundColor: c.accentSoft },
+    pressed: { opacity: 0.6 },
+    iconBtn: { minWidth: 36, height: 34, paddingHorizontal: 4, flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
     iconText: { fontSize: 20, color: c.accent },
     aaBtn: { backgroundColor: c.accentSoft },
     aaText: { fontSize: 17, fontWeight: '700', color: c.accent },

@@ -165,7 +165,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
     (show: boolean) => {
       if (headerVisible.current === show) return;
       headerVisible.current = show;
-      Animated.timing(headerY, { toValue: show ? 0 : -BREADCRUMB_HEIGHT - 2, duration: 180, useNativeDriver: useNative }).start();
+      Animated.timing(headerY, { toValue: show ? 0 : -BREADCRUMB_HEIGHT - 2, duration: 180, useNativeDriver: useNative, isInteraction: false }).start();
     },
     [headerY],
   );
@@ -534,7 +534,9 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
       return;
     }
     glow.setValue(1);
-    Animated.timing(glow, { toValue: 0, delay: HIGHLIGHT_MS - 450, duration: 450, useNativeDriver: useNative }).start();
+    // Decorative: as an "interaction" it would hold back every FlatList's rendering (the TOC
+    // columns, commentaries) for the whole 2 s highlight.
+    Animated.timing(glow, { toValue: 0, delay: HIGHLIGHT_MS - 450, duration: 450, useNativeDriver: useNative, isInteraction: false }).start();
   }, [highlightNonce, glow]);
 
   const { palette: c } = typo;

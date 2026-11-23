@@ -18,8 +18,11 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
   rendered with FlashList. Jump targets land just below the breadcrumb and glow for 2 s.
 * **Text safety**: only `<b> <strong> <i> <em> <u> <small> <big> <sup> <sub>` are rendered;
   lines with parentheses/digits get a leading `\u200F` (see `shared/reader.js`).
+* **Slim top bar**: back · tabs · open-tabs counter · a sliders button that unfolds the reader
+  tools bar (☰ תוכן · 🔍 · טעמים / ניקוד · `Aa`). The tools bar is folded away by default so the
+  text gets the full height.
 * **Breadcrumb + TOC**: sticky breadcrumb that hides on scroll-down and returns on scroll-up;
-  tap it (or ☰) for the slide-over hierarchical TOC, opened at the current section.
+  tap it (or ☰ in the tools bar) for the slide-over hierarchical TOC, opened at the current section.
 * **Tabs**: several books open at once; each tab persists `{ tabId, bookId, bookTitle,
   currentLineIndex, tocPath, lineOffset }` so switching tabs or relaunching restores the
   exact scroll position.
@@ -60,7 +63,9 @@ lightweight APK with downloadable / on-device-indexed libraries (M5, see
     (Otzaria's `רשי`, `מלבים` → רש"י, מלבי"ם).
   * Only favorites + the top 3 open by default; the rest are one-line headers. Cards you open or
     close keep that state as the drawer moves between verses.
-  * A sticky tools header (from 4 commentators): a **חפש פרשן…** filter that understands Torah
+  * A sticky tools header (from 4 commentators), folded away by default so the commentaries start
+    right under the title bar; the sliders button in the title bar unfolds it, and carries a dot
+    while a name filter or a view chip is active. It holds a **חפש פרשן…** filter that understands Torah
     abbreviations (`מ"ב`, `אב"ע`, `תוס'`, `רש`), view chips **הכל** / **עיקריים** / **מועדפים ⭐**,
     **פתח הכל / כווץ הכל**, and a horizontal RTL strip of commentator pills in priority order — one
     tap scrolls to that commentator and opens it.
@@ -168,6 +173,12 @@ The search scope picker's book filter is abbreviation-aware too.
   chapters without verse headings get a verse column built from their `(א)` lines. It opens synced to the
   reading position. A filter jumps by name, gematria, digits or chapter + verse (`כז טו`). On phones it is
   a slide-over drawer that closes after a jump; on screens ≥ 900 px it is docked beside the text.
+  Columns fit their labels (`tocColumnWidth`: 108–220 px from the widest label and the `לתחילת …`
+  header), and the drawer is the sum of the open columns (`tocPanelWidth`: at least 200 px, at most
+  85% of a phone screen / 42% of a tablet screen, beyond which the columns scroll), so a one-level book
+  gets one slim column and opening a verse column widens it only by that column. Labels are flush right
+  with the `‹` sub-level arrow on the left (`alignRight` in `src/lib/direction.ts`: React Native's native
+  text resolves `textAlign: 'right'` to the END edge in an RTL app, i.e. the left, so native uses `'left'`).
 
 ## Commentaries: Otzaria reference alignment
 

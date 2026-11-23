@@ -763,6 +763,28 @@ async function refAlignTests() {
     assert.strictEqual(toc.verseForLine(verses, 6).key, 'ב');
     assert.strictEqual(toc.verseForLine(verses, 2), null);
   });
+  await check('TOC columns: fit-to-content widths (slim for short labels, wider for long ones, clamped)', () => {
+    const toc = require('../shared/tocColumns');
+    const { intToHebrewNumeral } = require('../shared/hebrewTorahDict');
+    const chapters = Array.from({ length: 50 }, (_, i) => `פרק ${intToHebrewNumeral(i + 1)}`);
+    const verses = Array.from({ length: 31 }, (_, i) => `פסוק ${intToHebrewNumeral(i + 1)}`);
+    const wCh = toc.tocColumnWidth(chapters);
+    const wVs = toc.tocColumnWidth(verses, { header: 'לתחילת פרק כז' });
+    assert.strictEqual(wCh, toc.TOC_COLUMN_WIDTH.min, 'פרק א..נ stays at the minimum width');
+    assert.ok(wVs >= wCh && wVs < 140, `the "לתחילת" header widens the verse column a little (${wVs})`);
+    const long = toc.tocColumnWidth(['הלכות שבת פרק א', 'הלכות שבת פרק ב']);
+    assert.ok(long > wCh + 20 && long < toc.TOC_COLUMN_WIDTH.max, `longer titles get a wider column (${long})`);
+    assert.strictEqual(toc.tocColumnWidth(['סימן שכח - דין חולה שאין בו סכנה ודין חולה שיש בו סכנה']), toc.TOC_COLUMN_WIDTH.max, 'clamped to the maximum');
+    assert.ok(toc.tocColumnWidth(['סימן א'], { branch: true }) >= toc.tocColumnWidth(['סימן א']), 'room for the "‹" indicator');
+    // Niqqud / cantillation and HTML add no width.
+    assert.strictEqual(Math.round(toc.estimateTextWidth('בְּרֵאשִׁ֖ית')), Math.round(toc.estimateTextWidth('בראשית')));
+    assert.strictEqual(Math.round(toc.estimateTextWidth('<b>דף ב.</b>')), Math.round(toc.estimateTextWidth('דף ב.')));
+    // Panel: the sum of the open columns, clamped to [min, cap].
+    assert.strictEqual(toc.tocPanelWidth([wCh], { min: 200, cap: 340 }), 200, 'one slim column: the minimum panel');
+    assert.strictEqual(toc.tocPanelWidth([wCh, wVs], { min: 200, cap: 340 }), wCh + wVs, 'two columns: their sum');
+    assert.strictEqual(toc.tocPanelWidth([220, 220, 220], { min: 200, cap: 340 }), 340, 'three wide columns: capped (they scroll)');
+    assert.strictEqual(toc.tocPanelWidth([108], { min: 200, cap: 150 }), 150, 'a cap below the minimum wins');
+  });
   await check('TOC columns: inline verses from the sample DB (Tanach chapters have no verse headings)', async () => {
     const toc = require('../shared/tocColumns');
     const dbFile = path.join(ROOT, 'assets/db/library.db');

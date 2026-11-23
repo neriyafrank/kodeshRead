@@ -13,7 +13,9 @@
  *    open / close choices stick while moving between verses);
  *  - a sticky tools header: name filter that understands abbreviations ("מ"ב", "אב"ע", "תוס"),
  *    view chips (הכל / עיקריים / מועדפים ⭐), open-all / collapse-all, and a horizontal strip of
- *    commentator pills — one tap scrolls to a commentator and opens it.
+ *    commentator pills — one tap scrolls to a commentator and opens it. It is folded away by
+ *    default (the commentaries start right under the title bar) and toggled by the "סינון"
+ *    button in the title bar, which carries a dot while a name filter or a view chip is active.
  *
  * Content of a card:
  *  - heading-aligned units (Otzaria reference alignment, `ref_links`): the WHOLE block of
@@ -51,6 +53,8 @@ import { nativeDir, setWebDir } from '../../lib/direction';
 import { useCommentaryPrefs } from '../../state/commentaryStore';
 import { COMMENTARY_RATIO, useSettings } from '../../state/settingsStore';
 import { radius, spacing, useAppTheme, type Palette } from '../../theme';
+import { Collapsible } from '../Collapsible';
+import { SlidersIcon } from '../Icons';
 import { RichText } from '../RichText';
 
 type RankedGroup = Ranked<CommentaryGroup>;
@@ -145,7 +149,10 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const isExpanded = (g: RankedGroup) => expandedOverrides[g.key] ?? defaults.has(g.key);
   const allExpanded = visible.length > 0 && visible.every(isExpanded);
   const toggleAll = () => setExpanded(Object.fromEntries(visible.map((g) => [g.key, !allExpanded])));
+  const filtering = !!query.trim() || activeView !== 'all';
   const showTools = ranked.length >= TOOLS_MIN_GROUPS || !!query || activeView !== 'all';
+  // The tools header starts folded; the toggle in the title bar opens it.
+  const [toolsOpen, setToolsOpen] = useState(false);
 
   // --- scrolling ---------------------------------------------------------------------
   const scrollRef = useRef<ScrollViewInstance>(null);
@@ -347,11 +354,25 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
         >
           <Text style={[s.followText, follow && { color: c.surface }]}>סנכרון</Text>
         </Pressable>
+        {showTools && !error ? (
+          <Pressable
+            onPress={() => setToolsOpen((v) => !v)}
+            hitSlop={6}
+            style={[s.toolsToggle, toolsOpen && { backgroundColor: c.accentSoft }]}
+            accessibilityRole="button"
+            aria-expanded={toolsOpen}
+            accessibilityState={{ expanded: toolsOpen }}
+            accessibilityLabel={`${toolsOpen ? 'הסתר' : 'הצג'} כלי סינון מפרשים${filtering ? ' (סינון פעיל)' : ''}`}
+            testID="commentary-tools-toggle"
+          >
+            <SlidersIcon size={16} />
+            {filtering && !toolsOpen ? <View style={[s.toolsDot, { borderColor: c.surface }]} testID="commentary-tools-badge" /> : null}
+          </Pressable>
+        ) : null}
         <IconButton label="✕" a11y="סגור מפרשים" onPress={onClose} palette={c} testID="commentary-close" />
       </View>
 
-      {showTools && !error ? (
-        <View style={s.tools} testID="commentary-tools">
+      <Collapsible open={showTools && !error && toolsOpen} style={s.tools} testID="commentary-tools">
           <View style={s.toolsRow}>
             <View style={s.filterBox}>
               <TextInput
@@ -428,8 +449,7 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                 ))}
             </ScrollView>
           ) : null}
-        </View>
-      ) : null}
+      </Collapsible>
 
       {error ? (
         <Text style={s.message}>{error}</Text>
@@ -567,6 +587,8 @@ const createStyles = (c: Palette) =>
       marginHorizontal: spacing.xs,
     },
     followText: { fontSize: 12, fontWeight: '600', color: c.accent },
+    toolsToggle: { width: 34, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
+    toolsDot: { position: 'absolute', top: 3, end: 3, width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.5, backgroundColor: c.accent },
     message: { textAlign: 'center', marginTop: spacing.lg, fontSize: 15, color: c.textMuted },
     scroll: { paddingHorizontal: spacing.sm, paddingTop: spacing.sm, paddingBottom: spacing.xl, gap: spacing.xs + 2 },
     tools: {

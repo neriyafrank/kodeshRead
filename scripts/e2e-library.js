@@ -134,6 +134,12 @@ try {
     const TROPE = /[\u0591-\u05AF]/;
     const NIKKUD = /[\u05B0-\u05BC\u05C1\u05C2]/;
     assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()), 'both shown by default');
+    // The reader tools bar (טעמים / ניקוד / Aa ...) is folded away by default.
+    const openReaderTools = async () => {
+      if (!(await tid('toggle-cantillation').last().isVisible().catch(() => false))) await tid('reader-tools-toggle').last().click();
+      await tid('toggle-cantillation').last().waitFor();
+    };
+    await openReaderTools();
     await tid('toggle-cantillation').last().click();
     await page.waitForTimeout(300);
     assert.ok(!TROPE.test(await text()) && NIKKUD.test(await text()), 'טעמים off: clean vocalized text');
@@ -151,6 +157,7 @@ try {
     assert.ok(!NIKKUD.test(await text()), 'persisted across sessions');
     const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.appearance')).state);
     assert.ok(saved.showNikkud === false && saved.showCantillation === true, JSON.stringify(saved));
+    await openReaderTools();
     await tid('toggle-cantillation').last().click(); // brings both back
     await page.waitForTimeout(300);
     assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()));

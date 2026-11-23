@@ -13,6 +13,8 @@
  * tier badges, smart default expansion (top 3), expanding / collapsing cards, open-all /
  * collapse-all, the commentator pill strip (1-tap jump), the name filter with abbreviations
  * (אב"ע / מלבים / רש / תוס), view chips, and pinning a favorite (persisted across reloads).
+ * The tools header (filter / chips / open-all / pills) starts folded: it is opened with the
+ * "סינון" toggle in the drawer's title bar, which shows a dot while a filter is active.
  */
 'use strict';
 
@@ -75,6 +77,9 @@ try {
     assert.strictEqual(await tid('commentary-open-block').count(), 2);
     // The block bar names the unit with the commentary's own heading ("דף ב."), not the normalized key.
     assert.ok((await tid('commentary-block').first().innerText()).includes('רש"י על שבת ‹ דף ב.'), await tid('commentary-block').first().innerText());
+    // Two commentators: no tools header and no toggle for it.
+    assert.strictEqual(await tid('commentary-tools-toggle').count(), 0);
+    assert.strictEqual(await tid('commentary-tools').count(), 0);
     await shot('2-drawer');
     step('drawer shows each commentator\'s full block for the amud');
 
@@ -120,7 +125,9 @@ try {
     assert.ok(y7 > 60 && y7 < (await tid('commentary-pane').boundingBox()).y, `resizing must not scroll the text (line 7 at ${y7})`);
     step(`resizable (${Math.round(before)} -> ${Math.round(after)} px)`);
 
-    // Theme: switch to OLED dark in the Aa sheet; the drawer follows.
+    // Theme: switch to OLED dark in the Aa sheet (in the folded reader tools bar); the drawer follows.
+    assert.strictEqual(await tid('aa-button').count(), 0, 'reader tools collapsed by default');
+    await tid('reader-tools-toggle').click();
     await tid('aa-button').click();
     await tid('theme-dark').click();
     await page.keyboard.press('Escape');
@@ -191,6 +198,12 @@ try {
     const expandedFlags = () => tid('commentary-group-header').evaluateAll((els) => els.map((e) => e.getAttribute('aria-expanded') === 'true'));
     const card = (name) => page.locator('[data-testid="commentary-group"]', { has: page.locator(`[data-testid="commentary-group-name"]:text-is('${name}')`) });
     const PRIORITY = ['אונקלוס', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'מלבי"ם', 'דעת זקנים', 'גור אריה'];
+    const toolsToggle = tid('commentary-tools-toggle');
+    const setTools = async (open) => {
+      if ((await toolsToggle.getAttribute('aria-expanded')) !== String(open)) await toolsToggle.click();
+      if (open) await tid('commentary-filter').waitFor();
+      else await page.waitForFunction(() => !document.querySelector('[data-testid="commentary-tools"]'));
+    };
 
     await page.evaluate(() => localStorage.removeItem('kodeshread.commentary'));
     await openBereshit();
@@ -198,6 +211,28 @@ try {
     assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'ראשונים', 'אחרונים']);
     // Otzaria titles without gershayim are shown in their canonical spelling ("מלבים" -> מלבי"ם).
     step('priority order + tier badges (8 commentators)');
+
+    // The tools header starts folded: the first card sits right under the title bar.
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'false', 'commentary tools start collapsed');
+    for (const id of ['commentary-tools', 'commentary-filter', 'commentary-chip-all', 'commentary-toggle-all', 'commentary-pills']) assert.strictEqual(await tid(id).count(), 0, `${id} hidden`);
+    assert.strictEqual(await tid('commentary-tools-badge').count(), 0, 'no filter badge without a filter');
+    const headerBottom = async () => {
+      const h = await toolsToggle.boundingBox();
+      return h.y + h.height;
+    };
+    const firstCardGap = async () => (await tid('commentary-group').first().boundingBox()).y - (await headerBottom());
+    const collapsedGap = await firstCardGap();
+    assert.ok(collapsedGap < 24, `commentaries start right under the title bar (${collapsedGap}px)`);
+    await setTools(true);
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'true');
+    for (const id of ['commentary-filter', 'commentary-chip-all', 'commentary-toggle-all', 'commentary-pills']) assert.ok(await tid(id).isVisible(), `${id} shown`);
+    await page.waitForTimeout(250);
+    const openGap = await firstCardGap();
+    assert.ok(openGap > collapsedGap + 60, `the tools take room only when open (${collapsedGap} -> ${openGap}px)`);
+    await shot('6a-tools-open');
+    await setTools(false);
+    assert.strictEqual(await tid('commentary-filter').count(), 0);
+    step(`commentary tools header: collapsed by default, toggles open / closed (${Math.round(openGap - collapsedGap)}px saved)`);
 
     // Smart default: only the top 3 open; the rest are one-line headers without text.
     assert.deepStrictEqual(await expandedFlags(), [true, true, true, false, false, false, false, false]);
@@ -224,7 +259,8 @@ try {
     assert.deepStrictEqual(await expandedFlags(), [true, true, true, false, true, false, false, false], 'user-opened ספורנו stays open on the next verse');
     step('cards expand / collapse; user choices persist across verses');
 
-    // Open all / collapse all.
+    // Open all / collapse all (in the tools header).
+    await setTools(true);
     assert.strictEqual((await tid('commentary-toggle-all').innerText()).trim(), 'פתח הכל');
     await tid('commentary-toggle-all').click();
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-header"]')].every((e) => e.getAttribute('aria-expanded') === 'true'));
@@ -263,18 +299,33 @@ try {
     await shot('8-filter');
     await filterTo('מלבים', ['מלבי"ם']);
     await filterTo('רש', ['רש"י']);
+    // Folding the tools keeps the filter, and the toggle shows a dot while it is active.
+    await setTools(false);
+    await tid('commentary-tools-badge').waitFor();
+    assert.deepStrictEqual(await groupNames(), ['רש"י'], 'filter stays applied while the tools are folded');
+    assert.ok((await toolsToggle.getAttribute('aria-label')).includes('סינון פעיל'));
+    await shot('8b-filter-badge');
+    await setTools(true);
+    assert.strictEqual(await tid('commentary-tools-badge').count(), 0, 'no dot while the tools are open');
+    assert.strictEqual(await tid('commentary-filter').inputValue(), 'רש');
     await filterTo('רמ', ['רמב"ן']);
     await filterTo('תוס', []);
     await tid('commentary-filter-reset').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
     assert.strictEqual(await tid('commentary-filter').inputValue(), '');
-    step('filter by name / abbreviation (אב"ע, מלבים, רש, רמ; none for תוס)');
+    await setTools(false);
+    assert.strictEqual(await tid('commentary-tools-badge').count(), 0, 'no dot once the filter is cleared');
+    await setTools(true);
+    step('filter by name / abbreviation (אב"ע, מלבים, רש, רמ; none for תוס); active-filter dot on the folded toggle');
 
     // View chips.
     assert.ok((await tid('commentary-chip-all').innerText()).includes('8'));
     await tid('commentary-chip-core').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 6);
     assert.deepStrictEqual(await groupNames(), PRIORITY.slice(0, 6));
+    await setTools(false);
+    await tid('commentary-tools-badge').waitFor(); // a view chip counts as a filter too
+    await setTools(true);
     await tid('commentary-chip-all').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
     assert.strictEqual(await tid('commentary-chip-pinned').count(), 0, 'no favorites chip before pinning');
@@ -294,6 +345,7 @@ try {
 
     // Persisted: after a reload the favorite is still first, and open by default with the top 3.
     await openBereshit();
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'false', 'tools folded again after a reload');
     assert.deepStrictEqual(await groupNames(), ['גור אריה', ...PRIORITY.slice(0, 7)]);
     assert.deepStrictEqual(await expandedFlags(), [true, true, true, true, false, false, false, false], 'favorite + top 3 open by default');
     // Unpin: back to its era place.

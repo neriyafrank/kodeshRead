@@ -22,3 +22,18 @@ export function setWebDir(node: unknown, dir: 'ltr' | 'rtl') {
 
 /** "‹" is bidi-mirrored (it would render as "›" in RTL text): LRM marks keep it pointing left. */
 export const LEFT_CHEVRON = '‎‹‎';
+
+/**
+ * Hebrew text flush against the RIGHT edge of its box, on every platform.
+ *
+ * The app runs with I18nManager.forceRTL + swapLeftAndRightInRTL, and React Native's native text
+ * views resolve `textAlign: 'left' | 'right'` relative to the paragraph's (RTL) layout direction:
+ * on Android `'right'` becomes the END edge, i.e. the LEFT side (TextLayoutManager /
+ * TextAttributeProps.getTextAlignment). There the physical right edge is `'left'`. The web
+ * preview takes `'right'` literally. `writingDirection: 'rtl'` keeps the bidi base RTL so trailing
+ * punctuation ("דף ב.", "(א)") stays on the correct side.
+ */
+export const alignRight = (Platform.OS === 'web' ? { textAlign: 'right', writingDirection: 'rtl' } : { textAlign: 'left', writingDirection: 'rtl' }) as {
+  textAlign: 'left' | 'right';
+  writingDirection: 'rtl';
+};

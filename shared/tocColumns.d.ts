@@ -36,3 +36,22 @@ export function fetchInlineVerses(db: LibraryDb, bookId: number, start: number, 
 export function verseForLine(verses: InlineVerse[], line: number): InlineVerse | null;
 export function filterToc<N extends TocNodeRow>(tree: TocTree<N>, query: string, limit?: number): N[];
 export function nodeTrail(tree: TocTree, id: number): string[];
+
+export const TOC_COLUMN_WIDTH: { min: number; max: number };
+export function estimateTextWidth(text: string, fontSize?: number): number;
+export interface TocColumnWidthOptions {
+  fontSize?: number;
+  /** Horizontal padding + gaps of a row (px). */
+  chrome?: number;
+  /** Some rows open a deeper column (reserve the "‹" indicator). */
+  branch?: boolean;
+  branchSpace?: number;
+  /** "לתחילת …" column header. */
+  header?: string | null;
+  headerFontSize?: number;
+  headerChrome?: number;
+  min?: number;
+  max?: number;
+}
+export function tocColumnWidth(labels: string[], opts?: TocColumnWidthOptions): number;
+export function tocPanelWidth(columnWidths: number[], opts?: { min?: number; cap?: number }): number;

@@ -162,4 +162,61 @@ function nodeTrail(tree, id) {
   return out;
 }
 
-module.exports = { buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail };
+// --- fit-to-content column widths ------------------------------------------------------------
+// Text cannot be measured before layout in React Native, so widths are estimated from per-glyph
+// advance factors of the UI font (Roboto / Noto Sans Hebrew, Chrome's system-ui), deliberately a
+// little generous so a label never ellipsizes at its estimated width.
+
+/** Per-column bounds (px). */
+const TOC_COLUMN_WIDTH = { min: 108, max: 220 };
+
+/** Approximate advance of one character, in em. */
+function glyphEm(ch) {
+  if (/[֑-ׇ‎‏]/.test(ch)) return 0; // niqqud, cantillation, direction marks
+  if (/[א-ת]/.test(ch)) return 0.6;
+  if (ch === ' ') return 0.27;
+  if (/[0-9]/.test(ch)) return 0.57;
+  if (/["'.:,;()\[\]׳״\-–—›‹]/.test(ch)) return 0.32;
+  return 0.62;
+}
+
+/** Estimated rendered width (px) of a plain-text label at `fontSize`. */
+function estimateTextWidth(text, fontSize) {
+  const plain = String(text || '').replace(/<[^>]*>/g, '');
+  let em = 0;
+  for (const ch of plain) em += glyphEm(ch);
+  return em * (fontSize || 15);
+}
+
+/**
+ * Width (px) for one TOC column: its widest row label (plus the row chrome and, for branch rows,
+ * the "‹" indicator) and its "לתחילת …" header, clamped to [min, max].
+ * @param {string[]} labels
+ * @param {{ fontSize?: number, chrome?: number, branch?: boolean, branchSpace?: number,
+ *           header?: string|null, headerFontSize?: number, headerChrome?: number, min?: number, max?: number }} [opts]
+ */
+function tocColumnWidth(labels, opts) {
+  const o = opts || {};
+  const min = o.min != null ? o.min : TOC_COLUMN_WIDTH.min;
+  const max = o.max != null ? o.max : TOC_COLUMN_WIDTH.max;
+  const fontSize = o.fontSize || 15;
+  let widest = 0;
+  for (const l of labels || []) widest = Math.max(widest, estimateTextWidth(l, fontSize));
+  let need = widest + (o.chrome != null ? o.chrome : 28) + (o.branch ? (o.branchSpace != null ? o.branchSpace : 18) : 0);
+  if (o.header) need = Math.max(need, estimateTextWidth(o.header, o.headerFontSize || 13) * 1.06 + (o.headerChrome != null ? o.headerChrome : 28));
+  return Math.round(Math.min(max, Math.max(min, need)));
+}
+
+/**
+ * Drawer / panel width for the open columns: their sum, clamped to [min, cap] (a cap below `min`
+ * wins: tiny screens). Columns beyond the cap scroll horizontally.
+ */
+function tocPanelWidth(columnWidths, opts) {
+  const o = opts || {};
+  const sum = (columnWidths || []).reduce((a, b) => a + b, 0);
+  const cap = o.cap != null ? o.cap : Infinity;
+  const min = Math.min(o.min != null ? o.min : 0, cap);
+  return Math.round(Math.min(cap, Math.max(min, sum)));
+}
+
+module.exports = { buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail, TOC_COLUMN_WIDTH, estimateTextWidth, tocColumnWidth, tocPanelWidth };

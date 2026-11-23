@@ -44,6 +44,35 @@ export function BookIcon({ size = 16 }: { size?: number }) {
   );
 }
 
+/** Three slider tracks with knobs: "tools / display options". */
+export function SlidersIcon({ color: colorProp, size = 20 }: { color?: string; size?: number }) {
+  const colors = useAppTheme();
+  const color = colorProp ?? colors.accent;
+  const knob = Math.round(size * 0.3);
+  const knobs = [0.68, 0.28, 0.52];
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'space-evenly' }} accessibilityElementsHidden importantForAccessibility="no">
+      {knobs.map((at, i) => (
+        <View key={i} style={{ height: knob, justifyContent: 'center' }}>
+          <View style={{ height: 2, borderRadius: 1, backgroundColor: color }} />
+          <View
+            style={{
+              position: 'absolute',
+              start: Math.round((size - knob) * at),
+              width: knob,
+              height: knob,
+              borderRadius: knob / 2,
+              borderWidth: 2,
+              borderColor: color,
+              backgroundColor: colors.surface,
+            }}
+          />
+        </View>
+      ))}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   folderTab: { borderWidth: 1.6, borderBottomWidth: 0, borderTopStartRadius: 2, borderTopEndRadius: 2 },
 });
