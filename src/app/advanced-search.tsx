@@ -304,7 +304,7 @@ export default function AdvancedSearchScreen() {
       <Stack.Screen options={{ title: 'חיפוש מתקדם' }} />
       <View style={s.topBar}>
         <Text style={s.heading} numberOfLines={1}>
-          בסגנון פרויקט השו״ת · לא מקוון
+          לא מקוון
         </Text>
         <Pressable onPress={back} style={({ pressed }) => [s.backBtn, pressed && s.pressed]} accessibilityRole="button" testID="adv-back">
           <Text style={s.backText}>חזרה לחיפוש רגיל</Text>
