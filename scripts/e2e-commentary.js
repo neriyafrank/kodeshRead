@@ -86,7 +86,7 @@ try {
     assert.strictEqual(await tid('commentary-entry-direct').count(), 3);
     assert.strictEqual(await tid('commentary-open-block').count(), 2);
     // The block bar names the unit with the commentary's own heading ("דף ב."), not the normalized key.
-    assert.ok((await tid('commentary-block').first().innerText()).includes('רש"י על שבת ‹ דף ב. ‹ שורה א'), await tid('commentary-block').first().innerText());
+    assert.ok((await tid('commentary-block').first().innerText()).includes('דף ב. · שורה א'), await tid('commentary-block').first().innerText());
     // The "שורה א" sub-heading is the block's label, not a standalone row in the drawer body.
     assert.ok(!(await tid('commentary-group').first().innerText()).replace('שורה א', '').includes('שורה'), 'no שורה heading rows');
     // Two commentators: no tools header and no toggle for it.
@@ -195,8 +195,23 @@ try {
 
     // Single-commentator focus (רש"י only) stays on while the drawer opens another book's paragraph.
     await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].every((e) => e.innerText === 'רש"י'));
-    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י']);
+    await tid('commentary-focus-row').waitFor();
+    assert.strictEqual(await tid('commentary-focus-row').getAttribute('aria-label'), 'רש"י');
+    // Focus mode: no card header / name repeated under the chip bar; favorite + open-in-book stay.
+    assert.strictEqual(await tid('commentary-group-header').count(), 0, 'no accordion header in focus mode');
+    assert.strictEqual(await tid('commentary-group-name').count(), 0, 'commentator name not repeated');
+    assert.strictEqual(await tid('commentary-pin').count(), 1, 'favorite toggle in the slim row');
+    assert.strictEqual(await tid('commentary-open-block').count(), 1, 'פתח בספר in the slim row');
+    const focusH = (await tid('commentary-focus-row').boundingBox()).height;
+    assert.ok(focusH <= 30, `slim utility row (${focusH}px)`);
+    assert.ok(/דף ב.? · שורה/.test(await tid('commentary-block').innerText()), 'concise location label');
+    assert.ok(!(await tid('commentary-block').innerText()).includes('רש"י'), 'book name not repeated in the label');
+    // Compact chrome: drawer title row and chip strip.
+    const titleH = (await tid('commentary-title').evaluate((e) => e.parentElement.getBoundingClientRect().height));
+    assert.ok(titleH <= 40, `single-line title bar (${titleH}px)`);
+    const chipH = (await tid('commentary-chip').first().boundingBox()).height;
+    assert.ok(chipH <= 30, `slim chips (${chipH}px)`);
+    await shot('3z-focus');
     await tid('commentary-chip-all').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
     await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
@@ -222,7 +237,7 @@ try {
     await shot('4b-empty-state');
     await tid('commentary-filter-reset').click();
     step('empty state for a verse without the chosen commentators + "הצג את כל המפרשים"');
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"]')].some((e) => e.innerText === 'שבת'));
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"], [data-testid="commentary-focus-row"]')].some((e) => (e.dataset.testid === 'commentary-focus-row' ? e.getAttribute('aria-label') : e.innerText) === 'שבת'));
     await tid('commentary-open-block').first().click();
     await page.waitForFunction(() => /^שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''));
     // Rows whose highlight glow (an absolutely positioned, coloured layer) is visible; the
@@ -251,7 +266,10 @@ try {
       await tid('para-3').last().click();
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length >= 8, null, { timeout: 10000 });
     };
-    const groupNames = () => tid('commentary-group-name').allInnerTexts();
+    // Stacked cards expose their name; a focused (single-commentator) view has no card header,
+    // its slim row carries the commentator as aria-label.
+    const groupNames = () =>
+      page.evaluate(() => [...document.querySelectorAll('[data-testid="commentary-group-name"], [data-testid="commentary-focus-row"]')].map((e) => (e.dataset.testid === 'commentary-focus-row' ? e.getAttribute('aria-label') : e.innerText)));
     const expandedFlags = () => tid('commentary-group-header').evaluateAll((els) => els.map((e) => e.getAttribute('aria-expanded') === 'true'));
     const card = (name) => page.locator('[data-testid="commentary-group"]', { has: page.locator(`[data-testid="commentary-group-name"]:text-is('${name}')`) });
     const PRIORITY = ['אונקלוס', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'מלבי"ם', 'דעת זקנים', 'גור אריה'];
@@ -345,12 +363,12 @@ try {
     };
     const showing = async (names) => {
       try {
-        await page.waitForFunction((n) => JSON.stringify([...document.querySelectorAll('[data-testid="commentary-group-name"]')].map((e) => e.innerText)) === JSON.stringify(n), names, { timeout: 5000 });
+        await page.waitForFunction((n) => JSON.stringify([...document.querySelectorAll('[data-testid="commentary-group-name"], [data-testid="commentary-focus-row"]')].map((e) => (e.dataset.testid === 'commentary-focus-row' ? e.getAttribute('aria-label') : e.innerText))) === JSON.stringify(n), names, { timeout: 5000 });
       } catch {
         assert.deepStrictEqual(await groupNames(), names, 'commentators shown');
       }
     };
-    const openCount = () => tid('commentary-group-header').evaluateAll((els) => els.filter((e) => e.getAttribute('aria-expanded') === 'true').length);
+    const openCount = async () => (await tid('commentary-group-header').evaluateAll((els) => els.filter((e) => e.getAttribute('aria-expanded') === 'true').length)) + (await tid('commentary-focus-row').count());
     assert.strictEqual(await tid('commentary-chip-all').getAttribute('aria-pressed'), 'true');
 
     // 1-tap focus: only רש"י, expanded immediately.

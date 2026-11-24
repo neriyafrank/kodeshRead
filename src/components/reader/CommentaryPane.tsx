@@ -60,7 +60,7 @@ import { RichText } from '../RichText';
 
 type RankedGroup = Ranked<CommentaryGroup>;
 
-const GRABBER_HEIGHT = 22;
+const GRABBER_HEIGHT = 12;
 
 /** Committed drawer height for a reader area (the text area above is shrunk by this). */
 export function commentaryPaneHeight(areaHeight: number, ratio: number): number {
@@ -135,12 +135,13 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
   // --- priority, filter, expansion ------------------------------------------------
   const ranked = useMemo(() => rankCommentaries(groups ?? [], { pinned, context: { title: bookTitle } }), [groups, pinned, bookTitle]);
-  const total = ranked.reduce((n, g) => n + g.entries.length, 0);
   const [query, setQuery] = useState('');
   // Chip-bar selection (sticky across verses); keys this passage lacks simply match nothing.
   const selected = useMemo(() => selectCommentaries(ranked, selection), [ranked, selection]);
   const selecting = selection.length > 0;
   const visible = useMemo(() => filterCommentaries(selected, { query }), [selected, query]);
+  // One commentator isolated in the chip bar: ultra-compact reading mode (no card header).
+  const focusMode = selection.length === 1 && visible.length === 1;
   const defaults = useMemo(() => defaultExpandedKeys(ranked), [ranked]);
   // A narrow name filter opens what it found (as if tapped, so it can still be collapsed).
   const narrowKeys = query.trim() && visible.length <= 3 ? visible.map((g) => g.key).join('\n') : '';
@@ -212,6 +213,8 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
   const entrySize = Math.max(13, Math.round(fontSize * 0.88));
   const crumbs = tocPath ? tocPath.split(' > ') : [];
+  // Compact location for the title row: the chapter / daf level (parent of the verse), else the leaf.
+  const where = crumbs.length ? crumbs[crumbs.length > 1 ? crumbs.length - 2 : 0] : `שורה ${line}`;
   // Same vocalization-aware leading as the reader (commentaries quote vocalized verses).
   const entryTextStyle = [s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: lineHeightPx(entrySize, lineHeight, { showNikkud, showCantillation }) }];
 
@@ -220,62 +223,89 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
     else if (g.entries[0]) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.entries[0].line });
   };
 
-  const renderCard = (g: RankedGroup) => {
-    const open = isExpanded(g);
+  /** The commentary's own heading path ("דף ב. · שורה ה"); the book name is already visible. */
+  const blockLabel = (g: RankedGroup) =>
+    g.block ? (g.entries[0]?.toc_path ?? g.block.refKey.replace(/\|/g, ' > ')).split(' > ').join(' · ') : '';
+
+  const pinButton = (g: RankedGroup) => (
+    <Pressable
+      onPress={() => togglePinned(g.key)}
+      hitSlop={6}
+      style={s.pinBtn}
+      accessibilityRole="button"
+      aria-pressed={g.pinned}
+      accessibilityState={{ selected: g.pinned }}
+      accessibilityLabel={g.pinned ? `הסר את ${g.displayName} מהמועדפים` : `הוסף את ${g.displayName} למועדפים`}
+      testID="commentary-pin"
+    >
+      <Text style={[s.pinText, g.pinned && { color: c.accent }]}>{g.pinned ? '★' : '☆'}</Text>
+    </Pressable>
+  );
+  const openButton = (g: RankedGroup) => (
+    <Pressable
+      onPress={() => openGroup(g)}
+      hitSlop={6}
+      style={s.openBtn}
+      accessibilityRole="button"
+      accessibilityLabel={g.block ? `פתח את ${g.bookTitle} ב${g.block.refKey.split('|').join(' ')}` : `פתח את ${g.bookTitle} בכרטיסייה`}
+      testID={g.block ? 'commentary-open-block' : 'commentary-open-group'}
+    >
+      <Text style={s.openText}>פתח בספר ↗</Text>
+    </Pressable>
+  );
+
+  // `focus`: one commentator isolated in the chip bar -> no card chrome and no repeated name;
+  // just a slim location + actions row above the text.
+  const renderCard = (g: RankedGroup, focus: boolean) => {
+    const open = focus || isExpanded(g);
+    const label = blockLabel(g);
     return (
-      <View
-        key={g.bookId}
-        style={s.card}
-        testID="commentary-group"
-      >
-        <View style={s.cardHeader}>
-          <Pressable
-            onPress={() => setExpanded({ [g.key]: !open })}
-            style={s.cardToggle}
-            accessibilityRole="button"
-            aria-expanded={open}
-            accessibilityState={{ expanded: open }}
-            accessibilityLabel={`${g.displayName}, ${g.tier}, ${g.entries.length}`}
-            testID="commentary-group-header"
-          >
-            <Text style={s.chevron}>{open ? '⌄' : '‹'}</Text>
-            <Text style={[s.groupName, { fontFamily: font.bold }]} numberOfLines={1} testID="commentary-group-name">
-              {g.displayName}
-            </Text>
-            <Text style={[s.tierTag, g.core || g.isSource ? s.tierCore : null]} numberOfLines={1} testID="commentary-tier">
-              {g.tier}
-            </Text>
-            <Text style={s.groupCount}>{g.entries.length}</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => togglePinned(g.key)}
-            hitSlop={6}
-            style={s.pinBtn}
-            accessibilityRole="button"
-            aria-pressed={g.pinned}
-            accessibilityState={{ selected: g.pinned }}
-            accessibilityLabel={g.pinned ? `הסר את ${g.displayName} מהמועדפים` : `הוסף את ${g.displayName} למועדפים`}
-            testID="commentary-pin"
-          >
-            <Text style={[s.pinText, g.pinned && { color: c.accent }]}>{g.pinned ? '★' : '☆'}</Text>
-          </Pressable>
-          <Pressable
-            onPress={() => openGroup(g)}
-            hitSlop={6}
-            style={s.openBtn}
-            accessibilityRole="button"
-            accessibilityLabel={g.block ? `פתח את ${g.bookTitle} ב${g.block.refKey.split('|').join(' ')}` : `פתח את ${g.bookTitle} בכרטיסייה`}
-            testID={g.block ? 'commentary-open-block' : 'commentary-open-group'}
-          >
-            <Text style={s.openText}>פתח בספר ↗</Text>
-          </Pressable>
-        </View>
-        {open && g.block ? (
-          <Text style={s.blockPath} numberOfLines={1} testID="commentary-block">
-            {/* The book's own headings (the canonical ref_key is normalized for matching). */}
-            {g.bookTitle} ‹ {(g.entries[0]?.toc_path ?? g.block.refKey.replace(/\|/g, ' > ')).split(' > ').join(' ‹ ')}
-          </Text>
-        ) : null}
+      <View key={g.bookId} style={focus ? s.cardFocus : s.card} testID="commentary-group">
+        {focus ? (
+          <View style={s.focusRow} accessibilityLabel={g.displayName} testID="commentary-focus-row">
+            {g.block ? (
+              <Text style={s.focusLabel} numberOfLines={1} testID="commentary-block">
+                {label}
+              </Text>
+            ) : (
+              <Text style={s.focusLabel} numberOfLines={1}>
+                {g.entries.length} קטעים
+              </Text>
+            )}
+            {pinButton(g)}
+            {openButton(g)}
+          </View>
+        ) : (
+          <View style={s.cardHeader}>
+            <Pressable
+              onPress={() => setExpanded({ [g.key]: !open })}
+              style={s.cardToggle}
+              accessibilityRole="button"
+              aria-expanded={open}
+              accessibilityState={{ expanded: open }}
+              accessibilityLabel={`${g.displayName}, ${g.tier}, ${g.entries.length}`}
+              testID="commentary-group-header"
+            >
+              <Text style={s.chevron}>{open ? '⌄' : '‹'}</Text>
+              <Text style={[s.groupName, { fontFamily: font.bold }]} numberOfLines={1} testID="commentary-group-name">
+                {g.displayName}
+              </Text>
+              <Text style={[s.tierTag, g.core || g.isSource ? s.tierCore : null]} numberOfLines={1} testID="commentary-tier">
+                {g.tier}
+              </Text>
+              {open && g.block ? (
+                <Text style={s.inlineLabel} numberOfLines={1} testID="commentary-block">
+                  {label}
+                </Text>
+              ) : (
+                <View style={{ flex: 1 }} />
+              )}
+              <Text style={s.groupCount}>{g.entries.length}</Text>
+            </Pressable>
+            {pinButton(g)}
+            {openButton(g)}
+          </View>
+        )}
         {open
           ? g.entries.map((e) => (
               <View
@@ -285,8 +315,7 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               >
                 {g.block ? null : (
                   <Text style={s.entryPath} numberOfLines={1}>
-                    {g.bookTitle}
-                    {e.toc_path ? ` ‹ ${e.toc_path.split(' > ').join(' ‹ ')}` : ''}
+                    {e.toc_path ? e.toc_path.split(' > ').join(' · ') : g.bookTitle}
                   </Text>
                 )}
                 <View style={s.entryRow}>
@@ -321,15 +350,10 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
       </View>
 
       <View style={s.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={s.kicker} numberOfLines={1}>
-            מפרשים וקישורים{ranked.length ? ` · ${ranked.length}` : ''}
-          </Text>
-          <Text style={s.where} numberOfLines={1}>
-            {crumbs.length ? crumbs.join(' ‹ ') : `שורה ${line}`}
-            {total ? ` · ${total} קטעים` : ''}
-          </Text>
-        </View>
+        <Text style={s.title} numberOfLines={1} testID="commentary-title">
+          מפרשים{ranked.length ? ` (${ranked.length})` : ''}
+          {where ? ` · ${where}` : ''}
+        </Text>
         <IconButton label="→" a11y="הפסקה הקודמת עם מפרשים" disabled={!hasPrev} onPress={onPrev} palette={c} testID="commentary-prev" />
         <IconButton label="←" a11y="הפסקה הבאה עם מפרשים" disabled={!hasNext} onPress={onNext} palette={c} testID="commentary-next" />
         <Pressable
@@ -483,7 +507,7 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           keyboardShouldPersistTaps="handled"
           testID="commentary-list"
         >
-          {visible.map(renderCard)}
+          {visible.map((g) => renderCard(g, focusMode))}
         </ScrollView>
       )}
     </View>
@@ -550,28 +574,27 @@ const createStyles = (c: Palette) =>
       flexDirection: 'row',
       alignItems: 'center',
       paddingStart: spacing.lg,
-      paddingEnd: spacing.sm,
-      paddingBottom: spacing.xs,
-      gap: 2,
+      paddingEnd: spacing.xs,
+      height: 36,
+      gap: 0,
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.border,
     },
-    kicker: { fontSize: 15, fontWeight: '700', color: c.text, ...alignRight },
-    where: { fontSize: 12, color: c.textMuted, ...alignRight },
+    title: { flex: 1, fontSize: 14, fontWeight: '700', color: c.text, ...alignRight },
     followBtn: {
       paddingHorizontal: spacing.sm,
-      height: 28,
+      height: 24,
       justifyContent: 'center',
       borderRadius: radius.sm,
       borderWidth: 1,
       borderColor: c.accent,
-      marginHorizontal: spacing.xs,
+      marginHorizontal: 2,
     },
-    followText: { fontSize: 12, fontWeight: '600', color: c.accent },
-    toolsToggle: { width: 34, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
+    followText: { fontSize: 11, fontWeight: '600', color: c.accent },
+    toolsToggle: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
     toolsDot: { position: 'absolute', top: 3, end: 3, width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.5, backgroundColor: c.accent },
     message: { textAlign: 'center', marginTop: spacing.lg, fontSize: 15, color: c.textMuted },
-    scroll: { paddingHorizontal: spacing.sm, paddingTop: spacing.sm, paddingBottom: spacing.xl, gap: spacing.xs + 2 },
+    scroll: { paddingHorizontal: spacing.xs, paddingTop: spacing.xs, paddingBottom: spacing.lg, gap: spacing.xs },
     tools: {
       paddingHorizontal: spacing.md,
       paddingTop: spacing.xs + 2,
@@ -597,11 +620,11 @@ const createStyles = (c: Palette) =>
     toggleAll: { height: 32, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRadius: radius.md, backgroundColor: c.accentSoft },
     toggleAllText: { fontSize: 12, fontWeight: '700', color: c.accent },
     pillsScroll: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border, backgroundColor: c.surface },
-    pills: { gap: spacing.xs + 2, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, alignItems: 'center', justifyContent: 'flex-end', flexDirection: 'row' },
+    pills: { gap: spacing.xs, paddingHorizontal: spacing.sm, paddingVertical: 3, alignItems: 'center', justifyContent: 'flex-end', flexDirection: 'row' },
     pill: {
       height: 28,
       maxWidth: 150,
-      paddingHorizontal: spacing.sm + 2,
+      paddingHorizontal: spacing.sm,
       borderRadius: 14,
       justifyContent: 'center',
       borderWidth: StyleSheet.hairlineWidth,
@@ -620,10 +643,14 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.surface,
       overflow: 'hidden',
     },
-    cardHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: c.surfaceMuted, paddingEnd: spacing.sm, gap: 2 },
-    cardToggle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingStart: spacing.md, paddingVertical: spacing.sm, minWidth: 0 },
+    cardHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: c.surfaceMuted, height: 34, paddingEnd: spacing.xs, gap: 2 },
+    cardFocus: { backgroundColor: c.surface },
+    focusRow: { flexDirection: 'row', alignItems: 'center', height: 28, paddingHorizontal: spacing.sm, gap: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+    focusLabel: { flex: 1, fontSize: 12, fontWeight: '600', color: c.textMuted, ...alignRight },
+    inlineLabel: { flex: 1, fontSize: 11, color: c.textMuted, ...alignRight },
+    cardToggle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.xs + 2, paddingStart: spacing.sm, height: 34, minWidth: 0 },
     chevron: { width: 14, textAlign: 'center', fontSize: 15, color: c.accent },
-    groupName: { flexShrink: 1, fontSize: 16, fontWeight: '700', color: c.accent, writingDirection: 'rtl' },
+    groupName: { flexShrink: 0, maxWidth: '55%', fontSize: 15, fontWeight: '700', color: c.accent, writingDirection: 'rtl' },
     tierTag: {
       fontSize: 11,
       color: c.textMuted,
@@ -646,15 +673,14 @@ const createStyles = (c: Palette) =>
       paddingVertical: 2,
       overflow: 'hidden',
     },
-    pinBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-    pinText: { fontSize: 19, color: c.textMuted },
-    blockPath: { fontSize: 12, color: c.textMuted, ...alignRight, paddingHorizontal: spacing.md, paddingTop: spacing.sm },
-    entry: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs + 2, gap: 2 },
+    pinBtn: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+    pinText: { fontSize: 17, color: c.textMuted },
+    entry: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, gap: 2 },
     entryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs },
     entryPath: { flex: 1, fontSize: 12, color: c.textMuted, ...alignRight },
     entryOpen: { paddingHorizontal: 4, paddingTop: 2 },
     entryOpenText: { fontSize: 13, color: c.accent, opacity: 0.7 },
-    openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 3, borderRadius: radius.sm, backgroundColor: c.accentSoft },
+    openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm, backgroundColor: c.accentSoft },
     openText: { fontSize: 12, fontWeight: '600', color: c.accent },
     entryText: { color: c.text, writingDirection: 'rtl', textAlign: 'justify', includeFontPadding: true },
   });
