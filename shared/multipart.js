@@ -161,6 +161,46 @@ async function isValidPart(io, part) {
 /** Suffix of an in-progress part: kept on disk across interruptions and resumed with an HTTP Range request. */
 const PARTIAL_SUFFIX = '.partial';
 const partialName = (name) => name + PARTIAL_SUFFIX;
+/** Sidecar of a partial: holds the part's manifest SHA-256, so a partial of another release is never continued. */
+const partialIdName = (name) => name + PARTIAL_SUFFIX + '.id';
+
+async function readPartialId(io, part) {
+  const idName = partialIdName(part.name);
+  if ((await io.size(idName)) == null) return null;
+  const r = await io.openRead(idName);
+  try {
+    return new TextDecoder().decode(await r.read(128)).trim();
+  } finally {
+    await r.close();
+  }
+}
+
+async function writePartialId(io, part) {
+  const w = await io.openWrite(partialIdName(part.name), false);
+  try {
+    await w.write(new TextEncoder().encode(part.sha256));
+  } finally {
+    await w.close();
+  }
+}
+
+/**
+ * Bytes of the library already on disk (complete parts + the partial of each part, sizes only), for the
+ * first progress report of a retry: the UI shows the saved percentage at once instead of 0%.
+ */
+async function existingBytes(io, manifest) {
+  let sum = 0;
+  for (const part of manifest.parts) {
+    const full = await io.size(part.name);
+    if (full === part.sizeBytes) {
+      sum += full;
+      continue;
+    }
+    const partial = (await io.size(partialName(part.name))) || 0;
+    sum += Math.min(partial, part.sizeBytes);
+  }
+  return sum;
+}
 
 const TRANSIENT_RE =
   /unable to resolve host|no address associated|unknownhost|enotfound|eai_again|econnreset|econnaborted|econnrefused|etimedout|ehostunreach|enetunreach|enetdown|epipe|time[d ]?-?out|connection (?:dropped|reset|closed|aborted|lost|refused)|connect(?:ion)? failed|failed to connect|software caused connection abort|unexpected end of stream|stream was reset|socket|network|offline|internet|ssl|handshake|premature|broken pipe|http (?:408|429|5\d\d)\b/i;
@@ -236,6 +276,7 @@ async function downloadParts(io, manifest, opts) {
     if (cancelled()) throw cancelledError();
     if (await isValidPart(io, part)) {
       await io.remove(partial); // a stale partial of an already complete part
+      await io.remove(partialIdName(part.name));
       skipped++;
       done += part.sizeBytes;
       report(idx, 0, true);
@@ -245,6 +286,14 @@ async function downloadParts(io, manifest, opts) {
     let netAttempt = 0; // consecutive transient failures without progress
     for (;;) {
       let have = (await io.size(partial)) || 0;
+      if (have > 0) {
+        // A partial left by another release (different SHA-256 in its sidecar) can never be continued.
+        const id = await readPartialId(io, part).catch(() => null);
+        if (id && id !== part.sha256) {
+          await io.remove(partial);
+          have = 0;
+        }
+      }
       if (have > part.sizeBytes) {
         await io.remove(partial); // cannot be a prefix of this part
         have = 0;
@@ -252,6 +301,7 @@ async function downloadParts(io, manifest, opts) {
       report(idx, have, false);
       if (have < part.sizeBytes) {
         try {
+          await writePartialId(io, part);
           await io.download(partUrl(o.manifestUrl, part), partial, (written) => report(idx, Math.min(written, part.sizeBytes), false), o.isCancelled, { resumeFrom: have, expectedBytes: part.sizeBytes });
         } catch (e) {
           if (cancelled()) throw cancelledError();
@@ -283,6 +333,7 @@ async function downloadParts(io, manifest, opts) {
         continue;
       }
       await io.rename(partial, part.name);
+      await io.remove(partialIdName(part.name));
       if (await isValidPart(io, part)) break;
       if (attempt++ >= retries) throw new Error(`${part.name} פגום (גודל או SHA-256 לא תואמים) גם אחרי ${retries + 1} ניסיונות`);
     }
@@ -388,7 +439,8 @@ async function stageCloudLibrary(io, manifest, opts) {
   const report = o.report || (() => undefined);
   const zipName = o.zipName || CLOUD_ZIP_NAME;
   const dbName = o.dbName || CLOUD_DB_NAME;
-  let lastFraction = 0;
+  // Seeded with what is already on disk: a retry's first report is the saved percentage, never 0%.
+  let lastFraction = manifest.totalZipBytes ? Math.min(1, (await existingBytes(io, manifest)) / manifest.totalZipBytes) : 0;
   const keepAwake = o.keepAwake || ((fn) => fn());
   await downloadParts(io, manifest, {
     manifestUrl: o.manifestUrl,
@@ -407,10 +459,11 @@ async function stageCloudLibrary(io, manifest, opts) {
         detail: r.background ? 'ההורדה תמשיך כשתחזרו לאפליקציה' : `ניסיון ${r.attempt} מתוך ${r.maxAttempts} · בעוד ${Math.max(1, Math.round(r.delayMs / 1000))} שנ׳`,
       }),
     onProgress: (p) => {
-      lastFraction = p.totalBytes ? p.doneBytes / p.totalBytes : 0;
+      // Strictly monotonic: a transient drop / retry never moves the bar backwards.
+      lastFraction = Math.max(lastFraction, p.totalBytes ? p.doneBytes / p.totalBytes : 0);
       report({
         stage: p.skipped ? 'ממשיך — חלק קיים' : 'מוריד…',
-        fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null,
+        fraction: p.totalBytes ? lastFraction : null,
         detail: formatPartProgress(p),
       });
     },
@@ -534,6 +587,8 @@ module.exports = {
   PARTIAL_SUFFIX,
   NETWORK_RETRY_STAGE,
   partialName,
+  partialIdName,
+  existingBytes,
   isTransientNetworkError,
   backoffDelayMs,
   formatCloudNotification,

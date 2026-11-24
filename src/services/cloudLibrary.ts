@@ -26,7 +26,7 @@ import { AppState } from 'react-native';
 
 import type { Edition } from '../../shared/editions';
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
-import { checkFreeSpace, cloudManifestUrl, createMemoryIO, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
+import { checkFreeSpace, cloudManifestUrl, createMemoryIO, existingBytes, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
 import { coreInfoFromMeta, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toAdapter } from '../db/library';
 import { CancelledError, useLibraryJobs } from '../state/libraryJobs';
@@ -94,7 +94,11 @@ function partsDir(): Directory {
   return dir;
 }
 
-/** True when the host answers a Range request with 206 (GitHub release assets do). */
+/**
+ * Whether the host honours Range. Only a definitive 200 (Range ignored) answers "no" (the partial is then
+ * useless); anything else that is not a 206 is a transient failure and throws, so a flaky link can never
+ * make the app throw away a half-finished download.
+ */
 async function supportsRange(url: string): Promise<boolean> {
   const res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
   try {
@@ -102,7 +106,9 @@ async function supportsRange(url: string): Promise<boolean> {
   } catch {
     // body already consumed / unsupported
   }
-  return res.status === 206;
+  if (res.status === 206) return true;
+  if (res.status === 200) return false;
+  throw new Error(`HTTP ${res.status}`);
 }
 
 /** Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes it. */
@@ -177,6 +183,7 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
         target.delete();
         from = 0;
       }
+      if (from > 0 && expected > 0 && from >= expected) return; // already complete
       const task = File.createDownloadTask(url, chunk, {
         headers: from > 0 ? { Range: `bytes=${from}-` } : undefined,
         onProgress: ({ bytesWritten, totalBytes }) => {
@@ -189,6 +196,8 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
         got = await task.downloadAsync();
       } finally {
         // Whatever arrived before an error is a valid prefix: keep it, the retry continues after it.
+        // A chunk longer than what is still missing is an error page / full body, never a prefix: drop it.
+        if (expected > 0 && chunk.exists && chunk.size > expected - from) chunk.delete();
         await absorbChunk(chunk, target).catch((e) => console.warn('could not keep the partial download', e));
       }
       if (!got) throw new Error('ההורדה נכשלה');
@@ -264,7 +273,9 @@ export async function downloadAndStageCloud(manifest: CloudManifest, manifestUrl
   const io = nativePartsIO(cancelled);
   removeDbFiles(CORE_TMP_DB);
   try {
-    report({ stage: 'מוריד…', fraction: 0, detail: null });
+    // A retry shows the saved percentage at once (bytes already on disk), never a flash of 0%.
+    const saved = manifest.totalZipBytes ? Math.min(1, (await existingBytes(io, manifest)) / manifest.totalZipBytes) : 0;
+    report({ stage: 'מוריד…', fraction: saved, detail: null });
     try {
       await stageCloudLibrary(io, manifest, {
         manifestUrl,

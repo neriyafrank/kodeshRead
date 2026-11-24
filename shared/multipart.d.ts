@@ -95,6 +95,8 @@ export interface ResilienceOptions {
   whenForeground?: () => Promise<void>;
 }
 export const PARTIAL_SUFFIX: string;
+export function partialIdName(name: string): string;
+export function existingBytes(io: PartsIO, manifest: CloudManifest): Promise<number>;
 export const NETWORK_RETRY_STAGE: string;
 export function partialName(name: string): string;
 export function isTransientNetworkError(e: unknown): boolean;

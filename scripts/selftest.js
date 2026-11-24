@@ -4163,6 +4163,54 @@ async function cloudLibraryTests() {
         assert.deepStrictEqual(r, { downloaded: 3, skipped: 0 });
         assert.deepStrictEqual(w.calls.slice(0, 4).map((c) => c.resumeFrom), [0, step, step * 2, step * 3]);
       });
+      await check('resilient download: network drop mid-part keeps the .partial, retry resumes at the exact offset, progress never goes back to 0%', async () => {
+        const f = fresh('run-r12');
+        const step = Math.floor(manifest.parts[1].sizeBytes / 3);
+        // call 1 (part 1) succeeds; part 2 drops after `step` bytes, then again after another `step` bytes.
+        const w = flaky(withDir(f), [undefined, step, step]);
+        const io = w.io;
+        const seen = [];
+        const stats = [];
+        await mp.stageCloudLibrary(io, manifest, {
+          manifestUrl,
+          dbName: 'core_library.db.tmp',
+          sleep: async () => {
+            // at every wait the partial must still be on disk
+            const pp = path.join(f.dir, mp.partialName(manifest.parts[1].name));
+            const sz = fs.existsSync(pp) ? fs.statSync(pp).size : -1;
+            if (stats[stats.length - 1] !== sz) stats.push(sz);
+          },
+          report: (r) => seen.push(r),
+        });
+        assert.deepStrictEqual(stats, [step, step * 2], '(a) the .partial survives each drop with the bytes received so far');
+        const resumes = w.calls.map((c) => c.resumeFrom);
+        assert.deepStrictEqual(resumes.slice(0, 4), [0, 0, step, step * 2], '(b) retries resume at the exact saved offset');
+        const dl = seen.filter((r) => r.stage === 'מוריד…' || r.stage === 'ממשיך — חלק קיים' || r.stage === 'הרשת נותקה זמנית — מנסה להמשיך הורדה…');
+        for (let i = 1; i < dl.length; i++) assert.ok(dl[i].fraction >= dl[i - 1].fraction - 1e-12, `(c) monotonic: ${dl[i - 1].fraction} -> ${dl[i].fraction}`);
+        assert.ok(dl.every((r, i) => i === 0 || r.fraction > 0), 'never back to 0%');
+        assert.ok(fs.readFileSync(path.join(f.dir, 'core_library.db.tmp')).equals(dbBytes));
+      });
+      await check('resilient download: a retry run reports the saved percentage first (not 0%); a partial of another release is discarded', async () => {
+        const f = fresh('run-r13');
+        const half = Math.floor(manifest.parts[0].sizeBytes / 2);
+        fs.writeFileSync(path.join(f.dir, mp.partialName(manifest.parts[0].name)), slices[0].subarray(0, half));
+        assert.strictEqual(await mp.existingBytes(f.io, manifest), half);
+        const seen = [];
+        const calls = [];
+        const io = { ...f.io, download: (u, n, op, c, r) => (calls.push(r.resumeFrom), f.io.download(u, n, op, c, r)) };
+        await mp.stageCloudLibrary(io, manifest, { manifestUrl, dbName: 'core_library.db.tmp', report: (r) => seen.push(r) });
+        assert.ok(Math.abs(seen[0].fraction - half / manifest.totalZipBytes) < 1e-9 && seen[0].fraction > 0, `first report ${seen[0].fraction}`);
+        assert.strictEqual(calls[0], half, 'continued, not restarted');
+        // Another release: the sidecar names a different SHA-256 -> the partial is dropped, download starts at 0.
+        const g = fresh('run-r14');
+        fs.writeFileSync(path.join(g.dir, mp.partialName(manifest.parts[0].name)), Buffer.alloc(half, 7));
+        fs.writeFileSync(path.join(g.dir, mp.partialIdName(manifest.parts[0].name)), 'f'.repeat(64));
+        const calls2 = [];
+        const io2 = { ...g.io, download: (u, n, op, c, r) => (calls2.push(r.resumeFrom), g.io.download(u, n, op, c, r)) };
+        await mp.downloadParts(io2, manifest, { manifestUrl });
+        assert.strictEqual(calls2[0], 0, 'stale partial of another release is not continued');
+        assert.deepStrictEqual(fs.readdirSync(g.dir).sort(), manifest.parts.map((q) => q.name).sort(), 'no leftovers (.partial / .id)');
+      });
       await check('resilient download: a failure while the app is backgrounded waits for the foreground and is not counted', async () => {
         const f = fresh('run-r7');
         const w = flaky(withDir(f), [0, 0, 0]);
