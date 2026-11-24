@@ -154,6 +154,9 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   // translations and parallel works are all plain chips (sorted by priority).
   const counts = useMemo(() => kindCounts(ranked), [ranked]);
   const visible = useMemo(() => filterCommentaries(selected, { query }), [selected, query]);
+  // Name(s) of the active commentator selection, shown in the sticky header (one name, or "name +N").
+  const activeNames = selecting ? selected.map((g) => g.displayName) : [];
+  const activeLabel = activeNames.length ? (activeNames.length === 1 ? activeNames[0] : `${activeNames[0]} +${activeNames.length - 1}`) : '';
   const hasOwn = visible.some((g) => !g.isParallel);
   // One commentator isolated in the chip bar: ultra-compact reading mode (no card header).
   const focusMode = selection.length === 1 && visible.length === 1;
@@ -411,9 +414,15 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
       <View style={s.header}>
         <Text style={s.title} numberOfLines={1} testID="commentary-title">
-          {/* "מפרשים (2) · מקבילים (1)"; a passage with parallel works only: "מקבילים (1)". */}
-          {counts.commentary + counts.targum || !counts.parallel ? `מפרשים${counts.commentary + counts.targum ? ` (${counts.commentary + counts.targum})` : ''}` : ''}
-          {counts.parallel ? `${counts.commentary + counts.targum ? ' · ' : ''}מקבילים (${counts.parallel})` : ''}
+          {activeLabel ? (
+            <Text testID="commentary-active-name" accessibilityLabel={`מפרש פעיל: ${activeLabel}`}>{`מפרשים · ${activeLabel}`}</Text>
+          ) : (
+            <>
+              {/* "מפרשים (2) · מקבילים (1)"; a passage with parallel works only: "מקבילים (1)". */}
+              {counts.commentary + counts.targum || !counts.parallel ? `מפרשים${counts.commentary + counts.targum ? ` (${counts.commentary + counts.targum})` : ''}` : ''}
+              {counts.parallel ? `${counts.commentary + counts.targum ? ' · ' : ''}מקבילים (${counts.parallel})` : ''}
+            </>
+          )}
           {where ? ` · ${where}` : ''}
         </Text>
         <IconButton label="→" a11y="הפסקה הקודמת עם מפרשים" disabled={!hasPrev} onPress={onPrev} palette={c} testID="commentary-prev" />

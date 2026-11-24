@@ -240,13 +240,23 @@ try {
     // Picking רש"י collapsed the chip strip (reading space); the toolbar toggle brings it back.
     assert.strictEqual(await tid('commentary-chipstrip').count(), 0, 'strip collapsed after the selection');
     assert.strictEqual(await tid('commentary-tools-toggle').getAttribute('aria-expanded'), 'false');
+    // The active commentator's name is in the sticky header while the strip is collapsed ...
+    await tid('commentary-active-name').waitFor();
+    assert.ok((await tid('commentary-title').innerText()).includes('מפרשים · רש"י'), `header names the commentator (collapsed): ${await tid('commentary-title').innerText()}`);
+    assert.ok(await tid('commentary-active-name').isVisible(), 'active name visible (collapsed)');
     await tid('commentary-tools-toggle').click();
     await tid('commentary-chipbar').waitFor();
+    // ... and while it is expanded.
+    assert.ok((await tid('commentary-title').innerText()).includes('מפרשים · רש"י'), 'header names the commentator (expanded)');
+    assert.ok(await tid('commentary-active-name').isVisible(), 'active name visible (expanded)');
     const chipH = (await tid('commentary-chip').first().boundingBox()).height;
     assert.ok(chipH <= 30, `slim chips (${chipH}px)`);
     await shot('3z-focus');
     await tid('commentary-chip-all').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    assert.strictEqual(await tid('commentary-active-name').count(), 0, 'הכל: standard header, no active name');
+    assert.ok(/^מפרשים/.test((await tid('commentary-title').innerText()).trim()));
+    assert.ok((await tid('commentary-group-name').first().innerText()).trim().length > 0, 'each entry labelled with its commentator');
     await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
 
     // Open the commentary at its line in a tab.
