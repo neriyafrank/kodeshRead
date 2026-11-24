@@ -31,6 +31,13 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > notification; JS wrapper `src/services/importForegroundService.ts`, no-op on web). Kill/resume is self-tested
 > at every 9th SQL statement in `scripts/selftest.js`.
 
+> **Home screen (starter books vs daily study vs personal books):** `shared/homeLayout.js` decides the layout. The `לימוד יומי` bar is
+> ALWAYS shown, first, above the starter section (in every state: starter-only, personal books, full library); a study item whose book is
+> not on the device stays greyed but is tappable and prompts to open the library manager (download / import). `StarterBooks.tsx` has a
+> header row (`ספרי התחלה (N)` + chevron, `starter-toggle`) that collapses the whole section to that header; the choice is persisted
+> (`libraryStore.starterOpen`, `kodeshread.librarySettings`). With personal books the tree stays visible and takes the freed room.
+> Self-tested (`home layout:` checks), `e2e:library`.
+
 > **Scan safety (Android SAF):** `shared/pipeline.js` `scanPhase` never scans a folder twice (canonical, decoded URI in a visited
 > set seeded from `import_queue`), stops descending at depth 12 (`MAX_SCAN_DEPTH`), skips hidden (`.x`) / `Android` folders, and a
 > name with a file extension is a FILE even when the provider reports a Directory (`indexer.looksLikeFileName`, URL-decoded; in

@@ -780,6 +780,7 @@ async function main() {
   await parallelWorksTests();
   await copyFormatTests();
   await scanSafetyTests();
+  await homeLayoutTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -1129,7 +1130,7 @@ async function starterPackTests() {
       assert.ok(ui.includes('ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה') && ui.includes('testID="starter-upgrade-banner"'));
       assert.ok(ui.includes("router.navigate('/library-manager')"), 'the banner leads to the manager with the cloud library card');
       assert.ok(ui.includes('טוען את ${t} מהענן…') && ui.includes('☁ · ${formatBytes(b.sizeBytes)}') && ui.includes('✓ זמין לא מקוון'));
-      assert.ok(/const starterMode = !core && !!starter/.test(home) && home.includes('<StarterBooks'));
+      assert.ok(/const starterMode = layout\.starter/.test(home) && home.includes('homeLayout(') && home.includes('<StarterBooks'));
       const svc = fs.readFileSync(path.join(ROOT, 'src/services/starterLibrary.ts'), 'utf8');
       assert.ok(svc.includes('starter-latest/starter-catalog.json') && svc.includes('CACHE_KEY') && svc.includes('verifyPackBytes') && svc.includes('importStarterPack'));
       assert.ok(svc.includes('FROM books WHERE file_path = ? AND is_complete = 1'), 'an already loaded book opens without a download');
@@ -6497,6 +6498,43 @@ async function scanSafetyTests() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** Library (home) screen: the daily bar is always there, the starter section collapses, personal books stay. */
+async function homeLayoutTests() {
+  const { homeLayout } = require('../shared/homeLayout');
+  await check('home layout: the Daily Study bar is always shown, first, whatever is installed or collapsed', () => {
+    for (const core of [false, true]) for (const starter of [false, true]) for (const userBookCount of [0, 5]) for (const starterOpen of [true, false]) {
+      const l = homeLayout({ core, starter, userBookCount, starterOpen });
+      assert.strictEqual(l.daily, true, JSON.stringify({ core, starter, userBookCount, starterOpen }));
+      assert.strictEqual(l.order[0], 'daily', 'above the starter books / the library tree');
+    }
+  });
+  await check('home layout: starter section only without a full library; collapsed keeps personal books visible and prominent', () => {
+    const l = (o) => homeLayout({ core: false, starter: true, userBookCount: 0, starterOpen: true, ...o });
+    assert.deepStrictEqual(l({}).order, ['daily', 'starter']);
+    assert.strictEqual(l({ core: true }).starter, false, 'the full library replaces the starter books');
+    assert.deepStrictEqual(homeLayout({ core: true, starter: true, userBookCount: 0, starterOpen: true }).order, ['daily', 'personal']);
+    const withPersonal = l({ userBookCount: 3 });
+    assert.deepStrictEqual(withPersonal.order, ['daily', 'starter', 'personal'], 'personal books next to the starter section');
+    assert.strictEqual(withPersonal.starterCompact, true, 'a bounded starter list leaves room for the personal books');
+    const collapsed = l({ userBookCount: 3, starterOpen: false });
+    assert.strictEqual(collapsed.starterOpen, false);
+    assert.strictEqual(collapsed.personal, true, 'personal books stay visible when the starter section is collapsed');
+    assert.strictEqual(l({ starterOpen: false }).starter, true, 'collapsed still shows its header (to expand again)');
+  });
+  await check('home screen wiring: daily card unconditional and above StarterBooks; collapse toggle persisted in the library settings', () => {
+    const index = fs.readFileSync(path.join(ROOT, 'src/app/index.tsx'), 'utf8');
+    assert.ok(!/core \|\| userBookCount > 0 \? <DailyLearningCard/.test(index), 'the daily card is no longer conditional');
+    assert.ok(index.indexOf('<DailyLearningCard') > 0 && index.indexOf('<DailyLearningCard') < index.indexOf('<StarterBooks'), 'daily bar above the starter books');
+    assert.ok(index.includes('onMissing={onMissingLearning}') && index.includes('עדיין לא נמצא במכשיר'), 'a missing study book prompts');
+    const store = fs.readFileSync(path.join(ROOT, 'src/state/libraryStore.ts'), 'utf8');
+    assert.ok(/starterOpen: true/.test(store) && store.includes('setStarterOpen') && store.includes("name: 'kodeshread.librarySettings'"), 'persisted, expanded by default');
+    const starter = fs.readFileSync(path.join(ROOT, 'src/components/library/StarterBooks.tsx'), 'utf8');
+    assert.ok(starter.includes('testID="starter-toggle"') && starter.includes('aria-expanded={expanded}') && starter.includes('starter-books-collapsed'));
+    const daily = fs.readFileSync(path.join(ROOT, 'src/components/learning/DailyLearning.tsx'), 'utf8');
+    assert.ok(!/(?<![-\w])disabled=\{!available\}/.test(daily) && daily.includes('onMissing?.(item)'), 'a greyed item is still tappable');
+  });
 }
 
 /** Long-press copy toolbar: clean text + canonical citation (shared/copyFormat.js) and the UI wiring. */

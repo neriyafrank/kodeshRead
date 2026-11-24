@@ -16,6 +16,7 @@ import { formatBytes } from '../../../shared/multipart';
 import type { StarterCatalogEntry } from '../../../shared/starterPacks';
 import { alignRight, isolateLtr } from '../../lib/direction';
 import { useLoadedStarterPaths, useOpenStarterBook, useStarterCatalog } from '../../services/starterLibrary';
+import { useLibrarySettings } from '../../state/libraryStore';
 import { useStarter, type StarterPhase } from '../../state/starterStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 
@@ -53,6 +54,9 @@ export function StarterBooks({ onOpenBook, footer, compact }: Props) {
   const busy = useStarter((x) => x.busy);
   const failed = useStarter((x) => x.failed);
   const open = useOpenStarterBook();
+  // Collapsible (persisted): people who read their personal books can fold the whole section away.
+  const expanded = useLibrarySettings((x) => x.starterOpen);
+  const setExpanded = useLibrarySettings((x) => x.setStarterOpen);
 
   const tap = (entry: StarterCatalogEntry) => {
     if (busy[entry.slug]) return;
@@ -64,8 +68,36 @@ export function StarterBooks({ onOpenBook, footer, compact }: Props) {
 
   const groups = catalog ? groupByCategory(catalog.books) : [];
 
+  const header = (
+    <Pressable
+      onPress={() => setExpanded(!expanded)}
+      style={({ pressed }) => [s.head, pressed && s.pressed]}
+      accessibilityRole="button"
+      aria-expanded={expanded}
+      accessibilityState={{ expanded }}
+      accessibilityLabel={`ספרי התחלה${catalog ? `, ${catalog.books.length} ספרים` : ''}, ${expanded ? 'הסתר' : 'הצג'}`}
+      testID="starter-toggle"
+    >
+      <Text style={s.headTitle}>ספרי התחלה</Text>
+      <Text style={s.headCount} testID="starter-count">
+        {catalog ? `(${catalog.books.length})` : ''}
+      </Text>
+      <View style={s.headSpacer} />
+      <Text style={s.caret}>{expanded ? '▴' : '▾'}</Text>
+    </Pressable>
+  );
+  if (!expanded) {
+    return (
+      <View style={s.collapsedBox} testID="starter-books-collapsed">
+        {header}
+      </View>
+    );
+  }
+
   return (
-    <ScrollView style={compact ? s.compact : s.flex} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="starter-books">
+    <View style={compact ? s.compactBox : s.flex}>
+    {header}
+    <ScrollView style={s.flex} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="starter-books">
       <View style={s.banner} testID="starter-upgrade-banner">
         <Text style={s.bannerText}>ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה</Text>
         <Pressable onPress={() => router.navigate('/library-manager')} style={({ pressed }) => [s.bannerBtn, pressed && s.pressed]} accessibilityRole="button" testID="starter-upgrade-button">
@@ -147,13 +179,20 @@ export function StarterBooks({ onOpenBook, footer, compact }: Props) {
       ))}
       {footer}
     </ScrollView>
+    </View>
   );
 }
 
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     flex: { flex: 1 },
-    compact: { maxHeight: 300, flexGrow: 0 },
+    compactBox: { maxHeight: 340, flexGrow: 0 },
+    collapsedBox: { flexGrow: 0 },
+    head: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm + 2, backgroundColor: c.surfaceMuted, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+    headTitle: { color: c.accent, fontSize: 15, fontWeight: '800', ...alignRight },
+    headCount: { color: c.textMuted, fontSize: 13, fontWeight: '600' },
+    headSpacer: { flex: 1 },
+    caret: { fontSize: 12, color: c.textMuted },
     content: { padding: spacing.lg, gap: spacing.md },
     banner: { backgroundColor: c.accentSoft, borderRadius: radius.md, padding: spacing.md, gap: spacing.sm, borderWidth: 1, borderColor: c.border },
     bannerText: { color: c.text, fontSize: 14, lineHeight: 20, fontWeight: '600', ...alignRight },

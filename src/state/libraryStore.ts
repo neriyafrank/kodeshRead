@@ -56,6 +56,9 @@ interface LibrarySettingsState {
   manifestUrl: string | null;
   /** The first-launch onboarding card was dismissed. */
   onboardingDismissed: boolean;
+  /** Library screen: the ספרי התחלה section is expanded (persisted; collapsed = just its header). */
+  starterOpen: boolean;
+  setStarterOpen: (open: boolean) => void;
   /** Cloud edition (shared/editions.js) the app last installed, with its version (see installedEdition()). */
   installedCloud: { edition: 'classic' | 'full'; version: string } | null;
   setInstalledCloud: (edition: 'classic' | 'full', version: string) => void;
@@ -69,6 +72,8 @@ export const useLibrarySettings = create<LibrarySettingsState>()(
     (set) => ({
       manifestUrl: null,
       onboardingDismissed: false,
+      starterOpen: true,
+      setStarterOpen: (starterOpen) => set({ starterOpen }),
       installedCloud: null,
       setInstalledCloud: (edition, version) => set({ installedCloud: { edition, version } }),
       setManifestUrl: (url) => set({ manifestUrl: url && url.trim() ? url.trim() : null }),

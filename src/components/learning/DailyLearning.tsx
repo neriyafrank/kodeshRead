@@ -19,7 +19,7 @@ import { useLearning } from '../../state/learningStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 import { Collapsible } from '../Collapsible';
 
-export function DailyLearningList({ onOpen }: { onOpen: (t: ResolvedTarget) => void }) {
+export function DailyLearningList({ onOpen, onMissing }: { onOpen: (t: ResolvedTarget) => void; onMissing?: (item: ResolvedItem) => void }) {
   const s = useThemedStyles(createStyles);
   const { schedule, error } = useDailyLearning();
   if (!schedule) return <Text style={s.muted}>{error ? `שגיאה: ${error}` : 'טוען…'}</Text>;
@@ -32,7 +32,7 @@ export function DailyLearningList({ onOpen }: { onOpen: (t: ResolvedTarget) => v
         <LocationSwitch />
       </View>
       {schedule.items.map((it) => (
-        <ItemRow key={it.key} item={it} onOpen={onOpen} />
+        <ItemRow key={it.key} item={it} onOpen={onOpen} onMissing={onMissing} />
       ))}
     </View>
   );
@@ -62,19 +62,21 @@ function LocationSwitch() {
   );
 }
 
-function ItemRow({ item, onOpen }: { item: ResolvedItem; onOpen: (t: ResolvedTarget) => void }) {
+function ItemRow({ item, onOpen, onMissing }: { item: ResolvedItem; onOpen: (t: ResolvedTarget) => void; onMissing?: (item: ResolvedItem) => void }) {
   const s = useThemedStyles(createStyles);
   const main = item.targets.find((t) => t.available) ?? item.targets[0];
   const available = !!main?.available;
   const extra = item.targets.filter((t) => t !== main && t.available);
   return (
     <Pressable
-      onPress={() => main && available && onOpen(main)}
-      disabled={!available}
+      // A book that is not on the device is greyed but still tappable: it explains how to get it.
+      onPress={() => (main && available ? onOpen(main) : onMissing?.(item))}
       style={({ pressed }) => [s.item, !available && s.itemOff, pressed && s.pressed]}
       accessibilityRole="link"
       aria-disabled={!available}
+      // Greyed for accessibility (aria-disabled) but NOT the Pressable's `disabled`: the tap still explains how to get the book.
       accessibilityState={{ disabled: !available }}
+      accessibilityHint={available ? undefined : 'הספר עדיין לא במכשיר: הקשה מציגה איך להוריד אותו'}
       accessibilityLabel={`${item.label}: ${item.title}${available ? '' : ' (לא נמצא בספרייה)'}`}
       testID={`daily-item-${item.key}`}
     >
@@ -101,7 +103,7 @@ function ItemRow({ item, onOpen }: { item: ResolvedItem; onOpen: (t: ResolvedTar
 }
 
 /** Collapsible "לימוד יומי" bar on the Library screen. */
-export function DailyLearningCard({ onOpen }: { onOpen: (t: ResolvedTarget) => void }) {
+export function DailyLearningCard({ onOpen, onMissing }: { onOpen: (t: ResolvedTarget) => void; onMissing?: (item: ResolvedItem) => void }) {
   const s = useThemedStyles(createStyles);
   const open = useLearning((x) => x.libraryDailyOpen);
   const setOpen = useLearning((x) => x.setLibraryDailyOpen);
@@ -124,7 +126,7 @@ export function DailyLearningCard({ onOpen }: { onOpen: (t: ResolvedTarget) => v
         <Text style={s.caret}>{open ? '▴' : '▾'}</Text>
       </Pressable>
       <Collapsible open={open}>
-        <DailyLearningList onOpen={onOpen} />
+        <DailyLearningList onOpen={onOpen} onMissing={onMissing} />
       </Collapsible>
     </View>
   );

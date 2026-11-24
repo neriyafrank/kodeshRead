@@ -350,6 +350,48 @@ try {
     await shot('starter-catalog');
     step('fresh user: starter catalog in canonical order with ☁ · size badges, upgrade banner, error -> retry (no download wall)');
 
+    // --- Home screen: the Daily Study bar stays above the starter books; the starter section collapses (persisted) -----
+    await tid('library-daily').waitFor();
+    assert.ok(await tid('library-daily').isVisible(), 'the לימוד יומי bar is visible next to the starter books');
+    const dailyBox = await tid('library-daily').boundingBox();
+    const starterBox = await tid('starter-books').boundingBox();
+    assert.ok(dailyBox.y + dailyBox.height <= starterBox.y + 2, `the daily bar is above the starter section (${dailyBox.y + dailyBox.height} <= ${starterBox.y})`);
+    assert.ok(dailyBox.y < 400, 'visible on launch without scrolling past the starter cards');
+    // a study item whose book is not on the device: a clear prompt to download (not a silent no-op)
+    if ((await tid('library-daily-toggle').getAttribute('aria-expanded')) !== 'true') await tid('library-daily-toggle').click();
+    await tid('daily-item-dafYomi').waitFor();
+    assert.ok((await tid('daily-item-dafYomi').innerText()).includes('לא נמצא בספרייה'), 'greyed: not installed');
+    let prompt = '';
+    page.once('dialog', (d) => (prompt = d.message())); // (the page-wide handler accepts it)
+    await tid('daily-item-dafYomi').click();
+    await tid('library-manager').waitFor();
+    assert.ok(/עדיין לא נמצא במכשיר/.test(prompt) && /ספרייה מוכנה מהענן/.test(prompt), prompt);
+    await page.goBack();
+    await tid('starter-toggle').waitFor();
+    if ((await tid('library-daily-toggle').getAttribute('aria-expanded')) === 'true') await tid('library-daily-toggle').click(); // back to its folded default
+    step('Daily Study bar: always visible above the starter books; a missing book prompts for the library manager');
+    // collapse / expand (persisted)
+    assert.strictEqual(await tid('starter-toggle').getAttribute('aria-expanded'), 'true', 'expanded by default');
+    assert.ok(/\(3\)/.test(await tid('starter-count').innerText()), 'count in the header');
+    await tid('starter-toggle').click();
+    await tid('starter-books-collapsed').waitFor();
+    assert.strictEqual(await tid('starter-books').count(), 0, 'the list is folded away');
+    assert.strictEqual(await tid('starter-book-genesis').count(), 0);
+    assert.strictEqual(await tid('starter-toggle').getAttribute('aria-expanded'), 'false');
+    assert.ok(await tid('library-daily').isVisible(), 'the daily bar stays when the starter section is collapsed');
+    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.starterOpen), false, 'collapsed state persisted');
+    await shot('starter-collapsed');
+    // survives leaving and coming back to the screen
+    await tid('open-library-manager').click();
+    await tid('library-manager').waitFor();
+    await page.goBack();
+    await tid('starter-toggle').waitFor();
+    assert.strictEqual(await tid('starter-toggle').getAttribute('aria-expanded'), 'false', 'still collapsed after navigating away');
+    await tid('starter-toggle').click();
+    await tid('starter-book-genesis').waitFor();
+    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.starterOpen), true);
+    step('ספרי התחלה: header toggle collapses / expands the section; the choice is persisted');
+
     // Tap-to-open: inline loading text, then the Reader with the book + Rashi / Onkelos.
     await tid('starter-book-genesis').click();
     await tid('starter-loading-genesis').waitFor({ timeout: 5000 });
@@ -431,6 +473,12 @@ try {
     await tid('library-manager').waitFor();
     step('import choice opens the manager');
 
+    // Collapse once more right before the reload below: the preference must survive it (the web preview restores
+    // the sample library on reload, so the starter section itself is gone afterwards; the stored choice is not).
+    await page.goBack();
+    await tid('starter-toggle').waitFor();
+    await tid('starter-toggle').click();
+    await tid('starter-books-collapsed').waitFor();
     // The starter books read above left tabs / a search query behind; the catalog checks below start clean.
     await page.evaluate(() => ['kodeshread.tabs', 'kodeshread.search'].forEach((k) => localStorage.removeItem(k)));
     await page.goto(BASE + '/', { timeout: 180000 });
@@ -438,6 +486,14 @@ try {
     await secRows.first().waitFor({ timeout: 180000 });
     assert.strictEqual(await tid('onboarding-card').count(), 0);
     step('web preview restores the sample library on reload');
+    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.starterOpen), false, 'the collapsed preference survives a reload');
+    await page.evaluate(() => {
+      const k = 'kodeshread.librarySettings';
+      const v = JSON.parse(localStorage.getItem(k));
+      v.state.starterOpen = true;
+      localStorage.setItem(k, JSON.stringify(v));
+    });
+    assert.strictEqual(await tid('library-daily').count() >= 1, true, 'the daily bar is part of the full-library home screen too');
 
     // --- Canonical catalog, RTL cascading columns --------------------------------------------
     // (Runs after the manager flow: no saved column path yet.)
@@ -732,7 +788,7 @@ try {
     assert.strictEqual((await last('daily-title-parasha').innerText()).trim(), 'בהעלותך · שני');
     assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ח\' ט"ו'), 'בהעלותך שני = במדבר ח טו');
     for (const key of ['dafYomi', 'mishna', 'rambam1', 'rambam3']) {
-      assert.strictEqual(await last(`daily-item-${key}`).getAttribute('aria-disabled'), 'true', `${key} greyed (not in the sample)`);
+      assert.ok((await last(`daily-item-${key}`).innerText()).includes('לא נמצא בספרייה'), `${key} greyed (not in the sample)`);
     }
     const align = await page.evaluate(() =>
       ['daily-hebrew-date', 'daily-title-parasha', 'daily-title-dafYomi'].map((id) => {

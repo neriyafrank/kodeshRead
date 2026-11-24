@@ -1,7 +1,8 @@
 import { Stack, useRouter } from 'expo-router';
 import { useCallback } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { homeLayout } from '../../shared/homeLayout';
 import type { JumpResult } from '../../shared/quickJump';
 import { SearchIcon } from '../components/Icons';
 import { DailyLearningCard } from '../components/learning/DailyLearning';
@@ -28,7 +29,9 @@ export default function LibraryScreen() {
   // books were imported, until the user hides it).
   const showOnboarding = !core && !(userBookCount > 0 && onboardingDismissed);
   // No full library yet: the cloud starter books are the instant first-launch library.
-  const starterMode = !core && !!starter;
+  const starterOpen = useLibrarySettings((x) => x.starterOpen);
+  const layout = homeLayout({ core: !!core, starter: !!starter, userBookCount, starterOpen });
+  const starterMode = layout.starter;
 
   const openBook = useCallback(
     (bookId: number, bookTitle: string, line?: number, highlight = false) => {
@@ -40,6 +43,22 @@ export default function LibraryScreen() {
 
   const onJump = useCallback((r: JumpResult) => openBook(r.bookId, r.bookTitle, r.targetLine, !r.suggestion), [openBook]);
   const openLearningTarget = useOpenLearningTarget();
+  // A study item whose book is not on the device (not in the personal / starter books either): explain how to get it.
+  const onMissingLearning = useCallback(
+    (item: { title: string }) => {
+      const go = () => router.navigate('/library-manager');
+      const msg = `הספר ״${item.title}״ עדיין לא נמצא במכשיר. אפשר להוריד ספרייה מוכנה מהענן (בסיסית או מלאה), או לייבא אותו כספר אישי. לפתוח את ניהול הספרייה?`;
+      if (Platform.OS === 'web') {
+        if (typeof window !== 'undefined' && window.confirm(msg)) go();
+        return;
+      }
+      Alert.alert('הספר לא נמצא', msg, [
+        { text: 'ביטול', style: 'cancel' },
+        { text: 'לניהול ספרייה', onPress: go },
+      ]);
+    },
+    [router],
+  );
 
   return (
     <View style={s.screen}>
@@ -77,17 +96,18 @@ export default function LibraryScreen() {
       <JobStatus compact onPress={() => router.navigate('/library-manager')} />
       <ResumeCards />
       <QuickJumpBar onJump={onJump} />
-      {core || userBookCount > 0 ? <DailyLearningCard onOpen={(t) => openLearningTarget(t) && router.navigate('/reader')} /> : null}
+      {/* Always shown, above the starter books: never hidden by them. */}
+      <DailyLearningCard onOpen={(t) => openLearningTarget(t) && router.navigate('/reader')} onMissing={onMissingLearning} />
       <View style={s.divider} />
       {starterMode ? (
         // The onboarding card (import / full download) closes the starter list.
         <StarterBooks
           onOpenBook={(id, title) => openBook(id, title)}
           footer={showOnboarding ? <OnboardingCard hasUserBooks={userBookCount > 0} starter /> : null}
-          compact={userBookCount > 0}
+          compact={layout.starterCompact}
         />
       ) : null}
-      {!starterMode || userBookCount > 0 ? (
+      {layout.personal ? (
         <View style={s.tree}>
           <LibraryColumns
             onOpenBook={(id, title) => openBook(id, title)}
