@@ -39,6 +39,12 @@
  *    folder grouped under their base in rank order; multi-select search scope (FTS5 == fallback).
  * 13. Search progress UI (shared/searchLifecycle.js): lifecycle transitions, request-id race safety,
  *    cancellation / abort + real progress in shared/search.js, Hebrew RTL elapsed formatting.
+ * 16. Canonical book roles (shared/bookRoles.js) + parallel works (shared/parallelWorks.js): the four
+ *    roles on the real otzaria_index_only.txt (zero commentary leaks, strict exclusions, no heuristic
+ *    nesting), and fixture libraries for each family: שו"ע או"ח סימן יב סעיף ג <-> טור / ערוך השולחן /
+ *    לבוש / שו"ע הרב סימן יב (never קיצור שו"ע); בבלי שבת פרק א <-> משנה / ירושלמי / תוספתא / רא"ש
+ *    (Bavli perakim from "הדרן עלך", Megillah's perek-order divergence by name); בראשית פרשת נח <->
+ *    בראשית רבה / זוהר / ספר החינוך; commentaries + parallels together in the drawer.
  */
 'use strict';
 
@@ -526,7 +532,7 @@ async function main() {
       const ranked = rank.rankCommentaries(bg, { context: { title: 'בראשית' } });
       assert.deepStrictEqual(
         ranked.map((g) => [g.displayName, g.tier]),
-        [['אונקלוס', 'עיקריים'], ['רש"י', 'עיקריים'], ['רמב"ן', 'עיקריים'], ['אבן עזרא', 'עיקריים'], ['ספורנו', 'עיקריים'], ['מלבי"ם', 'עיקריים'], ['דעת זקנים', 'ראשונים'], ['גור אריה', 'אחרונים']],
+        [['אונקלוס', 'תרגומים'], ['רש"י', 'עיקריים'], ['רמב"ן', 'עיקריים'], ['אבן עזרא', 'עיקריים'], ['ספורנו', 'עיקריים'], ['מלבי"ם', 'עיקריים'], ['דעת זקנים', 'ראשונים'], ['גור אריה', 'אחרונים']],
       );
       assert.deepStrictEqual([...rank.defaultExpandedKeys(ranked)], ['אונקלוס', 'רשי', 'רמבנ']);
     });
@@ -770,6 +776,8 @@ async function main() {
   await corporaTests();
   // 14. Instant cloud starter: starter pack export / import round trip, idempotence, upgrade.
   await starterPackTests();
+  // 16. Canonical book roles + bidirectional parallel works (Turim / Shas / Parasha families).
+  await parallelWorksTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -5854,5 +5862,403 @@ async function parshaQuickJumpTests() {
     const src = fs.readFileSync(path.join(ROOT, 'src/components/QuickJumpBar.tsx'), 'utf8');
     assert.ok(src.includes('testID="quick-jump-parsha"') && src.includes('r.parsha.refLabel') && src.includes('`פתח: ${results[0].parsha.label}`'));
     assert.ok(/parshaTitle: \{[^}]*\.\.\.alignRight/.test(src) && /parshaRef: \{[^}]*\.\.\.alignRight/.test(src));
+  });
+}
+
+/**
+ * Section 16: canonical book roles (shared/bookRoles.js) and the bidirectional parallel-works engine
+ * (shared/parallelWorks.js), on the real Otzaria map and on fixture libraries of every family.
+ */
+async function parallelWorksTests() {
+  const pw = require('../shared/parallelWorks');
+  const roles = require('../shared/bookRoles');
+  const lc = require('../shared/libraryCatalog');
+  const { audit, readPaths, catalogInput } = require('./audit-parallels');
+  const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+
+  // ---- 1. pure helpers -------------------------------------------------------------------------
+  await check('parallel works: canonical tractates (שביעית is never שבועות), SA parts, parasha headings, perek / hadran markers', () => {
+    const t = (n) => pw.tractateName(pw.tractateIndex(n));
+    assert.strictEqual(t('שביעית'), 'שביעית');
+    assert.strictEqual(t('שבועות'), 'שבועות');
+    assert.notStrictEqual(pw.tractateIndex('שביעית'), pw.tractateIndex('שבועות'));
+    assert.strictEqual(t('נידה'), 'נדה');
+    assert.strictEqual(t('מסכת עוקצין'), 'עוקצים');
+    assert.strictEqual(t('בכורים'), 'ביכורים');
+    assert.strictEqual(pw.tractateIndex('כלים בבא קמא'), null, 'Tosefta Kelim gates are not Mishnah Kelim chapters');
+    assert.deepStrictEqual(['אורח חיים', 'או"ח', 'טור יורה דעה', 'אבן העזר', 'חשן משפט', 'חו"מ', 'הלכות שבת', 'הקדמה'].map(pw.sectionIndex), [0, 0, 1, 2, 3, 3, null, null]);
+    const ph = (h) => pw.parashaOfHeading(h).map((i) => require('../shared/torahParshiot').PARSHIOT[i].name);
+    assert.deepStrictEqual(ph('פרשת נח'), ['נח']);
+    assert.deepStrictEqual(ph('לך-לך'), ['לך לך']);
+    assert.deepStrictEqual(ph('פרשת לך לך'), ['לך לך']);
+    assert.deepStrictEqual(ph('שלח לך'), ['שלח']);
+    assert.deepStrictEqual(ph('כי תשא'), ['כי תשא']);
+    assert.deepStrictEqual(ph('פרשת כי תישא'), ['כי תשא']);
+    assert.deepStrictEqual(ph('ויקהל-פקודי'), ['ויקהל', 'פקודי']);
+    assert.deepStrictEqual(ph('אחרי מות קדושים'), ['אחרי מות', 'קדושים']);
+    for (const no of ['פרשה א', 'פרשה ל', 'מצוה א', 'סימן יב', 'הקדמה', 'פרק ו']) assert.deepStrictEqual(ph(no), [], no);
+    assert.deepStrictEqual([1, 29, 30, 38, 39, 96, 100, 101].map(pw.bereishitRabbahParasha), [0, 0, 1, 1, 2, 11, 11, null]);
+    assert.deepStrictEqual(['פרק א', 'פרק ראשון - במה מדליקין', 'פרק י"א', 'פרק יה', 'פרשה א', 'סימן א'].map(refAlign.perekNumber), [1, 1, 11, null, null, null]);
+    assert.strictEqual(refAlign.perekName('פרק ג - בני העיר'), 'בני העיר');
+    assert.strictEqual(refAlign.hadranName('<br><big><strong>הֲדַרַן עֲלָךְ מֵאֵימָתַי</strong></big>'), 'מאימתי');
+    assert.strictEqual(refAlign.hadranName('הדרן עלך מי שהחשיך וסליקא לה מסכת שבת'), 'מי שהחשיכ');
+    assert.strictEqual(refAlign.hadranName('אמר רב הדרן עלך'), null);
+  });
+
+  await check('parallel works: membership is an allow-list (strict exclusions, commentaries, wrong folders never join)', () => {
+    const m = (cp, title) => {
+      const r = pw.memberOf({ title, categoryPath: cp });
+      return r ? `${r.work}${r.section != null ? ':' + r.section : ''}${r.tractate != null ? ':' + pw.tractateName(r.tractate) : ''}${r.chumash ? ':' + r.chumash : ''}` : null;
+    };
+    assert.strictEqual(m('הלכה/טור', 'טור'), 'tur');
+    assert.strictEqual(m('הלכה/שולחן ערוך', 'שולחן ערוך, אורח חיים'), 'shulchan_aruch:0');
+    assert.strictEqual(m('הלכה/שולחן ערוך', 'שולחן ערוך, חושן משפט'), 'shulchan_aruch:3');
+    assert.strictEqual(m('הלכה/שולחן ערוך', 'שולחן ערוך, הקדמה'), null);
+    assert.strictEqual(m('הלכה', 'ערוך השולחן'), 'aruch_hashulchan');
+    assert.strictEqual(m('הלכה/שולחן ערוך הרב', 'שולחן ערוך הרב'), 'sa_harav');
+    assert.strictEqual(m('הלכה/לבוש', 'לבוש התכלת'), 'levush:0');
+    assert.strictEqual(m('הלכה/לבוש', 'לבוש עיר שושן'), 'levush:3');
+    for (const [cp, t] of [['הלכה', 'קיצור שלחן ערוך'], ['הלכה', 'חיי אדם'], ['הלכה', 'חכמת אדם'], ['הלכה', 'בן איש חי'], ['הלכה', 'ערוך השולחן העתיד'], ['הלכה/ספרי מצוות/ספר המצוות', 'ספר המצוות'], ['הלכה/ספרי מצוות', 'סמג'], ['הלכה/שולחן ערוך/מפרשים/משנה ברורה', 'משנה ברורה'], ['הלכה/שולחן ערוך/מפרשים/באר היטב', 'באר היטב אורח חיים'], ['הלכה/שולחן ערוך הרב', 'פסקי הסידור'], ['הלכה/טור/מפרשים', 'בית יוסף'], ['קבלה/זהר', 'זוהר חדש'], ['קבלה/זהר', 'הסולם על ספר הזהר'], ['הלכה/ספרי מצוות', 'מנחת חינוך'], ['תלמוד בבלי/אחרונים/לבוש מרדכי/סדר נשים', 'לבוש מרדכי על גיטין']]) {
+      assert.strictEqual(m(cp, t), null, `${t} must not join a family`);
+    }
+    assert.strictEqual(m('משנה/סדר מועד', 'משנה שבת'), 'mishna:שבת');
+    assert.strictEqual(m('תלמוד בבלי/סדר מועד', 'שבת'), 'bavli:שבת');
+    assert.strictEqual(m('תלמוד ירושלמי/סדר מועד', 'תלמוד ירושלמי שבת'), 'yerushalmi:שבת');
+    assert.strictEqual(m('תוספתא/מהדורת ליברמן/סדר מועד', 'תוספתא שבת (ליברמן)'), 'tosefta:שבת');
+    assert.strictEqual(m('תלמוד בבלי/ראשונים/ריף/סדר מועד', 'ריף שבת'), 'rif:שבת');
+    assert.strictEqual(m('תלמוד בבלי/ראשונים/ראש/סדר מועד', 'פסקי הראש על שבת'), 'rosh:שבת');
+    assert.strictEqual(m('תלמוד בבלי/ראשונים/ריף/סדר זרעים', 'הערות על ריף ברכות'), null);
+    assert.strictEqual(m('תלמוד בבלי/ראשונים/רשי/סדר מועד', 'רשי על שבת'), null);
+    assert.strictEqual(m('משנה/ראשונים/ברטנורא/סדר מועד', 'ברטנורא על משנה שבת'), null);
+    assert.strictEqual(m('תנך/תורה', 'בראשית'), 'chumash:בראשית');
+    assert.strictEqual(m('מדרש/אגדה/מדרש רבה', 'בראשית רבה'), 'midrash_rabbah:בראשית');
+    assert.strictEqual(m('מדרש/אגדה/מדרש רבה', 'שיר השירים רבה'), null);
+    assert.strictEqual(m('קבלה/זהר', 'ספר הזהר'), 'zohar');
+    assert.strictEqual(m('הלכה/ספרי מצוות', 'ספר החינוך'), 'chinuch');
+    assert.strictEqual(m('תנך/מפרשים', 'רשי על בראשית'), null);
+  });
+
+  // ---- 2. the real Otzaria library map -----------------------------------------------------------
+  if (fs.existsSync(indexPath)) {
+    const paths = readPaths(indexPath);
+    const res = audit(paths);
+    const cat = res.catalog;
+    const idOf = new Map(paths.map((p, i) => [p, i + 1]));
+    await check('real index audit: exact members per family, zero violations (no commentary leaks, no excluded title, no nesting)', () => {
+      assert.deepStrictEqual(res.violations, []);
+      assert.deepStrictEqual(res.stats.turim, { tur: 1, shulchan_aruch: 4, levush: 0, aruch_hashulchan: 1, sa_harav: 1 });
+      assert.deepStrictEqual(res.report.turim.tur, ['הלכה/טור/טור']);
+      assert.deepStrictEqual(res.report.turim.aruch_hashulchan, ['הלכה/ערוך השולחן']);
+      assert.deepStrictEqual(res.report.turim.sa_harav, ['הלכה/שולחן ערוך הרב/שולחן ערוך הרב']);
+      assert.deepStrictEqual(res.stats.shas, { mishna: 63, bavli: 37, yerushalmi: 39, tosefta: 92, rif: 24, rosh: 27 });
+      assert.deepStrictEqual(res.stats.parasha, { chumash: 5, midrash_rabbah: 5, tanchuma: 1, tanchuma_buber: 1, zohar: 1, chinuch: 1 });
+      assert.deepStrictEqual(res.report.parasha.zohar, ['קבלה/זהר/ספר הזהר']);
+      assert.deepStrictEqual(res.report.parasha.chinuch, ['הלכה/ספרי מצוות/ספר החינוך']);
+      for (const p of ['הלכה/קיצור שלחן ערוך', 'הלכה/חיי אדם', 'הלכה/חכמת אדם', 'הלכה/בן איש חי', 'הלכה/ערוך השולחן העתיד', 'הלכה/ספרי מצוות/ספר המצוות/ספר המצוות', 'קבלה/זהר/זוהר חדש']) {
+        assert.ok(idOf.has(p), `${p} is in the index`);
+        assert.strictEqual(cat.isParallel(idOf.get(p)), false, p);
+      }
+    });
+    await check('real index roles: parallel works are standalone, explicit commentaries / targumim only, no heuristic nesting', () => {
+      const role = (p) => cat.roleOf(idOf.get(p));
+      const base = (p) => (cat.baseOf(idOf.get(p)) ? paths[cat.baseOf(idOf.get(p)) - 1] : null);
+      // Four roles.
+      assert.strictEqual(role('תלמוד בבלי/סדר מועד/שבת'), 'parallel');
+      assert.strictEqual(role('תלמוד בבלי/ראשונים/ראש/סדר מועד/פסקי הראש על שבת'), 'parallel', 'the Rosh is a halachic sibling, not a commentary');
+      assert.strictEqual(role('תלמוד בבלי/ראשונים/ריף/סדר זרעים/ריף ברכות'), 'parallel');
+      assert.strictEqual(role('הלכה/ערוך השולחן'), 'parallel');
+      assert.strictEqual(role('תנך/נביאים/יהושע'), 'base');
+      assert.strictEqual(role('תנך/תרגומים/תרגום אונקלוס/תורה/תרגום אונקלוס על בראשית'), 'targum');
+      assert.strictEqual(base('תנך/תרגומים/תרגום אונקלוס/תורה/תרגום אונקלוס על בראשית'), 'תנך/תורה/בראשית');
+      assert.strictEqual(role('תנך/תרגומים/תרגום/כתובים/תרגום איוב'), 'targum');
+      assert.strictEqual(base('תנך/תרגומים/תרגום/כתובים/תרגום איוב'), 'תנך/כתובים/איוב');
+      assert.strictEqual(role('תנך/תרגומים/תרגום ירושלמי/תרגום ירושלמי'), 'targum');
+      assert.strictEqual(base('תנך/תרגומים/תרגום ירושלמי/תרגום ירושלמי'), null, 'Torah-wide targum: general');
+      assert.strictEqual(role('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה'), 'commentary');
+      assert.strictEqual(base('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה'), 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים');
+      assert.strictEqual(base('הלכה/טור/מפרשים/בית יוסף'), 'הלכה/טור/טור');
+      assert.strictEqual(base('משנה/אחרונים/יכין/סדר נזיקין/יכין בבא קמא'), 'משנה/סדר נזיקין/משנה בבא קמא', '"קמא" inside a tractate name is not a generic tail');
+      // Former heuristic false nestings: standalone works now.
+      for (const p of [
+        'הלכה/אחרונים/חפץ חיים',
+        'הלכה/אחרונים/אלה המצות',
+        'הלכה/אחרונים/חזון איש/חזון איש, יורה דעה',
+        'הלכה/מחברי זמננו/קיצור ילקוט יוסף/קיצור שע ילקוט יוסף החדש - אורח חיים',
+        'תלמוד בבלי/מחברי זמננו/בדי הארון - שביעית',
+        'משנה/ראשונים/רמבם/סדר קדשים/רמבם הקדמה לסדר קודשים',
+        'מחשבת ישראל/ראשונים/מאמר על ישמעאל',
+      ]) {
+        assert.strictEqual(role(p), 'base', `${p}: ${role(p)} -> ${base(p)}`);
+        assert.strictEqual(base(p), null);
+      }
+      // Every family member stays visible in the base tree.
+      const visible = new Set(lc.treeBookIds(cat.sections));
+      for (const fam of ['turim', 'shas', 'parasha']) for (const id of cat.parallelFamilyIds(fam)) assert.ok(visible.has(id), `${paths[id - 1]} hidden`);
+      // Nothing that is "X על Y" by a known commentator leaks into the base tree as a parallel work.
+      for (const fam of ['turim', 'shas', 'parasha']) for (const id of cat.parallelFamilyIds(fam)) assert.ok(!cat.isCommentary(id));
+    });
+    await check('real index Library hierarchy: Rif / Rosh after the tractates, Tur parallels grouped, SA parts in order', () => {
+      const sec = (nodes, name) => nodes.find((n) => n.name === name);
+      const bavli = sec(cat.sections, 'תלמוד בבלי');
+      const rif = sec(bavli.children, 'רי"ף');
+      const rosh = sec(bavli.children, 'רא"ש');
+      assert.ok(rif && rosh, bavli.children.map((n) => n.name).join(', '));
+      assert.strictEqual(rif.children[0].title, 'ריף ברכות');
+      assert.strictEqual(rosh.children[0].title, 'פסקי הראש על ברכות');
+      assert.ok(rosh.children.every((n) => n.role === 'parallel' && n.parallelFamily === 'shas'));
+      const halacha = sec(cat.sections, 'הלכה');
+      const names = halacha.children.map((n) => n.name);
+      assert.ok(names.indexOf('ארבעה טורים') < names.indexOf('שולחן ערוך') && names.indexOf('שולחן ערוך') < names.indexOf('ספרים מקבילים לטור ולשולחן ערוך'), names.join(', '));
+      assert.deepStrictEqual(sec(halacha.children, 'ספרים מקבילים לטור ולשולחן ערוך').children.map((n) => n.title), ['ערוך השולחן', 'שולחן ערוך הרב']);
+      assert.deepStrictEqual(sec(halacha.children, 'שולחן ערוך').children.map((n) => n.title), ['שולחן ערוך, הקדמה', 'שולחן ערוך, אורח חיים', 'שולחן ערוך, יורה דעה', 'שולחן ערוך, אבן העזר', 'שולחן ערוך, חושן משפט']);
+    });
+  }
+
+  // ---- 3. fixture libraries for every family -----------------------------------------------------
+  const pipeline = require('../shared/pipeline');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-parallel-'));
+  try {
+    const lib = path.join(tmp, 'אוצריא');
+    const put = (rel, lines) => {
+      fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true });
+      fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n'));
+    };
+    // ארבעה טורים
+    put('הלכה/טור/טור', ['<h1>טור</h1>', '<h2>אורח חיים</h2>', '<h3>הלכות ציצית</h3>', '<h4>סימן יא</h4>', 'טור אוח יא', '<h4>סימן יב</h4>', 'טור אוח יב א', 'טור אוח יב ב', '<h2>יורה דעה</h2>', '<h3>סימן יב</h3>', 'טור יוד יב']);
+    put('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', ['<h1>שולחן ערוך, אורח חיים</h1>', '<h2>סימן יא</h2>', '<h3>סעיף א</h3>', 'שוע אוח יא א', '<h2>סימן יב</h2>', '<h3>סעיף א</h3>', 'שוע אוח יב א', '<h3>סעיף ב</h3>', 'שוע אוח יב ב', '<h3>סעיף ג</h3>', 'שוע אוח יב ג']);
+    put('הלכה/שולחן ערוך/שולחן ערוך, יורה דעה', ['<h1>שולחן ערוך, יורה דעה</h1>', '<h2>סימן יב</h2>', '<h3>סעיף א</h3>', 'שוע יוד יב א']);
+    put('הלכה/שולחן ערוך/מפרשים/משנה ברורה/משנה ברורה', ['<h1>משנה ברורה</h1>', '<h2>סימן יב</h2>', '<h3>סעיף קטן א</h3>', 'מב יב א', '<h3>סעיף קטן ב</h3>', 'מב יב ב']);
+    put('הלכה/ערוך השולחן', ['<h1>ערוך השולחן</h1>', '<h2>אורח חיים</h2>', '<h3>סימן יא</h3>', 'ערוהש אוח יא', '<h3>סימן יב</h3>', 'ערוהש אוח יב א', 'ערוהש אוח יב ב', '<h2>יורה דעה</h2>', '<h3>סימן יב</h3>', 'ערוהש יוד יב']);
+    put('הלכה/לבוש/לבוש התכלת', ['<h1>לבוש התכלת</h1>', '<h2>סימן יב</h2>', 'לבוש אוח יב']);
+    put('הלכה/שולחן ערוך הרב/שולחן ערוך הרב', ['<h1>שולחן ערוך הרב</h1>', '<h2>אורח חיים</h2>', '<h3>סימן יב</h3>', 'שוע הרב אוח יב']);
+    put('הלכה/קיצור שלחן ערוך', ['<h1>קיצור שלחן ערוך</h1>', '<h2>סימן יב</h2>', 'קיצור שוע יב']);
+    put('הלכה/חיי אדם', ['<h1>חיי אדם</h1>', '<h2>כלל יב</h2>', 'חיי אדם יב']);
+    // משנה / תלמוד
+    put('משנה/סדר מועד/משנה שבת', ['<h1>משנה שבת</h1>', '<h2>פרק א</h2>', '<h3>משנה א</h3>', 'משנה שבת א א', '<h3>משנה ב</h3>', 'משנה שבת א ב', '<h2>פרק ב</h2>', '<h3>משנה א</h3>', 'משנה שבת ב א']);
+    put('תלמוד בבלי/סדר מועד/שבת', ['<h1>שבת</h1>', '<h2>דף ב.</h2>', 'בבלי שבת ב א פסקה 1', 'בבלי שבת ב א פסקה 2', '<h2>דף ב:</h2>', 'בבלי שבת ב ב', '<big><strong>הֲדַרַן עֲלָךְ יְצִיאוֹת הַשַּׁבָּת</strong></big>', '<h2>דף כ:</h2>', 'בבלי שבת פרק ב', '<big><strong>הדרן עלך במה מדליקין</strong></big>']);
+    put('תלמוד בבלי/ראשונים/רשי/סדר מועד/רשי על שבת', ['<h1>רשי על שבת</h1>', '<h2>דף ב.</h2>', '<h3>שורה ב</h3>', 'רשי שבת ב א שורה ב']);
+    put('תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שבת', ['<h1>תלמוד ירושלמי שבת</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'ירושלמי שבת א א', '<h2>פרק ב</h2>', '<h3>הלכה א</h3>', 'ירושלמי שבת ב א']);
+    put('תוספתא/דפוס וילנא/סדר מועד/תוספתא שבת', ['<h1>תוספתא שבת</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'תוספתא שבת א א', '<h2>פרק ב</h2>', 'תוספתא שבת ב א']);
+    put('תלמוד בבלי/ראשונים/ראש/סדר מועד/פסקי הראש על שבת', ['<h1>פסקי הראש על שבת</h1>', '<h2>פרק א</h2>', '<h3>סימן א</h3>', 'ראש שבת א א', '<h2>פרק ב</h2>', 'ראש שבת ב א']);
+    put('משנה/סדר זרעים/משנה שביעית', ['<h1>משנה שביעית</h1>', '<h2>פרק א</h2>', 'משנה שביעית א']);
+    put('משנה/סדר נזיקין/משנה שבועות', ['<h1>משנה שבועות</h1>', '<h2>פרק א</h2>', 'משנה שבועות א']);
+    put('תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי שביעית', ['<h1>תלמוד ירושלמי שביעית</h1>', '<h2>פרק א</h2>', 'ירושלמי שביעית א']);
+    put('משנה/סדר מועד/משנה מגילה', ['<h1>משנה מגילה</h1>', '<h2>פרק א - מגילה נקראת</h2>', 'משנה מגילה א', '<h2>פרק ב - הקורא את המגילה למפרע</h2>', 'משנה מגילה ב', '<h2>פרק ג - בני העיר</h2>', 'משנה מגילה ג בני העיר', '<h2>פרק ד - הקורא עומד</h2>', 'משנה מגילה ד הקורא עומד']);
+    put('תלמוד בבלי/סדר מועד/מגילה', ['<h1>מגילה</h1>', '<h2>דף ב.</h2>', 'בבלי מגילה פרק א', 'הדרן עלך מגילה נקראת', '<h2>דף יז.</h2>', 'בבלי מגילה פרק ב', 'הדרן עלך הקורא את המגילה למפרע', '<h2>דף כא.</h2>', 'בבלי מגילה פרק ג הקורא עומד', 'הדרן עלך הקורא עומד', '<h2>דף כה:</h2>', 'בבלי מגילה פרק ד בני העיר', 'הדרן עלך בני העיר וסליקא לה מסכת מגילה']);
+    put('תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי מגילה', ['<h1>תלמוד ירושלמי מגילה</h1>', '<h2>פרק א</h2>', 'ירושלמי מגילה א', '<h2>פרק ג</h2>', 'ירושלמי מגילה ג']);
+    // פרשת השבוע
+    const ch6 = Array.from({ length: 22 }, (_, i) => `בראשית ו ${i + 1}`);
+    const ch12 = Array.from({ length: 20 }, (_, i) => `בראשית יב ${i + 1}`);
+    put('תנך/תורה/בראשית', ['<h1>בראשית</h1>', '<h2>פרק ו</h2>', ...ch6, '<h2>פרק יב</h2>', ...ch12]);
+    put('מדרש/אגדה/מדרש רבה/בראשית רבה', ['<h1>בראשית רבה</h1>', '<h2>פרשה כט</h2>', 'בר כט', '<h2>פרשה ל</h2>', 'בר ל אלה תולדות נח', '<h2>פרשה לא</h2>', 'בר לא', '<h2>פרשה לט</h2>', 'בר לט לך לך']);
+    put('קבלה/זהר/ספר הזהר', ['<h1>ספר הזהר</h1>', '<h2>בראשית</h2>', '<h3>פרשת בראשית</h3>', 'זהר בראשית', '<h3>פרשת נח</h3>', 'זהר נח', '<h3>פרשת לך לך</h3>', 'זהר לך לך', '<h2>שמות</h2>', '<h3>פרשת שמות</h3>', 'זהר שמות']);
+    put('הלכה/ספרי מצוות/ספר החינוך', ['<h1>ספר החינוך</h1>', '<h2>פרשת בראשית</h2>', '<h3>מצוה א</h3>', 'חינוך מצוה א', '<h2>פרשת נח</h2>', 'חינוך נח', '<h2>פרשת לך-לך</h2>', '<h3>מצוה ב</h3>', 'חינוך מצוה ב מילה']);
+    put('מדרש/אגדה/מדרש תנחומא', ['<h1>מדרש תנחומא</h1>', '<h2>בראשית</h2>', '<h3>נח</h3>', '<h4>סימן א</h4>', 'תנחומא נח א']);
+    put('הלכה/ספרי מצוות/ספר המצוות/ספר המצוות', ['<h1>ספר המצוות</h1>', '<h2>מצות עשה א</h2>', 'ספר המצוות עשה א', '<h2>מצות עשה ב</h2>', 'ספר המצוות עשה ב']);
+
+    const db = openWal(path.join(tmp, 'parallel.db'));
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    await pipeline.runImport(db.w, nodeFs, { source: { kind: 'folder', root: lib }, sourceUri: lib, targetDb: 'core', yieldToUI: () => Promise.resolve(), finalize: false });
+    await pipeline.completeImport(db.w);
+    const id = async (title) => Number((await db.read.all('SELECT id FROM books WHERE title = ?', [title]))[0].id);
+    const lineOf = async (title, text) => {
+      const bookId = await id(title);
+      return { bookId, line: Number((await db.read.all('SELECT line_index AS l FROM paragraphs WHERE book_id = ? AND display_text LIKE ?', [bookId, text + '%']))[0].l) };
+    };
+    const par = async (title, text) => {
+      const at = await lineOf(title, text);
+      return pw.findParallels(db.read, at.bookId, at.line);
+    };
+    const summary = (r) => r.parallels.map((p) => `${p.name}: ${p.label} [${p.preview[0] ? p.preview[0].display_text : '-'}]`);
+
+    await check('4-Turim: שו"ע או"ח סימן יב סעיף ג <-> טור / לבוש / ערוך השולחן / שו"ע הרב או"ח סימן יב (never קיצור שו"ע), both directions', async () => {
+      const r = await par('שולחן ערוך, אורח חיים', 'שוע אוח יב ג');
+      assert.strictEqual(r.family, 'turim');
+      assert.strictEqual(r.coordinate.label, 'או"ח סימן י"ב', 'the seif resolves to its siman');
+      assert.deepStrictEqual(summary(r), ['טור: או"ח סימן י"ב [טור אוח יב א]', 'לבוש: או"ח סימן י"ב [לבוש אוח יב]', 'ערוך השולחן: או"ח סימן י"ב [ערוהש אוח יב א]', 'שולחן ערוך הרב: או"ח סימן י"ב [שוע הרב אוח יב]']);
+      assert.ok(!r.parallels.some((p) => /קיצור|חיי אדם/.test(p.bookTitle)), 'קיצור שו"ע / חיי אדם are never linked');
+      // Reverse: the Tur's OC siman 12 -> the OC Shulchan Aruch (not YD), the OC unit of Aruch HaShulchan.
+      const tur = await par('טור', 'טור אוח יב ב');
+      assert.deepStrictEqual(summary(tur), ['שולחן ערוך: או"ח סימן י"ב [שוע אוח יב א]', 'לבוש: או"ח סימן י"ב [לבוש אוח יב]', 'ערוך השולחן: או"ח סימן י"ב [ערוהש אוח יב א]', 'שולחן ערוך הרב: או"ח סימן י"ב [שוע הרב אוח יב]']);
+      const yd = await par('טור', 'טור יוד יב');
+      assert.deepStrictEqual(summary(yd), ['שולחן ערוך: יו"ד סימן י"ב [שוע יוד יב א]', 'ערוך השולחן: יו"ד סימן י"ב [ערוהש יוד יב]'], 'Yoreh De\'ah siman 12 is another siman');
+      const ah = await par('ערוך השולחן', 'ערוהש אוח יב ב');
+      assert.deepStrictEqual(ah.parallels.map((p) => p.name), ['טור', 'שולחן ערוך', 'לבוש', 'שולחן ערוך הרב']);
+      const lev = await par('לבוש התכלת', 'לבוש אוח יב');
+      assert.ok(lev.parallels.some((p) => p.name === 'שולחן ערוך' && p.label === 'או"ח סימן י"ב'));
+      // Excluded books have no parallels at all.
+      assert.deepStrictEqual((await par('קיצור שלחן ערוך', 'קיצור שוע יב')).parallels, []);
+      assert.strictEqual((await par('קיצור שלחן ערוך', 'קיצור שוע יב')).family, null);
+      // A sibling is opened at the siman's start (its heading line) and its block covers the siman only.
+      const t12 = r.parallels[0];
+      const rows = await db.read.all('SELECT line_index, display_text FROM paragraphs WHERE book_id = ? AND line_index BETWEEN ? AND ? ORDER BY line_index', [t12.bookId, t12.start, t12.end]);
+      assert.deepStrictEqual(rows.map((x) => x.display_text), ['סימן יב', 'טור אוח יב א', 'טור אוח יב ב']);
+    });
+
+    await check('4-Turim drawer: משנה ברורה (commentary) and the Tur family (parallels) together, parallels folded and last', async () => {
+      const at = await lineOf('שולחן ערוך, אורח חיים', 'שוע אוח יב ג');
+      const own = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, at.bookId, at.line));
+      const pgs = commentary.parallelGroups(await pw.findParallels(db.read, at.bookId, at.line));
+      const merged = commentary.mergeParallelGroups(own, pgs);
+      const ranked = rank.rankCommentaries(merged, { context: { title: 'שולחן ערוך, אורח חיים' } });
+      assert.deepStrictEqual(ranked.map((g) => [g.displayName, g.kind, g.tier]), [
+        ['משנה ברורה', 'commentary', 'עיקריים'],
+        ['טור', 'parallel', 'מקבילים'],
+        ['לבוש', 'parallel', 'מקבילים'],
+        ['ערוך השולחן', 'parallel', 'מקבילים'],
+        ['שולחן ערוך הרב', 'parallel', 'מקבילים'],
+      ]);
+      assert.deepStrictEqual([...rank.defaultExpandedKeys(ranked)], [ranked[0].key], 'only the commentary opens by default');
+      assert.deepStrictEqual(rank.kindCounts(ranked), { commentary: 1, targum: 0, parallel: 4 });
+      assert.deepStrictEqual(rank.filterCommentaries(ranked, { kind: 'parallel' }).map((g) => g.displayName), ['טור', 'לבוש', 'ערוך השולחן', 'שולחן ערוך הרב']);
+      assert.deepStrictEqual(rank.filterCommentaries(ranked, { kind: 'commentary' }).map((g) => g.displayName), ['משנה ברורה']);
+      const tur = ranked.find((g) => g.displayName === 'טור');
+      assert.strictEqual(tur.block.refKey, 'או"ח סימן י"ב');
+      assert.ok(tur.key.startsWith('parallel:'), 'pins / expansion of a parallel never collide with a commentator');
+      // Only parallels (Aruch HaShulchan has no commentaries): they open.
+      const only = rank.rankCommentaries(commentary.parallelGroups(await par('ערוך השולחן', 'ערוהש אוח יב ב')), {});
+      assert.strictEqual(rank.defaultExpandedKeys(only).size, Math.min(3, only.length), 'no commentaries: the top parallels open');
+    });
+
+    await check('Shas: בבלי שבת פרק א <-> משנה / ירושלמי / תוספתא / רא"ש שבת פרק א (perakim from "הדרן עלך"), both directions, with Rashi alongside', async () => {
+      const r = await par('שבת', 'בבלי שבת ב א פסקה 2');
+      assert.strictEqual(r.coordinate.label, 'שבת פרק א\'');
+      assert.deepStrictEqual(summary(r), ['משנה: שבת פרק א\' [משנה שבת א א]', 'ירושלמי: שבת פרק א\' [ירושלמי שבת א א]', 'תוספתא: שבת פרק א\' [תוספתא שבת א א]', 'רא"ש: שבת פרק א\' [ראש שבת א א]']);
+      assert.deepStrictEqual(summary(await par('שבת', 'בבלי שבת פרק ב')).map((x) => x.split(' [')[0]), ['משנה: שבת פרק ב\'', 'ירושלמי: שבת פרק ב\'', 'תוספתא: שבת פרק ב\'', 'רא"ש: שבת פרק ב\'']);
+      // Reverse directions land on the Bavli's perek (from daf ב. to the first hadran).
+      for (const [title, text] of [['משנה שבת', 'משנה שבת א ב'], ['תלמוד ירושלמי שבת', 'ירושלמי שבת א א'], ['תוספתא שבת', 'תוספתא שבת א א'], ['פסקי הראש על שבת', 'ראש שבת א א']]) {
+        const b = (await par(title, text)).parallels.find((p) => p.work === 'bavli');
+        assert.ok(b, `${title} -> Bavli`);
+        assert.strictEqual(b.label, 'שבת פרק א\'');
+        assert.strictEqual(b.preview[0].display_text, 'בבלי שבת ב א פסקה 1');
+        const last = await db.read.all('SELECT display_text FROM paragraphs WHERE book_id = ? AND line_index = ?', [b.bookId, b.end]);
+        assert.ok(/הדרן|הֲדַרַן/.test(last[0].display_text), 'the perek ends at its hadran');
+      }
+      // Rashi on the same paragraph is still a commentary; the Bavli's parallels come next to it.
+      const at = await lineOf('שבת', 'בבלי שבת ב א פסקה 2');
+      const own = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, at.bookId, at.line));
+      assert.deepStrictEqual(own.map((g) => g.name), ['רשי'], 'שורה ב = paragraph 2');
+      const merged = commentary.mergeParallelGroups(own, commentary.parallelGroups(r));
+      const ranked = rank.rankCommentaries(merged, { context: { title: 'שבת' } });
+      assert.deepStrictEqual(ranked.map((g) => g.displayName), ['רש"י', 'משנה', 'ירושלמי', 'תוספתא', 'רא"ש']);
+      // The Rosh, paired with the Bavli by its "על" title at import, is shown once, as a parallel work.
+      const atRosh = await lineOf('פסקי הראש על שבת', 'ראש שבת א א');
+      const roshOwn = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, atRosh.bookId, atRosh.line));
+      const roshMerged = commentary.mergeParallelGroups(roshOwn, commentary.parallelGroups(await pw.findParallels(db.read, atRosh.bookId, atRosh.line)));
+      assert.strictEqual(roshMerged.filter((g) => g.bookTitle === 'שבת').length, 1);
+      assert.strictEqual(roshMerged.find((g) => g.bookTitle === 'שבת').linkType, 'parallel');
+    });
+
+    await check('Shas: tractates match canonically (שבועות is never שביעית) and Megillah\'s perek-order divergence links by name only', async () => {
+      assert.deepStrictEqual((await par('משנה שבועות', 'משנה שבועות א')).parallels, []);
+      assert.deepStrictEqual(summary(await par('משנה שביעית', 'משנה שביעית א')), ['ירושלמי: שביעית פרק א\' [ירושלמי שביעית א]']);
+      const p = async (title, text) => (await par(title, text)).parallels.map((x) => `${x.name}: ${x.label}`);
+      assert.deepStrictEqual(await p('משנה מגילה', 'משנה מגילה א'), ['בבלי: מגילה פרק א\'', 'ירושלמי: מגילה פרק א\''], 'unaffected perek: by number');
+      assert.deepStrictEqual(await p('משנה מגילה', 'משנה מגילה ג'), ['בבלי: מגילה פרק ד\'', 'ירושלמי: מגילה פרק ג\''], 'Mishnah ג (בני העיר) = Bavli ד');
+      assert.deepStrictEqual(await p('משנה מגילה', 'משנה מגילה ד'), ['בבלי: מגילה פרק ג\''], 'Mishnah ד (הקורא עומד) = Bavli ג');
+      assert.deepStrictEqual(await p('מגילה', 'בבלי מגילה פרק ג'), ['משנה: מגילה פרק ד\''], 'Bavli ג -> Mishnah ד; the nameless Yerushalmi ג is not guessed');
+      assert.deepStrictEqual(await p('תלמוד ירושלמי מגילה', 'ירושלמי מגילה ג'), ['משנה: מגילה פרק ג\''], 'Yerushalmi (Mishnah order, no perek name) never links to the Bavli ג / ד');
+    });
+
+    await check('Parasha: בראשית פרשת נח <-> בראשית רבה / תנחומא / זוהר / ספר החינוך פרשת נח, both directions (never by mitzvah number)', async () => {
+      const r = await par('בראשית', 'בראשית ו 9');
+      assert.strictEqual(r.coordinate.label, 'פרשת נח');
+      assert.deepStrictEqual(summary(r), ['בראשית רבה: פרשת נח [בר ל אלה תולדות נח]', 'מדרש תנחומא: פרשת נח [תנחומא נח א]', 'זוהר: פרשת נח [זהר נח]', 'ספר החינוך: פרשת נח [חינוך נח]']);
+      // Verse 6:8 still belongs to parashat Bereishit (absent from this partial Chumash): no Noach link.
+      assert.strictEqual((await par('בראשית', 'בראשית ו 8')).coordinate, null);
+      const lech = await par('בראשית', 'בראשית יב 5');
+      assert.deepStrictEqual(summary(lech), ['בראשית רבה: פרשת לך לך [בר לט לך לך]', 'זוהר: פרשת לך לך [זהר לך לך]', 'ספר החינוך: פרשת לך לך [חינוך מצוה ב מילה]']);
+      const z = await par('ספר הזהר', 'זהר נח');
+      assert.deepStrictEqual(z.parallels.map((x) => x.name), ['בראשית', 'בראשית רבה', 'מדרש תנחומא', 'ספר החינוך']);
+      const chumash = z.parallels[0];
+      assert.strictEqual(chumash.preview[0].display_text, 'בראשית ו 9', 'opens the Chumash at 6:9');
+      assert.deepStrictEqual((await par('בראשית רבה', 'בר לא')).parallels.map((x) => x.name), ['בראשית', 'מדרש תנחומא', 'זוהר', 'ספר החינוך'], 'Bereishit Rabbah 31 is still Noach');
+      assert.deepStrictEqual((await par('ספר החינוך', 'חינוך מצוה ב')).parallels.map((x) => `${x.name}: ${x.label}`), ['בראשית: פרשת לך לך', 'בראשית רבה: פרשת לך לך', 'זוהר: פרשת לך לך']);
+      // Zohar's "שמות" volume heading is a book, its "פרשת שמות" a parasha (no Shemot Chumash here).
+      assert.strictEqual((await par('ספר הזהר', 'זהר שמות')).coordinate.label, 'פרשת שמות');
+      // ספר המצוות is not a parallel work: no coordinate, nothing linked by mitzvah number.
+      const sm = await par('ספר המצוות', 'ספר המצוות עשה א');
+      assert.strictEqual(sm.family, null);
+      assert.deepStrictEqual(sm.parallels, []);
+      assert.ok(!(await par('ספר החינוך', 'חינוך מצוה א')).parallels.some((x) => x.bookTitle === 'ספר המצוות'));
+    });
+
+    await check('parallel works: the fixture catalog keeps every family member standalone (never nested), targumim apart', async () => {
+      const data = await sources.loadCatalog(db.read);
+      const cat = lc.buildLibraryCatalog(data);
+      const idOfT = new Map(data.books.map((b) => [b.title, b.id]));
+      for (const t of ['טור', 'שולחן ערוך, אורח חיים', 'ערוך השולחן', 'לבוש התכלת', 'שולחן ערוך הרב', 'משנה שבת', 'שבת', 'תלמוד ירושלמי שבת', 'תוספתא שבת', 'פסקי הראש על שבת', 'בראשית', 'בראשית רבה', 'ספר הזהר', 'ספר החינוך', 'מדרש תנחומא']) {
+        const bid = idOfT.get(t);
+        assert.strictEqual(cat.roleOf(bid), 'parallel', t);
+        assert.strictEqual(cat.baseOf(bid), null, `${t} is nested under ${cat.bookTitle(cat.baseOf(bid))}`);
+        assert.ok(lc.treeBookIds(cat.sections).includes(bid), `${t} visible in ספרי בסיס`);
+      }
+      for (const t of ['קיצור שלחן ערוך', 'חיי אדם', 'ספר המצוות']) assert.strictEqual(cat.roleOf(idOfT.get(t)), 'base', t);
+      assert.strictEqual(cat.roleOf(idOfT.get('משנה ברורה')), 'commentary');
+      assert.strictEqual(cat.bookTitle(cat.baseOf(idOfT.get('משנה ברורה'))), 'שולחן ערוך, אורח חיים');
+      assert.strictEqual(cat.bookTitle(cat.baseOf(idOfT.get('רשי על שבת'))), 'שבת');
+      // Parallel members are listed as their own books, never among another member's commentaries.
+      for (const fam of ['turim', 'shas', 'parasha']) for (const pid of cat.parallelFamilyIds(fam)) for (const cid of cat.commentaryIds(pid)) assert.ok(!cat.isParallel(cid), `${cat.bookTitle(cid)} under ${cat.bookTitle(pid)}`);
+      assert.strictEqual(await pw.parallelMember(db.read, idOfT.get('ערוך השולחן')).then((m) => m && m.work), 'aruch_hashulchan');
+      assert.strictEqual(await pw.parallelMember(db.read, idOfT.get('משנה ברורה')), null);
+    });
+    await check('parallel works: coordinates are cached per library and cost a handful of queries per paragraph', async () => {
+      let n = 0;
+      const counting = { all: (sql, params) => (n++, db.read.all(sql, params)) };
+      const at = await lineOf('שולחן ערוך, אורח חיים', 'שוע אוח יב ג');
+      await pw.findParallels(counting, at.bookId, at.line);
+      const first = n;
+      n = 0;
+      await pw.findParallels(counting, at.bookId, at.line - 2);
+      assert.ok(n <= 4, `second lookup: ${n} queries (previews only)`);
+      assert.ok(first <= 20, `first lookup: ${first} queries`);
+      const t = process.hrtime.bigint();
+      for (let i = 0; i < 50; i++) await pw.findParallels(counting, at.bookId, at.line);
+      assert.ok(Number(process.hrtime.bigint() - t) / 1e6 / 50 < 15, 'cached lookups stay fast');
+    });
+    db.raw.close();
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // ---- 4. UI wiring + CI scripts -----------------------------------------------------------------
+  await check('UI wiring: the drawer separates מקבילים / תרגומים from מפרשים (kind pills, dashed parallel chips, section, prominent פתח בספר) in the compact layout', () => {
+    const pane = fs.readFileSync(path.join(ROOT, 'src/components/reader/CommentaryPane.tsx'), 'utf8');
+    for (const id of ['findParallels', 'mergeParallelGroups', 'parallelGroups', 'commentary-kind-', 'commentary-chip-parallel', 'parallel-group', 'parallel-group-name', 'parallel-section', 'parallel-open', 'parallel-focus-row', 'parallel-block', 'מקבילים', 'ספרים עצמאיים']) assert.ok(pane.includes(id), id);
+    assert.ok(/header: \{[^}]*height: 36/.test(pane), 'compact 36px title bar');
+    assert.ok(/pill: \{[^}]*height: 28/.test(pane), '28px chips');
+    assert.ok(/focusRow: \{[^}]*height: 28/.test(pane), 'ultra-slim focus row');
+    assert.ok(/pillParallel: \{[^}]*borderStyle: 'dashed'/.test(pane));
+    assert.ok(!/(paddingLeft|paddingRight|marginLeft|marginRight)/.test(pane), 'RTL-safe styles');
+    const reader = fs.readFileSync(path.join(ROOT, 'src/components/reader/BookReader.tsx'), 'utf8');
+    assert.ok(reader.includes('parallelMember(adapter, bookId)') && reader.includes('parallelRef.current && !row.is_heading'), 'a parallel-only book opens the drawer');
+    const cols = fs.readFileSync(path.join(ROOT, 'src/components/LibraryColumns.tsx'), 'utf8');
+    assert.ok(cols.includes("n.role === 'parallel'") && cols.includes('tree-parallel-') && cols.includes('⇄ מקביל'));
+  });
+  await check('CI scripts stay zero-node_modules: audit-parallels / export-starter-packs / build-db / cloud-release and the new shared modules need Node built-ins only', () => {
+    const guard = `const M=require('module');const o=M._resolveFilename;M._resolveFilename=function(r,...a){` +
+      `if(!r.startsWith('.')&&!r.startsWith('/')&&!M.builtinModules.includes(r.replace(/^node:/,'')))throw new Error('third-party require: '+r);` +
+      `return o.call(this,r,...a)};`;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-guard-'));
+    try {
+      const guardFile = path.join(dir, 'guard.js');
+      fs.writeFileSync(guardFile, guard);
+      for (const f of ['scripts/audit-parallels.js', 'scripts/export-starter-packs.js', 'scripts/build-db.js', 'scripts/cloud-release.js', 'shared/parallelWorks.js', 'shared/bookRoles.js', 'shared/canonLists.js', 'shared/libraryCatalog.js']) {
+        const c = spawnSync(process.execPath, ['-r', guardFile, '-e', `require(${JSON.stringify(path.join(ROOT, f))})`], { encoding: 'utf8' });
+        assert.strictEqual(c.status, 0, `${f} needs a third-party module:\n${c.stderr}`);
+      }
+      if (fs.existsSync(indexPath)) {
+        const c = spawnSync(process.execPath, ['-r', guardFile, path.join(ROOT, 'scripts/audit-parallels.js'), '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+        assert.strictEqual(c.status, 0, c.stderr);
+        const out = JSON.parse(c.stdout);
+        assert.deepStrictEqual(out.violations, []);
+        assert.strictEqual(out.stats.shas.bavli, 37);
+      }
+      const wf = fs.readFileSync(path.join(ROOT, '.github/workflows/build-library.yml'), 'utf8');
+      assert.ok(wf.includes('node scripts/audit-parallels.js'), 'the cloud build runs the parallel-works audit');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    void roles;
   });
 }

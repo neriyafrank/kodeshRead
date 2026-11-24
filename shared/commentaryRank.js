@@ -143,7 +143,10 @@ const CORPUS_LABEL = {
 };
 
 /** Display groups. `מקור` is the base text shown from inside a commentary. */
-const TIERS = { source: 'מקור', core: 'עיקריים', targum: 'תרגומים', rishonim: 'ראשונים', acharonim: 'אחרונים', other: 'נוספים' };
+const TIERS = { source: 'מקור', core: 'עיקריים', targum: 'תרגומים', rishonim: 'ראשונים', acharonim: 'אחרונים', other: 'נוספים', parallel: 'מקבילים' };
+/** Kind of a linked book: what the drawer groups and filters by. */
+const KINDS = { commentary: 'מפרשים', targum: 'תרגומים', parallel: 'מקבילים', source: 'מקור' };
+const TARGUM_TITLE_RE = /^(?:תרגום|אונקלוס|תפסיר)(?:\s|$)/;
 
 /** Era fallback order (lower first). */
 const ERA_RANK = { targum: 0, rishonim: 1, acharonim: 2, modern: 3 };
@@ -336,14 +339,32 @@ const compareNames = (a, b) => (collator ? collator.compare(a, b) : a < b ? -1 :
 function classifyCommentary(item, corpus) {
   const name = item.name || commentatorOf(item.bookTitle);
   const isSource = item.linkType === 'source';
+  if (item.linkType === 'parallel') {
+    // A standalone parallel work (טור / משנה / ירושלמי / מדרש רבה ...): never a commentator.
+    return {
+      key: 'parallel:' + commentatorKey(name),
+      displayName: name,
+      corpus: corpus || null,
+      core: false,
+      coreIndex: null,
+      era: null,
+      tier: TIERS.parallel,
+      isSource: false,
+      kind: 'parallel',
+      isParallel: true,
+      parallelOrder: item.parallel && item.parallel.order != null ? item.parallel.order : 0,
+    };
+  }
   const hit = isSource ? null : findCore(name, corpus, item.bookTitle);
   const entry = hit ? hit.entry : null;
   const era = eraOf(item.categoryPath, item.linkType);
   // The list's spelling of the name that matched ("רשי" -> רש"י, "יכין ברכות" -> יכין); another
   // work of the same author keeps its own title ("חידושי אגדות").
   const displayName = hit ? hit.alias : name;
+  const targum = !isSource && (item.linkType === 'targum' || item.linkType === 'translation' || era === 'targum' || TARGUM_TITLE_RE.test(String(item.bookTitle || '').trim()));
   let tier;
   if (isSource) tier = TIERS.source;
+  else if (targum) tier = TIERS.targum;
   else if (entry) tier = TIERS.core;
   else if (era === 'targum') tier = TIERS.targum;
   else if (era === 'rishonim') tier = TIERS.rishonim;
@@ -359,6 +380,9 @@ function classifyCommentary(item, corpus) {
     era,
     tier,
     isSource,
+    kind: isSource ? 'source' : targum ? 'targum' : 'commentary',
+    isParallel: false,
+    parallelOrder: null,
   };
 }
 
@@ -384,7 +408,9 @@ function rankCommentaries(groups, opts) {
   const sortKey = (r) => [
     r.pinned ? r.pinIndex : inf,
     r.isSource ? 0 : 1,
-    r.core ? r.coreIndex : inf,
+    // Parallel works after every commentary / translation, in their family order.
+    r.isParallel ? 1 : 0,
+    r.isParallel ? r.parallelOrder : r.core ? r.coreIndex : inf,
     r.era && ERA_RANK[r.era] !== undefined ? ERA_RANK[r.era] : UNKNOWN_ERA_RANK,
   ];
   ranked.sort((a, b) => {
@@ -406,12 +432,17 @@ function defaultExpandedKeys(ranked, opts) {
   const top = opts && opts.top != null ? opts.top : 3;
   const allBelow = opts && opts.allBelow != null ? opts.allBelow : 3;
   const out = new Set();
-  if (ranked.length <= allBelow) {
-    for (const r of ranked) out.add(r.key);
+  // Parallel works start folded (one tap on their chip / header shows the parallel unit), unless
+  // they are all the passage has.
+  const own = ranked.filter((r) => !r.isParallel);
+  const pool = own.length ? own : ranked;
+  for (const r of ranked) if (r.isParallel && r.pinned) out.add(r.key);
+  if (pool.length <= allBelow) {
+    for (const r of pool) out.add(r.key);
     return out;
   }
   let n = 0;
-  for (const r of ranked) {
+  for (const r of pool) {
     if (r.pinned) out.add(r.key);
     else if (n < top) {
       out.add(r.key);
@@ -473,11 +504,28 @@ function matchesCommentatorQuery(query, item) {
 function filterCommentaries(ranked, opts) {
   const view = (opts && opts.view) || 'all';
   const query = (opts && opts.query) || '';
+  const kind = (opts && opts.kind) || 'all';
   return ranked.filter((r) => {
+    if (kind !== 'all' && kindOf(r) !== kind && !(kind === 'commentary' && kindOf(r) === 'source')) return false;
     if (view === 'core' && !(r.core || r.isSource)) return false;
     if (view === 'pinned' && !r.pinned) return false;
     return matchesCommentatorQuery(query, r);
   });
+}
+
+/** 'commentary' | 'targum' | 'parallel' | 'source' of a ranked item. */
+function kindOf(r) {
+  return (r && r.kind) || (r && r.isParallel ? 'parallel' : r && r.isSource ? 'source' : 'commentary');
+}
+
+/** Item count per kind (מקור counts with מפרשים): { commentary, targum, parallel }. */
+function kindCounts(ranked) {
+  const out = { commentary: 0, targum: 0, parallel: 0 };
+  for (const r of ranked || []) {
+    const k = kindOf(r);
+    out[k === 'source' ? 'commentary' : k] = (out[k === 'source' ? 'commentary' : k] || 0) + 1;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +561,9 @@ module.exports = {
   CORE_LISTS,
   CORPUS_LABEL,
   TIERS,
+  KINDS,
+  kindOf,
+  kindCounts,
   commentatorKey,
   commentatorOf,
   findCore,

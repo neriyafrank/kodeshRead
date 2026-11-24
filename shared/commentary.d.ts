@@ -19,8 +19,8 @@ export interface UnitBlock {
   refKey: string;
   start: number;
   end: number;
-  /** 'base': the selected book is the base, the block is commentary (and vice versa). */
-  role?: 'base' | 'comm';
+  /** 'base': the selected book is the base, the block is commentary (and vice versa); 'parallel': a parallel work's unit. */
+  role?: 'base' | 'comm' | 'parallel';
 }
 
 export interface UnitLink {
@@ -47,7 +47,9 @@ export interface CommentaryGroup {
   rank: number;
   entries: LinkedEntry[];
   /** Whole aligned block in this book (open + highlight target), when heading-aligned. */
-  block: { refKey: string; start: number; end: number } | null;
+  block: { refKey: string; start: number; end: number; role?: string } | null;
+  /** Parallel works only: the family, the work and the parallel unit's label ("או"ח סימן יב"). */
+  parallel?: { family: string; work: string; label: string; order: number };
 }
 
 export const MAX_BLOCK_LINES: number;
@@ -60,3 +62,7 @@ export function attachLinkCounts<T extends { line_index: number }>(rows: T[], co
 export function fetchLinkedEntries(db: LibraryDb, bookId: number, line: number): Promise<LinkedEntry[]>;
 export function commentatorName(title: string): string;
 export function groupLinkedEntries(entries: LinkedEntry[]): CommentaryGroup[];
+/** Drawer groups of parallel works (one per parallel book, linkType 'parallel'). */
+export function parallelGroups(result: import('./parallelWorks').ParallelResult | null | undefined): CommentaryGroup[];
+/** Commentary groups + parallel groups (a parallel book also aligned via ref_links is shown once, as parallel). */
+export function mergeParallelGroups(groups: CommentaryGroup[], parallels: CommentaryGroup[]): CommentaryGroup[];

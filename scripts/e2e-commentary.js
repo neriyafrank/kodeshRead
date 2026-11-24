@@ -17,6 +17,12 @@
  * (אב"ע / מלבים / רש / תוס), view chips, and pinning a favorite (persisted across reloads).
  * The tools header (filter / chips / open-all / pills) starts folded: it is opened with the
  * "סינון" toggle in the drawer's title bar, which shows a dot while a filter is active.
+ *
+ * Parallel works (shared/parallelWorks.js): on שבת ב. the sample's משנה שבת is a standalone
+ * parallel work, never a commentator: its own "⇄ מקבילים · שבת פרק א'" section after רש"י /
+ * תוספות, a dashed ⇄ chip, מפרשים / מקבילים kind pills; tapping the chip shows the opening of the
+ * Mishnah perek with a filled "פתח בספר ↗", which opens it; from the Mishnah the drawer shows the
+ * Bavli's perek (cut at "הדרן עלך") and opens it back.
  */
 'use strict';
 
@@ -67,13 +73,16 @@ try {
     await shot('1-badges');
     step('link-count badges');
 
-    // A paragraph without links does not open the drawer.
+    // A paragraph without a link badge: the Bavli is a parallel work (משנה / ירושלמי / תוספתא ...), so the
+    // drawer opens anyway - with תוספות' amud block (it covers the whole amud) and the parallel Mishnah perek.
     await tid('para-4').click();
-    await page.waitForTimeout(200);
-    assert.strictEqual(await tid('commentary-pane').count(), 0);
+    await tid('parallel-group').waitFor({ timeout: 10000 });
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['תוספות']);
+    assert.deepStrictEqual(await tid('parallel-group-name').allInnerTexts(), ['משנה']);
 
     await tid('para-3').click();
-    await tid('commentary-group').first().waitFor({ timeout: 10000 });
+    // (The drawer is already open on paragraph 2: wait for paragraph 1's two commentators.)
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group-name"]').length === 2, null, { timeout: 10000 });
     const names = await tid('commentary-group-name').allInnerTexts();
     assert.deepStrictEqual(names, ['רש"י', 'תוספות']);
     // Talmud Bavli: Rashi is #1 (ahead of Tosafot), both under the primary commentators (עיקריים).
@@ -283,7 +292,8 @@ try {
     await page.evaluate(() => localStorage.removeItem('kodeshread.commentary'));
     await openBereshit();
     assert.deepStrictEqual(await groupNames(), PRIORITY, 'Tanach core list first, then ראשונים before אחרונים');
-    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'ראשונים', 'אחרונים']);
+    // אונקלוס keeps its place at the top of the Tanach list, but is badged as a translation (תרגום).
+    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['תרגומים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'ראשונים', 'אחרונים']);
     // Otzaria titles without gershayim are shown in their canonical spelling ("מלבים" -> מלבי"ם).
     step('priority order + tier badges (8 commentators)');
 
@@ -348,7 +358,10 @@ try {
     // Chip bar: הכל at the right edge, then the commentators in priority order; no extra buttons.
     await setTools(false);
     assert.deepStrictEqual(await chipTexts(), ['הכל', ...PRIORITY], 'chip bar: הכל + commentators right-to-left in priority order');
-    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 9, 'only 9 chips, no mode buttons');
+    // + the kind pills (אונקלוס is a translation): מפרשים 7 · תרגומים 1, right after הכל (right-to-left).
+    const kinds = await page.locator('[data-testid^="commentary-kind-"]').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })));
+    assert.deepStrictEqual(kinds.sort((a, b) => b.x - a.x).map((k) => k.t), ['מפרשים 7', 'תרגומים 1']);
+    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 11, 'הכל + 2 kind pills + 8 commentators, no mode buttons');
     const allBox = await tid('commentary-chip-all').boundingBox();
     assert.ok(allBox.x + allBox.width <= 401 && allBox.x > 200, `הכל visible at the right edge (${allBox.x})`);
     const chip = (name) => page.locator('[data-testid="commentary-chip"]', { hasText: name });
@@ -526,6 +539,71 @@ try {
     await tid('scope-chips-clear').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
     step('scope picker: הספר הפתוח + מפרשיו (9 books) -> badge "נבחרו 9 ספרים" + נקה');
+
+    // --- Parallel works (מקבילים): Bavli שבת פרק א <-> משנה שבת פרק א, both directions ------------
+    await page.evaluate(() => localStorage.removeItem('kodeshread.commentary'));
+    await page.goto(BASE + '/', { timeout: 180000 });
+    await jump.waitFor({ timeout: 180000 });
+    await jump.fill('שבת ב.');
+    await tid('quick-jump-result').first().click();
+    await tid('para-3').waitFor({ timeout: 20000 });
+    await tid('para-3').click();
+    await tid('parallel-group').waitFor({ timeout: 10000 });
+    // Commentaries first; the parallel work in its own labelled section, folded, with its unit.
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י', 'תוספות']);
+    assert.deepStrictEqual(await tid('parallel-group-name').allInnerTexts(), ['משנה']);
+    assert.deepStrictEqual(await tid('parallel-tier').allInnerTexts(), ['⇄ מקביל']);
+    assert.ok((await tid('parallel-section').innerText()).includes("מקבילים · שבת פרק א'"), await tid('parallel-section').innerText());
+    assert.ok((await tid('parallel-block').innerText()).includes("שבת פרק א'"));
+    assert.strictEqual(await tid('parallel-group-header').getAttribute('aria-expanded'), 'false', 'parallels start folded');
+    assert.strictEqual(await tid('parallel-entry').count(), 0);
+    assert.ok((await tid('commentary-title').innerText()).includes('מקבילים (1)'), await tid('commentary-title').innerText());
+    // Compact layout kept: 36px title bar, 28px chips (the parallel chip too), kind pills.
+    assert.ok(Math.abs((await tid('commentary-title').evaluate((e) => e.parentElement.getBoundingClientRect().height)) - 36) <= 1);
+    assert.strictEqual(Math.round((await tid('commentary-chip-parallel').boundingBox()).height), 28);
+    assert.strictEqual((await tid('commentary-chip-parallel').innerText()).trim(), '⇄ משנה');
+    assert.strictEqual((await tid('commentary-kind-commentary').innerText()).trim(), 'מפרשים 2');
+    assert.strictEqual((await tid('commentary-kind-parallel').innerText()).trim(), 'מקבילים 1');
+    // A kind pill isolates the parallel works, and back.
+    await tid('commentary-kind-parallel').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="commentary-group"]'));
+    assert.strictEqual(await tid('parallel-group').count(), 1);
+    await tid('commentary-kind-parallel').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    await shot('11-parallel-section');
+    step('parallel works: מקבילים section + ⇄ chip + kind pills next to רש"י / תוספות (compact 36px / 28px layout)');
+
+    // Tapping the parallel chip shows the opening of משנה שבת פרק א with a prominent "פתח בספר ↗".
+    await tid('commentary-chip-parallel').click();
+    await tid('parallel-focus-row').waitFor();
+    assert.ok((await tid('parallel-focus-row').innerText()).includes("⇄ משנה · שבת פרק א'"), await tid('parallel-focus-row').innerText());
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="parallel-entry"]').length > 0);
+    const plain = (t) => t.replace(/[\u0591-\u05C7]/g, '');
+    assert.ok(plain(await tid('parallel-entry').first().innerText()).includes('יציאות השבת'), `the overview opens on Mishnah 1:1: ${await tid('parallel-entry').first().innerText()}`);
+    const openBg = await tid('parallel-open').evaluate((e) => getComputedStyle(e).backgroundColor);
+    assert.ok(openBg !== 'rgba(0, 0, 0, 0)' && openBg !== 'transparent', 'prominent filled action');
+    await shot('12-parallel-focus');
+    await tid('commentary-chip-all').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    await tid('parallel-open').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('משנה שבת'), null, { timeout: 15000 });
+    await tid('para-6').waitFor({ timeout: 15000 });
+    step('parallel chip -> overview of משנה שבת פרק א; "פתח בספר ↗" opens the Mishnah at the perek');
+
+    // From the Mishnah (no commentaries at all in the sample) the drawer shows the Bavli's perek.
+    await page.waitForTimeout(400);
+    await tid('para-6').click();
+    await tid('parallel-group').waitFor({ timeout: 10000 });
+    assert.strictEqual(await tid('commentary-group').count(), 0);
+    assert.deepStrictEqual(await tid('parallel-group-name').allInnerTexts(), ['בבלי']);
+    assert.strictEqual(await tid('parallel-group-header').getAttribute('aria-expanded'), 'true', 'only parallels: they open');
+    assert.ok(/^מקבילים \(1\)/.test((await tid('commentary-title').innerText()).trim()), await tid('commentary-title').innerText());
+    assert.ok(plain(await tid('parallel-entry').first().innerText()).includes('יציאות השבת'), `the Bavli perek opens on its Mishnah: ${await tid('parallel-entry').first().innerText()}`);
+    await shot('13-mishna-to-bavli');
+    await tid('parallel-open').click();
+    await page.waitForFunction(() => /^\s*שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''), null, { timeout: 15000 });
+    await tid('para-3').waitFor({ timeout: 15000 });
+    step('reverse direction: משנה שבת פרק א -> בבלי שבת פרק א (perek cut at "הדרן עלך"), opened in the reader');
 
     const real = errors.filter((e) => !/favicon|DevTools|Download the React DevTools/.test(e));
     assert.deepStrictEqual(real, [], 'console errors');

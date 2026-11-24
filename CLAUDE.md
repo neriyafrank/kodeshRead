@@ -143,6 +143,19 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `OnboardingCard starter`). `LibraryContext` installs the full core via the unchanged `installCore`, then deletes the starter
 > DB and remaps tabs by title + folder (`remapTabs`); `removeCore` goes back to starter mode. Self-tested (section 14), `e2e:library`.
 
+> **Canonical book roles & parallel works:** `shared/bookRoles.js` classifies every book as base / parallel /
+> commentary / targum (commentary only when explicitly matched by `shared/pairing.js`; series / owner pairs only in a
+> commentary context; unpaired era-folder books stay standalone). `shared/parallelWorks.js` = allow-listed families linked
+> bidirectionally at one level: turim (טור / שו"ע / לבוש / ערוך השולחן / שו"ע הרב by part + סימן, never סעיף; never
+> קיצור שו"ע / חיי אדם / חכמת אדם / בן איש חי), shas (משנה / בבלי / ירושלמי / תוספתא / רי"ף / רא"ש by canonical tractate +
+> perek; Bavli perakim cut at "הדרן עלך"; Megillah / Sanhedrin / Menachot / Tamid order divergences matched by perek name
+> only), parasha (חומש / מדרש רבה / תנחומא / זוהר / ספר החינוך; never by mitzvah number). Resolved at query time from
+> `toc_nodes` (`findParallels`, cached per router; no schema change, no rebuild). Drawer: `commentary.parallelGroups` /
+> `mergeParallelGroups`, `commentaryRank` kinds (מפרשים / תרגומים / מקבילים pills, parallels last + folded),
+> `CommentaryPane` `parallel-*` test ids. Library: `⇄ מקביל` tag, רי"ף / רא"ש sections, "ספרים מקבילים לטור ולשולחן
+> ערוך". Audit: `node scripts/audit-parallels.js [--db=…]` (also in `build-library.yml`). Self-tested (section 16),
+> e2e in `e2e:commentary` / `e2e:library` (sample `משנה שבת` excerpt).
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

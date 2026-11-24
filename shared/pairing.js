@@ -25,9 +25,10 @@
 
 const { aliasKey } = require('./hebrew');
 const { expandAbbreviation } = require('./hebrewTorahDict');
+const { TRACTATE_INDEX } = require('./canonLists');
 
-/** Folders that hold commentaries / later works rather than primary texts. */
-const COMMENTARY_DIRS = new Set(['מפרשים', 'ראשונים', 'אחרונים', 'מחברי זמננו', 'מחברי זמנינו'].map(aliasKey));
+/** Folders that hold commentaries / translations / later works rather than primary texts ("תנך/תרגומים/…/תרגום איוב" -> איוב). */
+const COMMENTARY_DIRS = new Set(['מפרשים', 'ראשונים', 'אחרונים', 'מחברי זמננו', 'מחברי זמנינו', 'תרגומים'].map(aliasKey));
 
 /** Top-level Otzaria folder -> corpus id. */
 const CORPUS_OF_TOP = new Map(
@@ -65,6 +66,9 @@ const MULTI_TARGETS = [
 
 /** Generic last words that never name a base book in "<series> <base>" titles. */
 const GENERIC = new Set(['הקדמה', 'מבוא', 'מפתח', 'מפתחות', 'השמטות', 'הוספות', 'קונטרס', 'חלק', 'כללים', 'סימנים', 'תשובות', 'ליקוטים', 'מילואים', 'אחרון', 'תנינא', 'קמא', 'מהדורא'].map(aliasKey));
+
+/** Words of an introduction / index title: such a book never pairs by its trailing words. */
+const INTRO_WORDS = new Set(['הקדמה', 'הקדמת', 'מבוא', 'מפתח', 'מפתחות', 'השמטות', 'הוספות', 'כללים'].map(aliasKey));
 
 /**
  * Standalone commentaries whose title does not name their base book (exact titles; in Otzaria they
@@ -234,7 +238,10 @@ function* pairSteps(books) {
   const best = (comm, names, explicit) => {
     let top = null;
     for (const name of names) {
-      for (const [map, key, penalty] of [[index, name, 0], [sindex, skel(name), 4]]) {
+      // The skeleton is only a fallback: when the exact spelling names a book, a different name
+      // with the same skeleton (שביעית / שבועות, קודשים / קידושין) is never taken instead.
+      const exactHit = (index.get(name) || []).some((c) => c.x !== comm && (!explicit || c.x.place.corpus === explicit));
+      for (const [map, key, penalty] of exactHit ? [[index, name, 0]] : [[index, name, 0], [sindex, skel(name), 4]]) {
         for (const c of map.get(key) || []) {
           if (c.x === comm) continue;
           const cp = c.x.place;
@@ -303,10 +310,14 @@ function* pairSteps(books) {
     if (!found && !splits.length && !place.primary) {
       // "<series> <base>": the longest trailing word sequence naming a primary text.
       const words = aliasKey(String(b.title).replace(/\(([^)]+)\)\s*$/, ' $1')).split(' ').filter(Boolean);
-      for (let n = Math.min(4, words.length - 1); n >= 1 && !found; n--) {
+      // An introduction / index ("רמבם הקדמה לסדר קודשים") names no base book by its last words.
+      const generic = words.some((w) => INTRO_WORDS.has(w) || INTRO_WORDS.has(w.replace(/^[לו]/, '')));
+      for (let n = generic ? 0 : Math.min(4, words.length - 1); n >= 1 && !found; n--) {
         const tail = words.slice(words.length - n).join(' ');
-        if (n === 1 && (GENERIC.has(tail) || tail.length < 3)) continue;
-        if (words.slice(words.length - n).some((w) => GENERIC.has(w))) continue;
+        // "קמא" / "בתרא" are generic tails, except inside a tractate name ("יכין בבא קמא").
+        const tractate = TRACTATE_INDEX.get(stripFillers(tail)) != null;
+        if (n === 1 && !tractate && (GENERIC.has(tail) || tail.length < 3)) continue;
+        if (!tractate && words.slice(words.length - n).some((w) => GENERIC.has(w))) continue;
         const hit = best(x, [tail, stripFillers(tail)], null);
         // A primary text of the same corpus, or a text of the folder owning this "מפרשים"
         // (".../ריף/מפרשים/השגות הראבד/השגות הראבד גיטין" -> the Rif's גיטין).

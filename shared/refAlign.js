@@ -127,6 +127,61 @@ function paragraphNumber(text) {
   return n && intToHebrew(n) === normalizeHebrew(tok, { keepPunctuation: false }) ? n : null;
 }
 
+/**
+ * Perek number of a heading / unit key: numerals ("פרק א", "פרק י\"א", "פרק יא - ...") and the
+ * ordinal words Otzaria / Vilna print for the first ten ("פרק ראשון", "פרק שני", "פרק עשירי").
+ * Only canonical numerals count (a stray word is never read as a number). null otherwise.
+ */
+const ORDINALS = new Map(
+  [
+    [1, ['ראשון', 'קמא']],
+    [2, ['שני', 'שנים', 'תנינא']],
+    [3, ['שלישי']],
+    [4, ['רביעי']],
+    [5, ['חמישי', 'חמשי']],
+    [6, ['שישי', 'ששי']],
+    [7, ['שביעי']],
+    [8, ['שמיני']],
+    [9, ['תשיעי']],
+    [10, ['עשירי']],
+  ].flatMap(([n, words]) => words.map((w) => [normalizeHebrew(w, { keepPunctuation: false }), n])),
+);
+function numberKey(key) {
+  const k = normalizeHebrew(String(key || ''), { keepPunctuation: false }).split(' ')[0] || '';
+  if (ORDINALS.has(k)) return ORDINALS.get(k);
+  if (/^\d{1,3}$/.test(k)) return Number(k) || null;
+  if (!/^[א-ת]{1,4}$/.test(k)) return null;
+  const n = hebrewNumeralToInt(k);
+  return n && intToHebrew(n) === k ? n : null;
+}
+/** "פרק ג - במה מדליקין" -> 3; "פרק ראשון" -> 1; anything that is not a perek heading -> null. */
+function perekNumber(title) {
+  const labels = unitLabels(title);
+  const leaf = labels[labels.length - 1];
+  if (!leaf || leaf.type !== 'פרק') return null;
+  return numberKey(leaf.key);
+}
+/** Name of a perek from its heading ("פרק ב - במה מדליקין" -> "במה מדליקין"), or ''. */
+function perekName(title) {
+  const plain = plainHeadingText(title);
+  const m = /\s[-–—]\s(.+)$/.exec(plain) || /^פרק\s+\S+\s*[,:]\s*(.+)$/.exec(plain);
+  return m ? m[1].trim() : '';
+}
+
+/**
+ * The Vilna Shas closes every perek with "הדרן עלך <perek name>" (vocalized or not, bold / big, the
+ * last one with "וסליקא לה מסכת ..."). `text` may be clean_text or display HTML. Returns the perek
+ * name ('' when none is printed), or null when the line is not a hadran.
+ */
+const HADRAN_RE = /^\s*הדרנ\s+עלכ(?:\s+(.*))?$/;
+function hadranName(text) {
+  const plain = normalizeHebrew(stripHtml(decodeEntities(String(text || ''))), { keepPunctuation: false });
+  if (plain.length > 160) return null;
+  const m = HADRAN_RE.exec(plain);
+  if (!m) return null;
+  return (m[1] || '').replace(/(^|\s)וסליקא(\s.*)?$/, '').trim();
+}
+
 const labelText = (l) => (l.type ? `${l.type} ${l.key}` : l.key);
 
 /** "פרק א|פסוק א" from labels. */
@@ -522,6 +577,10 @@ module.exports = {
   inlineUnitWord,
   markerKey,
   paragraphNumber,
+  numberKey,
+  perekNumber,
+  perekName,
+  hadranName,
   inlineUnits,
   alignUnits,
 };

@@ -363,7 +363,7 @@ try {
     const root0 = await box('library-column-0');
     assert.ok(root0.x + root0.width > 380, 'root column hugs the right edge');
     const rootNames = (await secRows.allInnerTexts()).map((t) => t.split('\n').find((x) => /[א-ת]/.test(x)));
-    assert.deepStrictEqual(rootNames, ['תנ"ך', 'תלמוד בבלי'], 'canonical section order; empty sections hidden');
+    assert.deepStrictEqual(rootNames, ['תנ"ך', 'משנה', 'תלמוד בבלי'], 'canonical section order; empty sections hidden');
     await sec('תנ"ך').click();
     await tid('library-column-1').waitFor();
     assert.strictEqual(await sec('תנ"ך').getAttribute('aria-selected'), 'true', 'active section highlighted');
@@ -377,6 +377,8 @@ try {
     assert.deepStrictEqual(books2.map((t) => t.split('\n')[0]), ['בראשית', 'במדבר'], 'Torah order (alphabetical would put במדבר first); base books only');
     assert.strictEqual((await tid('tree-comm-1').innerText()).trim(), 'מפרשים (8)', 'compact inline pill on the row');
     assert.strictEqual(await tid('tree-comm-2').count(), 0, 'no pill where there are no commentaries');
+    // The Chumash is a parallel work (פרשת השבוע family): a standalone book with a subtle ⇄ tag.
+    assert.strictEqual((await tid('tree-parallel-1').innerText()).trim(), '⇄ מקביל');
     const [c0, c1, c2] = [await box('library-column-0'), await box('library-column-1'), await box('library-column-2')];
     assert.ok(c2.x < c1.x && c1.x < c0.x, `columns flow right-to-left (${c0.x}, ${c1.x}, ${c2.x})`);
     assert.ok(c2.x >= -1 && c1.x + c1.width <= 401, 'new column revealed with its parent beside it');
@@ -388,7 +390,7 @@ try {
       [...document.querySelectorAll('[data-testid^="library-column-"]')].flatMap((col) => {
         const cb = col.getBoundingClientRect();
         return [...col.querySelectorAll('div, span')]
-          .filter((e) => !e.children.length && !e.closest('[data-testid^="tree-comm-"]') && /[א-ת]{2}/.test(e.innerText || '') && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 60)
+          .filter((e) => !e.children.length && !e.closest('[data-testid^="tree-comm-"]') && !e.closest('[data-testid^="tree-parallel-"]') && /[א-ת]{2}/.test(e.innerText || '') && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().width > 60)
           .map((e) => {
             const r = document.createRange();
             r.selectNodeContents(e);
@@ -411,16 +413,32 @@ try {
     await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-2"]'));
     const shas = await page.locator('[data-testid="library-column-1"] [data-testid^="tree-book-"]').allInnerTexts();
     assert.deepStrictEqual(shas.map((t) => t.split('\n')[0]), ['שבת', 'ראש השנה', 'תענית'], 'Shas order (alphabetical would start with ראש השנה)');
+    // The Mishnah is a parallel work of the Bavli, never one of its commentaries: שבת keeps רש"י + תוספות only.
+    assert.strictEqual((await tid('tree-comm-12').innerText()).trim(), 'מפרשים (2)');
+    assert.strictEqual(await tid('tree-parallel-12').count(), 1);
     await tid('library-crumb-root').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-1"]'));
     step('Bavli in Shas order; switch siblings with one tap; breadcrumb jumps back');
+
+    // --- Parallel works are standalone books in their own section ----------------------------------
+    await sec('משנה', '[data-testid="library-column-0"]').click();
+    await sec('סדר מועד', '[data-testid="library-column-1"]').click();
+    await tid('library-column-2').waitFor();
+    const mishna = await page.locator('[data-testid="library-column-2"] [data-testid^="tree-book-"]').allInnerTexts();
+    assert.deepStrictEqual(mishna.map((t) => t.split('\n')[0]), ['משנה שבת']);
+    assert.strictEqual((await tid('tree-parallel-11').innerText()).trim(), '⇄ מקביל');
+    assert.strictEqual(await tid('tree-comm-11').count(), 0, 'no commentaries of its own; not nested under the Bavli either');
+    await shot('parallel-standalone');
+    await tid('library-crumb-root').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="library-column-1"]'));
+    step('משנה שבת: a standalone parallel work (⇄ מקביל) under משנה ‹ סדר מועד, not a commentary of שבת');
 
     // --- Live filter -----------------------------------------------------------------------------
     await tid('library-filter').fill('שבת');
     await tid('library-results').waitFor();
     const hit = await page.locator('[data-testid="library-results"] [data-testid^="tree-book-"]').allInnerTexts();
-    assert.deepStrictEqual(hit.map((t) => t.split('\n')[0]), ['שבת']);
-    assert.ok(hit[0].includes('תלמוד בבלי'), 'result shows its section');
+    assert.deepStrictEqual(hit.map((t) => t.split('\n')[0]), ['משנה שבת', 'שבת'], 'canonical order: the Mishnah, then the Bavli');
+    assert.ok(hit[1].includes('תלמוד בבלי'), 'result shows its section');
     await tid('library-filter').fill('zzzz');
     await tid('library-filter-empty').waitFor();
     await tid('library-filter-clear').click();
@@ -452,8 +470,8 @@ try {
     await sec('תלמוד בבלי', '[data-testid="library-column-0"]').click().catch(() => undefined);
     await tid('library-crumb-root').click();
     await sec('תלמוד בבלי').click();
-    await tid('tree-book-11').click();
-    await tid('tree-open-base-11').waitFor();
+    await tid('tree-book-12').click();
+    await tid('tree-open-base-12').waitFor();
     const shabbat = (await page.locator('[data-testid^="tree-commentary-"]').allInnerTexts()).map((t) => t.split('\n')[0]);
     assert.ok(shabbat[0].includes('רש"י') && shabbat[1].includes('תוספות'), `Rashi #1 on the Bavli, then Tosafot: ${shabbat}`);
     assert.ok((await page.locator('[data-testid^="tree-commentary-"]').first().innerText()).includes('עיקריים'), 'tier badge');

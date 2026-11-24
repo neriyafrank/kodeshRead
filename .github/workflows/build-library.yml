@@ -94,6 +94,11 @@ jobs:
       - name: Validate the database
         run: node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
 
+      - name: Audit parallel works and book roles
+        # Every parallel-family member (טור / שו"ע, משנה / בבלי / ירושלמי / תוספתא, חומש / מדרש רבה ...)
+        # must stay a standalone work: no commentary leaks, no excluded title (קיצור שו"ע, חיי אדם ...).
+        run: node scripts/audit-parallels.js --db="$WORK/core_library.db"
+
       - name: Export starter packs (instant cloud starter)
         run: |
           set -euo pipefail

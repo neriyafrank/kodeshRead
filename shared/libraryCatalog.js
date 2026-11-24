@@ -3,15 +3,16 @@
  * main Library screen (src/components/LibraryColumns.tsx) and the Search Scope Picker
  * (src/components/search/ScopeSheet.tsx), replacing the raw Otzaria folder / filesystem order.
  *
- * 1. Base books vs. commentaries. A book is a commentary (`isCommentary(id)`, i.e. "is_commentary
- *    = 1"; derived, the database schema is unchanged) when shared/pairing.js (the same pairing the
- *    importer uses to build `ref_links`) pairs it with a base book - by "X על Y" title and folder:
- *    "תלמוד בבלי/ראשונים/רש"י/סדר זרעים/רש"י על ברכות" -> Bavli ברכות - and it either sits in a
- *    commentary folder (מפרשים / ראשונים / אחרונים / תרגומים / מחברי זמננו) or in the base's own
- *    corpus ("הערות על בראשית" inside תנך/תורה). Corpus-wide commentaries ("… על השס") and
- *    unpaired "X על Y" commentary-folder books are "מפרשים כלליים". A midrash that happens to
- *    comment on Tanach ("מדרש לקח טוב על איכה", "ילקוט שמעוני על התורה") stays a base book.
- *    Commentaries on commentaries ("הערות על רש"י על בראשית") group under the root base book.
+ * 1. Canonical book roles (shared/bookRoles.js; derived, the database schema is unchanged): base
+ *    works, parallel works (standalone members of a shared/parallelWorks.js family - טור / שו"ע /
+ *    ערוך השולחן, משנה / בבלי / ירושלמי / תוספתא / רי"ף / רא"ש, חומש / מדרש רבה / זוהר / ספר
+ *    החינוך - never nested under each other), commentaries and targumim. A book is a commentary
+ *    (`isCommentary(id)`) only when explicitly matched to its target work by shared/pairing.js (the
+ *    pairing the importer uses for `ref_links`): "X על Y" titles, the curated standalone list, and
+ *    "<series> <book>" titles / "<X>/מפרשים/" owners only inside a commentary context. Unpaired books
+ *    of an era folder are standalone works (nothing is hidden by a name guess); corpus-wide ("… על
+ *    השס") and unresolved "X על Y" commentaries are "מפרשים כלליים". Commentaries on commentaries
+ *    ("הערות על רש"י על בראשית") group under the root base book.
  * 2. Base books are placed in the traditional Jewish order, not file-system order: תנ"ך (תורה /
  *    נביאים / כתובים), משנה (six sedarim, + תוספתא), תלמוד בבלי (Shas order), תלמוד ירושלמי,
  *    מדרש, הלכה (משנה תורה in its 14 ספרים, ארבעה טורים, שולחן ערוך in 4 parts), מחשבה ומוסר,
@@ -26,9 +27,11 @@
 'use strict';
 
 const { aliasKey } = require('./hebrew');
-const { skeletonPhrase, bookMatchScore } = require('./hebrewTorahDict');
+const { bookMatchScore } = require('./hebrewTorahDict');
 const pairing = require('./pairing');
 const commentaryRank = require('./commentaryRank');
+const bookRoles = require('./bookRoles');
+const parallelWorks = require('./parallelWorks');
 
 const USER_ID_BASE = 1000000000;
 const USER_ROOT_KEY = aliasKey('הספרים שלי');
@@ -36,41 +39,22 @@ const USER_ROOT_KEY = aliasKey('הספרים שלי');
 const collator = typeof Intl !== 'undefined' && Intl.Collator ? new Intl.Collator('he') : null;
 const compareNames = (a, b) => (collator ? collator.compare(a, b) : a < b ? -1 : a > b ? 1 : 0);
 
+const canonLists = require('./canonLists');
+
 /** Spelling-insensitive key (final letters, gershayim, niqqud, ktiv male/chaser). */
-const canon = (s) => skeletonPhrase(aliasKey(s));
+const { canon } = canonLists;
 
 // ---------------------------------------------------------------------------
 // Canonical lists
 // ---------------------------------------------------------------------------
 
-const TORAH = ['בראשית', 'שמות', 'ויקרא', 'במדבר', 'דברים'];
-const NEVIIM = ['יהושע', 'שופטים', 'שמואל א', 'שמואל ב', 'מלכים א', 'מלכים ב', 'ישעיהו', 'ירמיהו', 'יחזקאל', 'הושע', 'יואל', 'עמוס', 'עובדיה', 'יונה', 'מיכה', 'נחום', 'חבקוק', 'צפניה', 'חגי', 'זכריה', 'מלאכי'];
-const KETUVIM = ['תהילים', 'משלי', 'איוב', 'שיר השירים', 'רות', 'איכה', 'קהלת', 'אסתר', 'דניאל', 'עזרא', 'נחמיה', 'דברי הימים א', 'דברי הימים ב'];
+const { TORAH, NEVIIM, KETUVIM, SEDARIM, MISHNA_TRACTATES, MISHNA_FLAT, BAVLI_TRACTATES, SHULCHAN_ARUCH_PARTS, MIDRASH_RABBAH, NameIndex } = canonLists;
 const TANACH_GROUPS = [
   ['תורה', TORAH],
   ['נביאים', NEVIIM],
   ['כתובים', KETUVIM],
 ];
 
-const SEDARIM = ['זרעים', 'מועד', 'נשים', 'נזיקין', 'קדשים', 'טהרות'];
-const MISHNA_TRACTATES = [
-  ['ברכות', 'פאה', 'דמאי', 'כלאים', 'שביעית', 'תרומות', 'מעשרות', 'מעשר שני', 'חלה', 'ערלה', 'ביכורים'],
-  ['שבת', 'עירובין', 'פסחים', 'שקלים', 'יומא', 'סוכה', 'ביצה', 'ראש השנה', 'תענית', 'מגילה', 'מועד קטן', 'חגיגה'],
-  ['יבמות', 'כתובות', 'נדרים', 'נזיר', 'סוטה', 'גיטין', 'קידושין'],
-  ['בבא קמא', 'בבא מציעא', 'בבא בתרא', 'סנהדרין', 'מכות', 'שבועות', 'עדיות', 'עבודה זרה', 'אבות', 'הוריות'],
-  ['זבחים', 'מנחות', 'חולין', 'בכורות', 'ערכין', 'תמורה', 'כריתות', 'מעילה', 'תמיד', 'מידות', 'קינים'],
-  ['כלים', 'אהלות', 'נגעים', 'פרה', 'טהרות', 'מקוואות', 'נדה', 'מכשירין', 'זבים', 'טבול יום', 'ידים', 'עוקצים'],
-];
-const MISHNA_FLAT = MISHNA_TRACTATES.flat();
-/** Shas order of the Babylonian Talmud (נידה closes it). */
-const BAVLI_TRACTATES = [
-  ['ברכות'],
-  ['שבת', 'עירובין', 'פסחים', 'יומא', 'סוכה', 'ביצה', 'ראש השנה', 'תענית', 'מגילה', 'מועד קטן', 'חגיגה'],
-  ['יבמות', 'כתובות', 'נדרים', 'נזיר', 'סוטה', 'גיטין', 'קידושין'],
-  ['בבא קמא', 'בבא מציעא', 'בבא בתרא', 'סנהדרין', 'מכות', 'שבועות', 'עבודה זרה', 'הוריות'],
-  ['זבחים', 'מנחות', 'חולין', 'בכורות', 'ערכין', 'תמורה', 'כריתות', 'מעילה', 'תמיד'],
-  ['נדה'],
-].flat();
 const MINOR_TRACTATES = ['אבות דרבי נתן', 'אבות דרבי נתן נוסח ב', 'סופרים', 'שמחות', 'כלה', 'כלה רבתי', 'דרך ארץ רבה', 'דרך ארץ זוטא', 'גרים', 'כותים', 'עבדים', 'ציצית', 'תפילין', 'ספר תורה', 'מזוזה'];
 
 const RAMBAM = [
@@ -89,36 +73,10 @@ const RAMBAM = [
   ['משפטים', ['שכירות', 'שאילה ופקדון', 'מלווה ולווה', 'טוען ונטען', 'נחלות']],
   ['שופטים', ['סנהדרין והעונשין המשתתפין להן', 'עדות', 'ממרים', 'אבל', 'מלכים ומלחמות']],
 ];
-const SHULCHAN_ARUCH_PARTS = ['אורח חיים', 'יורה דעה', 'אבן העזר', 'חושן משפט'];
-const MIDRASH_RABBAH = ['בראשית רבה', 'שמות רבה', 'ויקרא רבה', 'במדבר רבה', 'דברים רבה', 'שיר השירים רבה', 'רות רבה', 'איכה רבה', 'קהלת רבה', 'קוהלת רבה', 'אסתר רבה'];
 const MIDRASH_HALACHA = ['מכילתא דרבי ישמעאל', 'מכילתא דרבי שמעון', 'ספרא', 'ספרי במדבר', 'ספרי דברים', 'ספרי זוטא', 'מדרש תנאים', 'מגילת תענית'];
 /** Era folders, earliest first (generic sections). */
 const ERA_ORDER = ['גאונים', 'ראשונים', 'אחרונים', 'מחברי זמננו'];
 
-/**
- * Position lookup by name: exact normalized spelling first, then the ktiv-chaser skeleton (which
- * is ambiguous for some names - שביעית / שבועות - so ambiguous skeletons are dropped).
- */
-class NameIndex {
-  constructor(list) {
-    this.exact = new Map();
-    this.skel = new Map();
-    const ambiguous = new Set();
-    list.forEach((n, i) => {
-      const e = aliasKey(n);
-      if (!this.exact.has(e)) this.exact.set(e, i);
-      const k = canon(n);
-      if (this.skel.has(k) && this.skel.get(k) !== i) ambiguous.add(k);
-      else this.skel.set(k, i);
-    });
-    for (const k of ambiguous) this.skel.delete(k);
-  }
-
-  get(raw) {
-    const e = this.exact.get(aliasKey(raw));
-    return e != null ? e : this.skel.get(canon(raw));
-  }
-}
 const indexMap = (list) => new NameIndex(list);
 const TANACH_INDEX = TANACH_GROUPS.map(([, list]) => indexMap(list));
 const MISHNA_INDEX = indexMap(MISHNA_FLAT);
@@ -146,6 +104,7 @@ const TOP = {
   personal: ['ספרים אישיים', 10],
 };
 const MORE_SECTION = 'ספרים נוספים';
+const TURIM_PARALLELS = 'ספרים מקבילים לטור ולשולחן ערוך';
 const GENERAL_COMMENTARIES = 'מפרשים כלליים';
 
 const EARLY = -1;
@@ -199,10 +158,19 @@ function prefixIndex(index, key) {
  * Where a base book sits: { levels: [{name, order}], order } - section path below the top
  * section and its sort position among its siblings (books and sub-sections share one scale).
  */
-function placeBook(b) {
+function placeBook(b, member) {
   const dirs = b.dirs;
   const T = canon;
   const topKey = dirs[0] ? T(dirs[0]) : '';
+  // Halachic siblings of the Talmud (parallel works, not commentaries): after the tractates, in Shas order.
+  if (member && (member.work === 'rif' || member.work === 'rosh') && !b.personal) {
+    const i = BAVLI_INDEX.get(MISHNA_FLAT[member.tractate]);
+    return { levels: top('bavli', member.work === 'rif' ? lv('רי"ף', 70) : lv('רא"ש', 71)), order: i != null ? i : 500 };
+  }
+  // Standalone works aligned with the Tur / Shulchan Aruch simanim.
+  if (member && ['aruch_hashulchan', 'levush', 'sa_harav'].includes(member.work) && !b.personal) {
+    return { levels: top('halacha', lv(TURIM_PARALLELS, 3)), order: member.order * 10 + (member.section != null ? member.section : 0) };
+  }
   const tk = canon(b.title);
   const ak = aliasKey(b.title);
   const more = (from, depth) => top('more', ...genericLevels(dirs, from, depth));
@@ -297,9 +265,6 @@ function placeBook(b) {
 // Commentary detection
 // ---------------------------------------------------------------------------
 
-const TARGUM_DIR = aliasKey('תרגומים');
-const MEFARSHIM_DIR = aliasKey('מפרשים');
-const SCRIPTURE_CORPORA = new Set(['tanach', 'mishna', 'bavli', 'yerushalmi']);
 const toList = (a) => (Array.isArray(a) ? a : String(a || '').split('|').filter(Boolean));
 
 /** Commentary -> base pairs of one database's books (what the importer's links phase uses). */
@@ -358,38 +323,22 @@ function assembleCatalog(split, pairResults) {
   const { infos, core, personal } = split;
   const byId = new Map(infos.map((i) => [i.id, i]));
 
-  // --- commentary detection (per database: the importer pairs within one) ---
-  const commToBase = new Map(); // commentary id -> directly commented book id
+  // --- canonical roles (per database: the importer pairs within one) ---
+  // shared/bookRoles.js: a commentary / targum only when explicitly matched to its target work;
+  // parallel-family members (טור / שו"ע, משנה / בבלי, חומש / מדרש רבה ...) are always standalone.
+  const commToBase = new Map(); // commentary / targum id -> directly commented book id
   const generalIds = new Set();
+  const roles = new Map();
+  const members = new Map();
   for (const [gi, group] of [core, personal].entries()) {
-    const { pairs, multi } = pairResults[gi];
-    for (const p of pairs) {
-      const comm = byId.get(p.commId);
-      const base = byId.get(p.baseId);
-      if (!comm || !base || comm === base) continue;
-      const place = pairing.placeOf(comm.categoryPath);
-      const baseTop = pairing.placeOf(base.categoryPath).corpus;
-      // A commentary folder, or a note inside the base's own corpus (not a midrash on Tanach).
-      if (!place.primary || place.corpus === baseTop) commToBase.set(comm.id, base.id);
-    }
-    for (const m of multi) {
-      const comm = byId.get(m.commId);
-      if (!comm) continue;
-      const place = pairing.placeOf(comm.categoryPath);
-      if (!place.primary || place.corpus === (m.scope && m.scope.corpus)) generalIds.add(comm.id);
-    }
-    // Unpaired books of a commentary folder: "X על Y" anywhere in one, and any work in the
-    // ראשונים / אחרונים / תרגומים / מחברי זמננו / מפרשים folders of תנ"ך, משנה, בבלי, ירושלמי
-    // ("חזקוני", "רבנו בחיי", "תרגום איוב" name no base book but are still commentaries).
-    for (const i of group) {
-      if (commToBase.has(i.id) || generalIds.has(i.id)) continue;
-      const place = pairing.placeOf(i.categoryPath);
-      const inFolder = !place.primary || place.dirs.includes(TARGUM_DIR);
-      if (!inFolder) continue;
-      if (pairing.isCommentaryTitle(i.title) || SCRIPTURE_CORPORA.has(place.corpus) || place.dirs.includes(MEFARSHIM_DIR)) generalIds.add(i.id);
-    }
+    const r = bookRoles.classifyBooks(group, pairResults[gi]);
+    for (const [id, role] of r.roles) roles.set(id, role);
+    for (const [id, base] of r.baseOf) commToBase.set(id, base);
+    for (const id of r.general) generalIds.add(id);
+    for (const [id, m] of r.members) members.set(id, m);
   }
   const isCommentarySet = new Set([...commToBase.keys(), ...generalIds]);
+  const roleOf = (id) => roles.get(id) || (byId.has(id) ? bookRoles.ROLES.BASE : null);
 
   /** Root base book of a commentary (chains resolve upward), or null when it is general. */
   const rootCache = new Map();
@@ -415,7 +364,7 @@ function assembleCatalog(split, pairResults) {
   }
 
   const rankedCache = new Map();
-  const toItem = (i) => ({ bookId: i.id, bookTitle: i.title, categoryPath: i.categoryPath });
+  const toItem = (i) => ({ bookId: i.id, bookTitle: i.title, categoryPath: i.categoryPath, linkType: roleOf(i.id) === 'targum' ? 'targum' : 'commentary' });
   function commentariesOf(baseId, opts) {
     const pinned = opts && opts.pinned;
     if (!pinned && rankedCache.has(baseId)) return rankedCache.get(baseId);
@@ -433,6 +382,7 @@ function assembleCatalog(split, pairResults) {
         era: r.era,
         rank: r.rank,
         categoryPath: r.categoryPath,
+        role: roleOf(r.bookId),
       }));
     if (!pinned) rankedCache.set(baseId, ranked);
     return ranked;
@@ -459,8 +409,21 @@ function assembleCatalog(split, pairResults) {
     for (const b of bases) {
       const cc = (commsOfBase.get(b.id) || []).length;
       if (!include(b, cc)) continue;
-      const p = placeBook(b);
-      add(p, { id: 'book:' + b.id, kind: 'book', name: b.title, title: b.title, bookId: b.id, order: p.order, commentaryCount: cc, count: 1, categoryPath: b.categoryPath });
+      const p = placeBook(b, members.get(b.id));
+      const m = members.get(b.id);
+      add(p, {
+        id: 'book:' + b.id,
+        kind: 'book',
+        name: b.title,
+        title: b.title,
+        bookId: b.id,
+        order: p.order,
+        commentaryCount: cc,
+        count: 1,
+        categoryPath: b.categoryPath,
+        role: roleOf(b.id),
+        parallelFamily: m ? m.family : null,
+      });
     }
     return finalize([...root.children.values()]);
   }
@@ -485,7 +448,7 @@ function assembleCatalog(split, pairResults) {
     const kids = general
       .slice()
       .sort((a, b) => compareNames(a.title, b.title))
-      .map((g) => ({ id: 'comm:' + g.id, kind: 'commentary', name: g.title, title: g.title, bookId: g.id, order: 0, count: 1, categoryPath: g.categoryPath }));
+      .map((g) => ({ id: 'comm:' + g.id, kind: 'commentary', name: g.title, title: g.title, bookId: g.id, order: 0, count: 1, categoryPath: g.categoryPath, role: roleOf(g.id) }));
     commentarySections.push({ id: 'sec:' + GENERAL_COMMENTARIES, kind: 'section', name: GENERAL_COMMENTARIES, order: 10000, children: kids, count: kids.length });
   }
 
@@ -503,6 +466,14 @@ function assembleCatalog(split, pairResults) {
     /** Every book as { id, title, categoryPath, personal } (input of shared/corpora.js). */
     bookInfos: infos.map((i) => ({ id: i.id, title: i.title, categoryPath: i.categoryPath, personal: i.personal })),
     isCommentary: (id) => isCommentarySet.has(id),
+    /** Canonical role: 'base' | 'parallel' | 'commentary' | 'targum' (shared/bookRoles.js). */
+    roleOf,
+    isTargum: (id) => roleOf(id) === 'targum',
+    isParallel: (id) => members.has(id),
+    /** Parallel-family membership (shared/parallelWorks.js memberOf) or null. */
+    parallelMember: (id) => members.get(id) || null,
+    /** Book ids of every member of a parallel family ('turim' | 'shas' | 'parasha'). */
+    parallelFamilyIds: (family) => [...members].filter(([, m]) => m.family === family).map(([id]) => id),
     isBase: (id) => byId.has(id) && !isCommentarySet.has(id),
     /** Root base book a commentary belongs to (null: general or not a commentary). */
     baseOf: (id) => (commToBase.has(id) ? rootBase(id) : null),

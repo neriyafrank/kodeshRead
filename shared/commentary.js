@@ -196,8 +196,8 @@ async function fetchLinkedEntries(db, bookId, line) {
   return out;
 }
 
-/** Display order of link types: commentaries first, then translations, then the rest. */
-const TYPE_RANK = { commentary: 0, targum: 1, translation: 1, source: 2, reference: 3, other: 4 };
+/** Display order of link types: commentaries first, then translations, then the rest; parallel works last. */
+const TYPE_RANK = { commentary: 0, targum: 1, translation: 1, source: 2, reference: 3, other: 4, parallel: 5 };
 const typeRank = (t) => (t && TYPE_RANK[t] !== undefined ? TYPE_RANK[t] : 3);
 
 /**
@@ -245,4 +245,46 @@ function groupLinkedEntries(entries) {
   return out;
 }
 
-module.exports = { MAX_BLOCK_LINES, fetchUnitLinks, fetchLinkCounts, attachLinkCounts, fetchLinkedEntries, commentatorName, groupLinkedEntries, clearRefCache };
+/**
+ * Drawer groups for parallel works (shared/parallelWorks.js findParallels result): one card per
+ * parallel book, `linkType: 'parallel'`, whose block is the parallel סימן / פרק / פרשה (open
+ * target) and whose entries are its opening paragraphs (the overview shown in the card).
+ */
+function parallelGroups(result) {
+  const list = (result && result.parallels) || [];
+  return list.map((p) => {
+    const block = { refKey: p.label, start: p.start, end: p.end, role: 'parallel' };
+    return {
+      bookId: p.bookId,
+      bookTitle: p.bookTitle,
+      name: p.name,
+      categoryPath: p.categoryPath || null,
+      linkType: 'parallel',
+      rank: TYPE_RANK.parallel,
+      block,
+      parallel: { family: p.family, work: p.work, label: p.label, order: p.order },
+      entries: (p.preview || []).map((r) => ({
+        book_id: p.bookId,
+        book_title: p.bookTitle,
+        line: r.line,
+        link_type: 'parallel',
+        display_text: r.display_text,
+        toc_path: r.toc_path,
+        category_path: p.categoryPath || null,
+        block,
+      })),
+    };
+  });
+}
+
+/**
+ * Commentary groups + parallel groups. A parallel book that is ALSO aligned through `ref_links`
+ * (a halachic sibling such as the רא"ש, paired with the Bavli by title at import) is shown once,
+ * as a parallel work.
+ */
+function mergeParallelGroups(groups, parallels) {
+  const ids = new Set((parallels || []).map((g) => g.bookId));
+  return [...(groups || []).filter((g) => !ids.has(g.bookId)), ...(parallels || [])];
+}
+
+module.exports = { MAX_BLOCK_LINES, parallelGroups, mergeParallelGroups, fetchUnitLinks, fetchLinkCounts, attachLinkCounts, fetchLinkedEntries, commentatorName, groupLinkedEntries, clearRefCache };

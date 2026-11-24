@@ -50,6 +50,7 @@ import {
 import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
 import { lineHeightMultiplier, splitVerseMarker, verseGutterWidth } from '../../../shared/typography';
 import { markTerms } from '../../../shared/search';
+import { parallelMember } from '../../../shared/parallelWorks';
 import type { LineDivider } from '../../../shared/torahParshiot';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
@@ -347,6 +348,22 @@ export function BookReader({ tab, onOpenToc }: Props) {
   };
 
   // --- commentary drawer --------------------------------------------------------------
+  // A book of a parallel family (טור / שו"ע / ערוך השולחן, משנה / בבלי / ירושלמי, חומש / מדרש רבה ...)
+  // opens the drawer from any paragraph: its parallel סימן / פרק / פרשה is shown even without commentaries.
+  const parallelRef = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    parallelRef.current = false;
+    parallelMember(adapter, bookId).then(
+      (m) => {
+        if (alive) parallelRef.current = !!m;
+      },
+      () => undefined,
+    );
+    return () => {
+      alive = false;
+    };
+  }, [adapter, bookId]);
   const selectedLine = selected?.line ?? null;
   const selectedRef = useRef<number | null>(null);
   selectedRef.current = selectedLine;
@@ -388,7 +405,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
       setSelected(null); // tapping the selected paragraph again closes the drawer
       return;
     }
-    if (row.link_count > 0 || open) {
+    if (row.link_count > 0 || open || (parallelRef.current && !row.is_heading)) {
       setSelected({ line: row.line_index, tocPath: row.toc_path });
       if (!open) setTimeout(() => revealRow(row.line_index), 50);
     }

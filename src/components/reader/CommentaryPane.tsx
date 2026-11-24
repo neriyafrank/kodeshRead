@@ -31,7 +31,7 @@
  * - ‹ / › step to the previous / next paragraph with commentaries (the text follows).
  * - The link toggle makes the drawer follow the reading line while scrolling.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -44,8 +44,9 @@ import {
   type ScrollViewInstance,
 } from 'react-native';
 
-import { fetchLinkedEntries, groupLinkedEntries, type CommentaryGroup, type LinkedEntry } from '../../../shared/commentary';
-import { defaultExpandedKeys, filterCommentaries, rankCommentaries, selectCommentaries, type Ranked } from '../../../shared/commentaryRank';
+import { fetchLinkedEntries, groupLinkedEntries, mergeParallelGroups, parallelGroups, type CommentaryGroup, type LinkedEntry } from '../../../shared/commentary';
+import { defaultExpandedKeys, filterCommentaries, kindCounts, rankCommentaries, selectCommentaries, type Ranked } from '../../../shared/commentaryRank';
+import { findParallels, type ParallelResult } from '../../../shared/parallelWorks';
 import { prepareDisplayText } from '../../../shared/reader';
 import { lineHeightPx } from '../../../shared/typography';
 import { useLibrary } from '../../db/LibraryContext';
@@ -59,6 +60,9 @@ import { SlidersIcon } from '../Icons';
 import { RichText } from '../RichText';
 
 type RankedGroup = Ranked<CommentaryGroup>;
+/** Drawer kind filter: everything, or only commentaries / translations / parallel works. */
+type KindFilter = 'all' | 'commentary' | 'targum' | 'parallel';
+const KIND_LABELS: Record<Exclude<KindFilter, 'all'>, string> = { commentary: 'מפרשים', targum: 'תרגומים', parallel: 'מקבילים' };
 
 const GRABBER_HEIGHT = 12;
 
@@ -113,16 +117,20 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const clearSelection = useCommentaryPrefs((x) => x.clearSelection);
 
   // --- data --------------------------------------------------------------------
-  const [data, setData] = useState<{ key: string; groups: CommentaryGroup[] } | null>(null);
+  const [data, setData] = useState<{ key: string; groups: CommentaryGroup[]; coordinate: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const key = `${bookId}:${line}`;
   useEffect(() => {
     let alive = true;
-    fetchLinkedEntries(adapter, bookId, line).then(
-      (entries: LinkedEntry[]) => {
+    Promise.all([
+      fetchLinkedEntries(adapter, bookId, line),
+      // Parallel works (shared/parallelWorks.js): resolved from the TOCs; never blocks the commentaries.
+      findParallels(adapter, bookId, line).catch((): ParallelResult | null => null),
+    ]).then(
+      ([entries, par]: [LinkedEntry[], ParallelResult | null]) => {
         if (!alive) return;
         setError(null);
-        setData({ key, groups: groupLinkedEntries(entries) });
+        setData({ key, groups: mergeParallelGroups(groupLinkedEntries(entries), parallelGroups(par)), coordinate: par?.coordinate?.label ?? null });
       },
       (e: unknown) => alive && setError(e instanceof Error ? e.message : String(e)),
     );
@@ -139,7 +147,13 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   // Chip-bar selection (sticky across verses); keys this passage lacks simply match nothing.
   const selected = useMemo(() => selectCommentaries(ranked, selection), [ranked, selection]);
   const selecting = selection.length > 0;
-  const visible = useMemo(() => filterCommentaries(selected, { query }), [selected, query]);
+  // Kind pills (מפרשים / תרגומים / מקבילים); a kind this passage lacks falls back to הכל.
+  const counts = useMemo(() => kindCounts(ranked), [ranked]);
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
+  const kind: KindFilter = kindFilter !== 'all' && counts[kindFilter] ? kindFilter : 'all';
+  const kindsPresent = (['commentary', 'targum', 'parallel'] as const).filter((k) => counts[k] > 0);
+  const visible = useMemo(() => filterCommentaries(selected, { query, kind }), [selected, query, kind]);
+  const hasOwn = visible.some((g) => !g.isParallel);
   // One commentator isolated in the chip bar: ultra-compact reading mode (no card header).
   const focusMode = selection.length === 1 && visible.length === 1;
   const defaults = useMemo(() => defaultExpandedKeys(ranked), [ranked]);
@@ -219,13 +233,15 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const entryTextStyle = [s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: lineHeightPx(entrySize, lineHeight, { showNikkud, showCantillation }) }];
 
   const openGroup = (g: RankedGroup) => {
-    if (g.block) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block.start, endLine: g.block.end });
+    // A parallel work opens at the start of its סימן / פרק / פרשה (no whole-unit highlight).
+    if (g.isParallel && g.block) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block.start });
+    else if (g.block) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block.start, endLine: g.block.end });
     else if (g.entries[0]) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.entries[0].line });
   };
 
   /** The commentary's own heading path ("דף ב. · שורה ה"); the book name is already visible. */
   const blockLabel = (g: RankedGroup) =>
-    g.block ? (g.entries[0]?.toc_path ?? g.block.refKey.replace(/\|/g, ' > ')).split(' > ').join(' · ') : '';
+    g.isParallel && g.block ? g.block.refKey : g.block ? (g.entries[0]?.toc_path ?? g.block.refKey.replace(/\|/g, ' > ')).split(' > ').join(' · ') : '';
 
   const pinButton = (g: RankedGroup) => (
     <Pressable
@@ -245,12 +261,12 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
     <Pressable
       onPress={() => openGroup(g)}
       hitSlop={6}
-      style={s.openBtn}
+      style={g.isParallel ? s.openBtnParallel : s.openBtn}
       accessibilityRole="button"
       accessibilityLabel={g.block ? `פתח את ${g.bookTitle} ב${g.block.refKey.split('|').join(' ')}` : `פתח את ${g.bookTitle} בכרטיסייה`}
-      testID={g.block ? 'commentary-open-block' : 'commentary-open-group'}
+      testID={g.isParallel ? 'parallel-open' : g.block ? 'commentary-open-block' : 'commentary-open-group'}
     >
-      <Text style={s.openText}>פתח בספר ↗</Text>
+      <Text style={g.isParallel ? s.openTextParallel : s.openText}>פתח בספר ↗</Text>
     </Pressable>
   );
 
@@ -259,11 +275,16 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const renderCard = (g: RankedGroup, focus: boolean) => {
     const open = focus || isExpanded(g);
     const label = blockLabel(g);
+    const par = !!g.isParallel;
     return (
-      <View key={g.bookId} style={focus ? s.cardFocus : s.card} testID="commentary-group">
+      <View key={g.bookId} style={focus ? s.cardFocus : [s.card, par && s.cardParallel]} testID={par ? 'parallel-group' : 'commentary-group'}>
         {focus ? (
-          <View style={s.focusRow} accessibilityLabel={g.displayName} testID="commentary-focus-row">
-            {g.block ? (
+          <View style={s.focusRow} accessibilityLabel={g.displayName} testID={par ? 'parallel-focus-row' : 'commentary-focus-row'}>
+            {par ? (
+              <Text style={s.focusLabel} numberOfLines={1} testID="parallel-block">
+                {`⇄ ${g.displayName} · ${label}`}
+              </Text>
+            ) : g.block ? (
               <Text style={s.focusLabel} numberOfLines={1} testID="commentary-block">
                 {label}
               </Text>
@@ -283,24 +304,25 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               accessibilityRole="button"
               aria-expanded={open}
               accessibilityState={{ expanded: open }}
-              accessibilityLabel={`${g.displayName}, ${g.tier}, ${g.entries.length}`}
-              testID="commentary-group-header"
+              accessibilityLabel={par ? `${g.displayName}, ספר מקביל, ${label}` : `${g.displayName}, ${g.tier}, ${g.entries.length}`}
+              testID={par ? 'parallel-group-header' : 'commentary-group-header'}
             >
               <Text style={s.chevron}>{open ? '⌄' : '‹'}</Text>
-              <Text style={[s.groupName, { fontFamily: font.bold }]} numberOfLines={1} testID="commentary-group-name">
+              <Text style={[s.groupName, { fontFamily: font.bold }]} numberOfLines={1} testID={par ? 'parallel-group-name' : 'commentary-group-name'}>
                 {g.displayName}
               </Text>
-              <Text style={[s.tierTag, g.core || g.isSource ? s.tierCore : null]} numberOfLines={1} testID="commentary-tier">
-                {g.tier}
+              <Text style={[s.tierTag, par ? s.tierParallel : g.core || g.isSource ? s.tierCore : null]} numberOfLines={1} testID={par ? 'parallel-tier' : 'commentary-tier'}>
+                {par ? '⇄ מקביל' : g.tier}
               </Text>
-              {open && g.block ? (
-                <Text style={s.inlineLabel} numberOfLines={1} testID="commentary-block">
+              {(open || par) && g.block ? (
+                // A parallel work always shows WHICH unit it is (or סימן יב / פרק א / פרשת נח).
+                <Text style={s.inlineLabel} numberOfLines={1} testID={par ? 'parallel-block' : 'commentary-block'}>
                   {label}
                 </Text>
               ) : (
                 <View style={{ flex: 1 }} />
               )}
-              <Text style={s.groupCount}>{g.entries.length}</Text>
+              {par ? null : <Text style={s.groupCount}>{g.entries.length}</Text>}
             </Pressable>
             {pinButton(g)}
             {openButton(g)}
@@ -311,9 +333,15 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               <View
                 key={`${e.book_id}:${e.line}`}
                 style={[s.entry, g.block && e.direct ? { borderStartWidth: 3, borderStartColor: c.accent } : null]}
-                testID={e.direct && g.block ? 'commentary-entry-direct' : 'commentary-entry'}
+                testID={par ? 'parallel-entry' : e.direct && g.block ? 'commentary-entry-direct' : 'commentary-entry'}
               >
-                {g.block ? null : (
+                {g.block && !par ? null : par ? (
+                  e.toc_path ? (
+                    <Text style={s.entryPath} numberOfLines={1}>
+                      {e.toc_path.split(' > ').join(' · ')}
+                    </Text>
+                  ) : null
+                ) : (
                   <Text style={s.entryPath} numberOfLines={1}>
                     {e.toc_path ? e.toc_path.split(' > ').join(' · ') : g.bookTitle}
                   </Text>
@@ -351,7 +379,9 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
 
       <View style={s.header}>
         <Text style={s.title} numberOfLines={1} testID="commentary-title">
-          מפרשים{ranked.length ? ` (${ranked.length})` : ''}
+          {/* "מפרשים (2) · מקבילים (1)"; a passage with parallel works only: "מקבילים (1)". */}
+          {counts.commentary + counts.targum || !counts.parallel ? `מפרשים${counts.commentary + counts.targum ? ` (${counts.commentary + counts.targum})` : ''}` : ''}
+          {counts.parallel ? `${counts.commentary + counts.targum ? ' · ' : ''}מקבילים (${counts.parallel})` : ''}
           {where ? ` · ${where}` : ''}
         </Text>
         <IconButton label="→" a11y="הפסקה הקודמת עם מפרשים" disabled={!hasPrev} onPress={onPrev} palette={c} testID="commentary-prev" />
@@ -400,41 +430,76 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           testID="commentary-chipbar"
         >
           {ranked
+            .filter((g) => kind === 'all' || filterCommentaries([g], { kind }).length > 0)
             .slice()
             .reverse()
             .map((g) => {
               const on = selection.includes(g.key);
+              const par = !!g.isParallel;
               return (
                 <Pressable
                   key={g.bookId}
                   onPress={() => onChip(g, 'tap')}
                   onLongPress={() => onChip(g, 'longpress')}
                   delayLongPress={450}
-                  style={[s.pill, g.core || g.isSource ? s.pillCore : null, on && s.pillOn]}
+                  style={[s.pill, par ? s.pillParallel : g.core || g.isSource ? s.pillCore : null, on && s.pillOn]}
                   accessibilityRole="button"
                   aria-pressed={on}
                   accessibilityState={{ selected: on }}
-                  accessibilityLabel={`${g.displayName}: הקשה למפרש בודד, לחיצה ארוכה להוספה לבחירה`}
-                  testID="commentary-chip"
+                  accessibilityLabel={par ? `${g.displayName} (ספר מקביל, ${blockLabel(g)}): הקשה להצגה` : `${g.displayName}: הקשה למפרש בודד, לחיצה ארוכה להוספה לבחירה`}
+                  testID={par ? 'commentary-chip-parallel' : 'commentary-chip'}
                 >
-                  <Text style={[s.pillText, g.core || g.isSource ? s.pillTextCore : null, on && s.pillTextOn]} numberOfLines={1}>
+                  <Text style={[s.pillText, par ? s.pillTextParallel : g.core || g.isSource ? s.pillTextCore : null, on && s.pillTextOn]} numberOfLines={1}>
                     {g.pinned ? '★ ' : ''}
+                    {par ? '⇄ ' : ''}
                     {g.displayName}
                   </Text>
                 </Pressable>
               );
             })
             .concat(
+              kindsPresent.length >= 2
+                ? [
+                    <View key="kind-sep" style={s.pillSep} />,
+                    ...kindsPresent
+                      .slice()
+                      .reverse()
+                      .map((k) => {
+                        const on = kind === k;
+                        return (
+                          <Pressable
+                            key={'kind-' + k}
+                            onPress={() => setKindFilter(on ? 'all' : k)}
+                            style={[s.pill, s.kindPill, on && s.pillOn]}
+                            accessibilityRole="button"
+                            aria-pressed={on}
+                            accessibilityState={{ selected: on }}
+                            accessibilityLabel={`הצג ${KIND_LABELS[k]} בלבד`}
+                            testID={`commentary-kind-${k}`}
+                          >
+                            <Text style={[s.pillText, s.kindPillText, on && s.pillTextOn]} numberOfLines={1}>
+                              {`${KIND_LABELS[k]} ${counts[k]}`}
+                            </Text>
+                          </Pressable>
+                        );
+                      }),
+                  ]
+                : [],
+            )
+            .concat(
               <Pressable
                 key="all"
-                onPress={clearSelection}
-                style={[s.pill, s.pillCore, !selecting && s.pillOn]}
+                onPress={() => {
+                  clearSelection();
+                  setKindFilter('all');
+                }}
+                style={[s.pill, s.pillCore, !selecting && kind === 'all' && s.pillOn]}
                 accessibilityRole="button"
-                aria-pressed={!selecting}
-                accessibilityState={{ selected: !selecting }}
+                aria-pressed={!selecting && kind === 'all'}
+                accessibilityState={{ selected: !selecting && kind === 'all' }}
                 testID="commentary-chip-all"
               >
-                <Text style={[s.pillText, s.pillTextCore, !selecting && s.pillTextOn]} numberOfLines={1}>
+                <Text style={[s.pillText, s.pillTextCore, !selecting && kind === 'all' && s.pillTextOn]} numberOfLines={1}>
                   הכל
                 </Text>
               </Pressable>,
@@ -507,7 +572,20 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           keyboardShouldPersistTaps="handled"
           testID="commentary-list"
         >
-          {visible.map((g) => renderCard(g, focusMode))}
+          {visible.map((g, i) => (
+            <Fragment key={g.bookId}>
+              {g.isParallel && !focusMode && (i === 0 || !visible[i - 1].isParallel) ? (
+                // Parallel works are independent books, not commentators: their own labelled section.
+                <View style={s.sectionRow} testID="parallel-section">
+                  <Text style={s.sectionTitle} numberOfLines={1}>
+                    {`⇄ מקבילים${data?.coordinate ? ' · ' + data.coordinate : ''}`}
+                  </Text>
+                  {hasOwn ? <Text style={s.sectionHint}>ספרים עצמאיים</Text> : null}
+                </View>
+              ) : null}
+              {renderCard(g, focusMode)}
+            </Fragment>
+          ))}
         </ScrollView>
       )}
     </View>
@@ -632,6 +710,11 @@ const createStyles = (c: Palette) =>
       backgroundColor: c.surfaceMuted,
     },
     pillCore: { backgroundColor: c.accentSoft, borderColor: c.accentSoft },
+    pillParallel: { backgroundColor: c.surface, borderColor: c.accent, borderStyle: 'dashed', borderWidth: 1 },
+    pillTextParallel: { color: c.accent },
+    kindPill: { backgroundColor: c.surface, borderColor: c.border, borderWidth: 1 },
+    kindPillText: { color: c.text, fontWeight: '700', fontSize: 12 },
+    pillSep: { width: StyleSheet.hairlineWidth, height: 18, backgroundColor: c.border, marginHorizontal: 2 },
     pillOn: { backgroundColor: c.accent, borderColor: c.accent },
     pillText: { fontSize: 13, fontWeight: '600', color: c.textMuted, writingDirection: 'rtl' },
     pillTextCore: { color: c.accent, fontWeight: '700' },
@@ -645,6 +728,10 @@ const createStyles = (c: Palette) =>
     },
     cardHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: c.surfaceMuted, height: 34, paddingEnd: spacing.xs, gap: 2 },
     cardFocus: { backgroundColor: c.surface },
+    cardParallel: { borderStyle: 'dashed', borderColor: c.accent },
+    sectionRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, height: 22, paddingHorizontal: spacing.sm, marginTop: spacing.xs },
+    sectionTitle: { flex: 1, fontSize: 12, fontWeight: '700', color: c.accent, ...alignRight },
+    sectionHint: { fontSize: 11, color: c.textMuted },
     focusRow: { flexDirection: 'row', alignItems: 'center', height: 28, paddingHorizontal: spacing.sm, gap: spacing.xs, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
     focusLabel: { flex: 1, fontSize: 12, fontWeight: '600', color: c.textMuted, ...alignRight },
     inlineLabel: { flex: 1, fontSize: 11, color: c.textMuted, ...alignRight },
@@ -661,6 +748,7 @@ const createStyles = (c: Palette) =>
       paddingVertical: 1,
     },
     tierCore: { color: c.accent, borderColor: c.accent },
+    tierParallel: { color: c.accent, borderColor: c.accent, borderStyle: 'dashed' },
     groupCount: {
       minWidth: 22,
       textAlign: 'center',
@@ -682,5 +770,8 @@ const createStyles = (c: Palette) =>
     entryOpenText: { fontSize: 13, color: c.accent, opacity: 0.7 },
     openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm, backgroundColor: c.accentSoft },
     openText: { fontSize: 12, fontWeight: '600', color: c.accent },
+    // Parallel works: the prominent action is to open the parallel סימן / פרק / פרשה itself.
+    openBtnParallel: { paddingHorizontal: spacing.sm, height: 24, justifyContent: 'center', borderRadius: radius.sm, backgroundColor: c.accent },
+    openTextParallel: { fontSize: 12, fontWeight: '700', color: c.surface },
     entryText: { color: c.text, writingDirection: 'rtl', textAlign: 'justify', includeFontPadding: true },
   });

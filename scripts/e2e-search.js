@@ -211,12 +211,12 @@ try {
     await tid('search-input').fill('אמר');
     for (const id of ['all', 'tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) await tid(`corpus-chip-${id}`).waitFor();
     assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
-    // Counts resolve once the catalog is built: 2 Tanach books, 3 Bavli tractates, no Mishnah in the sample.
+    // Counts resolve once the catalog is built: 2 Tanach books, the sample's משנה שבת, 3 Bavli tractates.
     const chipCount = (id) => page.waitForFunction((x) => !!document.querySelector(`[data-testid="corpus-chip-${x}-count"]`) && document.querySelector(`[data-testid="corpus-chip-${x}-count"]`).textContent !== '…', id, { timeout: 30000 });
     await chipCount('bavli');
     assert.deepStrictEqual(
       await Promise.all(['tanach', 'mishna', 'bavli', 'rambam', 'shulchan-aruch'].map((id) => tid(`corpus-chip-${id}-count`).innerText())),
-      ['2', '0', '3', '0', '0'],
+      ['2', '1', '3', '0', '0'],
       'matched book counts of the presets (base books only: no Rashi / Tosafot / Ramban / Onkelos)',
     );
     assert.ok(Number(await tid('corpus-chip-mefarshim-count').innerText()) >= 8, 'the commentary preset counts the commentaries');
@@ -230,10 +230,10 @@ try {
     await shot('1-simple-corpus');
     // An unmatched preset is an honest empty scope, never "all".
     await tid('corpus-chip-bavli').click();
-    await tid('corpus-chip-mishna').click();
+    await tid('corpus-chip-rambam').click();
     await tid('search-empty').waitFor({ timeout: 30000 });
-    assert.ok((await tid('search-empty').innerText()).includes('משנה'), 'empty state names the scope');
-    await tid('corpus-chip-mishna').click();
+    assert.ok((await tid('search-empty').innerText()).includes('משנה תורה'), 'empty state names the scope');
+    await tid('corpus-chip-rambam').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
     assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
     // The progress banner names the preset; switching presets mid-run supersedes the running search; cancel works.
@@ -267,7 +267,7 @@ try {
     assert.strictEqual(await summary(), 'כל הספרייה', 'empty selection = the whole library');
     assert.strictEqual(await tid('scope-open-book').count(), 0, 'no open book -> no shortcuts');
     const secs = await page.locator('[data-testid^="scope-toggle-sec:"]').allInnerTexts();
-    assert.ok(/תנ"ך/.test(secs[0]) && /תלמוד בבלי/.test(secs[1]) && secs.length === 2, `canonical sections: ${JSON.stringify(secs)}`);
+    assert.ok(/תנ"ך/.test(secs[0]) && /משנה/.test(secs[1]) && /תלמוד בבלי/.test(secs[2]) && secs.length === 3, `canonical sections: ${JSON.stringify(secs)}`);
     const tabs = await page.locator('[data-testid="scope-sheet"]').innerText();
     assert.ok(tabs.includes('ספרי בסיס') && tabs.includes('פרשנים לפי ספר'), tabs);
     await shot('2-scope-sheet');
@@ -297,16 +297,16 @@ try {
     await openSheet();
     await tid('scope-clear').click();
     await tid('scope-filter').fill('שבת');
-    await tid('scope-book-11').click();
+    await tid('scope-book-12').click();
     await tid('scope-filter').fill('במדבר');
     await tid('scope-book-2').click();
     await tid('scope-tab-comm').click();
     await tid('scope-filter').fill('שבת');
-    await tid('scope-expand-11').click();
-    await tid('scope-allcomm-11').waitFor();
+    await tid('scope-expand-12').click();
+    await tid('scope-allcomm-12').waitFor();
     const rankedNames = await page.locator('[data-testid^="scope-comm-"]').allInnerTexts();
     assert.ok(/^רש"י/.test(rankedNames[0]) && /^תוספות/.test(rankedNames[1]), `commentaries in canonical rank order: ${JSON.stringify(rankedNames)}`);
-    await tid('scope-comm-14').click(); // רש"י על שבת
+    await tid('scope-comm-15').click(); // רש"י על שבת
     assert.strictEqual(await summary(), 'נבחרו 3 ספרים');
     await shot('2b-scope-multi');
     await tid('scope-apply').click();
@@ -321,14 +321,14 @@ try {
       await page.waitForTimeout(150);
     }
     assert.ok(seen.has('במדבר') && seen.has('שבת') && [...seen].every((t) => new RegExp(inScope).test(t)), `multi-scope results: ${[...seen]}`);
-    for (const id of ['scope-chip-11', 'scope-chip-2', 'scope-chip-14']) assert.strictEqual(await tid(id).count(), 1, id);
+    for (const id of ['scope-chip-12', 'scope-chip-2', 'scope-chip-15']) assert.strictEqual(await tid(id).count(), 1, id);
     step('multi-select: 2 base books + 1 commentary');
 
     // Removing a chip narrows the scope.
-    await tid('scope-chip-remove-14').click();
+    await tid('scope-chip-remove-15').click();
     await allResults('^(שבת|במדבר)');
-    assert.strictEqual(await tid('scope-chip-14').count(), 0);
-    assert.strictEqual(await tid('scope-chip-11').count(), 1);
+    assert.strictEqual(await tid('scope-chip-15').count(), 0);
+    assert.strictEqual(await tid('scope-chip-12').count(), 1);
     step('removable chips');
 
     // "כל הפרשנים על שבת".
@@ -336,9 +336,9 @@ try {
     await tid('scope-clear').click();
     await tid('scope-tab-comm').click();
     await tid('scope-filter').fill('שבת');
-    await tid('scope-book-11').waitFor();
-    if (!(await tid('scope-allcomm-11').count())) await tid('scope-expand-11').click(); // expansion is remembered between openings
-    await tid('scope-allcomm-11').click();
+    await tid('scope-book-12').waitFor();
+    if (!(await tid('scope-allcomm-12').count())) await tid('scope-expand-12').click(); // expansion is remembered between openings
+    await tid('scope-allcomm-12').click();
     assert.strictEqual(await summary(), 'נבחרו 2 ספרים');
     await tid('scope-apply').click();
     await allResults('^(רש"י על שבת|תוספות על שבת)');

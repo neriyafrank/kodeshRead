@@ -3,13 +3,16 @@
 export type Corpus = 'tanach' | 'mishna' | 'bavli' | 'yerushalmi' | 'rambam' | 'shulchan_aruch' | 'tur';
 export type Era = 'targum' | 'rishonim' | 'acharonim' | 'modern';
 /** Display group of a linked book. */
-export type CommentaryTier = 'מקור' | 'עיקריים' | 'תרגומים' | 'ראשונים' | 'אחרונים' | 'נוספים';
+export type CommentaryTier = 'מקור' | 'עיקריים' | 'תרגומים' | 'ראשונים' | 'אחרונים' | 'נוספים' | 'מקבילים';
+/** What a linked book is to the passage: a commentary, a translation, a standalone parallel work, or (from a commentary) its source. */
+export type CommentaryKind = 'commentary' | 'targum' | 'parallel' | 'source';
 export type CommentaryView = 'all' | 'core' | 'pinned';
 
 /** Canonical core commentators per corpus, in priority order ('display|alias|alias'). */
 export const CORE_LISTS: Record<Corpus, string[]>;
 export const CORPUS_LABEL: Record<Corpus, string>;
-export const TIERS: { source: 'מקור'; core: 'עיקריים'; targum: 'תרגומים'; rishonim: 'ראשונים'; acharonim: 'אחרונים'; other: 'נוספים' };
+export const TIERS: { source: 'מקור'; core: 'עיקריים'; targum: 'תרגומים'; rishonim: 'ראשונים'; acharonim: 'אחרונים'; other: 'נוספים'; parallel: 'מקבילים' };
+export const KINDS: { commentary: 'מפרשים'; targum: 'תרגומים'; parallel: 'מקבילים'; source: 'מקור' };
 
 export interface RankInput {
   bookId?: number;
@@ -18,6 +21,8 @@ export interface RankInput {
   name?: string;
   linkType?: string | null;
   categoryPath?: string | null;
+  /** Parallel works only (linkType 'parallel'): family order of the work. */
+  parallel?: { order?: number } | null;
 }
 
 export interface CommentaryClass {
@@ -32,6 +37,10 @@ export interface CommentaryClass {
   tier: CommentaryTier;
   /** The base text of a commentary (link_type 'source'). */
   isSource: boolean;
+  kind: CommentaryKind;
+  /** A standalone parallel work (link_type 'parallel'): never a commentator. */
+  isParallel: boolean;
+  parallelOrder: number | null;
 }
 
 export type Ranked<T extends RankInput> = T & CommentaryClass & { name: string; pinned: boolean; pinIndex: number | null; rank: number };
@@ -47,8 +56,10 @@ export function rankCommentaries<T extends RankInput>(
   groups: T[],
   opts?: { pinned?: string[]; corpus?: Corpus | null; context?: { title?: string | null; categoryPath?: string | null } },
 ): Ranked<T>[];
-export function defaultExpandedKeys(ranked: { key: string; pinned: boolean }[], opts?: { top?: number; allBelow?: number }): Set<string>;
+export function defaultExpandedKeys(ranked: { key: string; pinned: boolean; isParallel?: boolean }[], opts?: { top?: number; allBelow?: number }): Set<string>;
 export function matchesCommentatorQuery(query: string, item: RankInput & Partial<CommentaryClass>): boolean;
-export function filterCommentaries<T extends RankInput & CommentaryClass & { pinned: boolean }>(ranked: T[], opts?: { view?: CommentaryView; query?: string }): T[];
+export function filterCommentaries<T extends RankInput & CommentaryClass & { pinned: boolean }>(ranked: T[], opts?: { view?: CommentaryView; query?: string; kind?: 'all' | 'commentary' | 'targum' | 'parallel' }): T[];
+export function kindOf(item: Partial<CommentaryClass>): CommentaryKind;
+export function kindCounts(ranked: Partial<CommentaryClass>[]): { commentary: number; targum: number; parallel: number };
 export function nextSelection(selection: string[], key: string, gesture: 'tap' | 'longpress'): string[];
 export function selectCommentaries<T extends { key: string }>(ranked: T[], selection: string[]): T[];

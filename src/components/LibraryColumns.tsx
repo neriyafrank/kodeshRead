@@ -231,6 +231,12 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
               </Text>
               {where ? <Text style={s.where} numberOfLines={1}>{where}</Text> : null}
             </View>
+            {n.role === 'parallel' ? (
+              // A standalone work of a parallel family (טור / שו"ע, משנה / בבלי, חומש / מדרש רבה ...): never nested.
+              <Text style={s.parallelTag} numberOfLines={1} accessibilityLabel="ספר מקביל" testID={`tree-parallel-${bookId}`}>
+                ⇄ מקביל
+              </Text>
+            ) : null}
           </Pressable>
           {cc > 0 ? (
             <Pressable onPress={() => showCommentaries(bookId)} hitSlop={4} style={({ pressed }) => [s.pill, pressed && s.pressed]} accessibilityRole="button" accessibilityLabel={`מפרשים על ${n.title}`} testID={`tree-comm-${bookId}`}>
@@ -437,6 +443,7 @@ const createStyles = (c: Palette) =>
     pillText: { fontSize: 11, fontWeight: '700', color: c.accent, ...alignRight },
     tier: { fontSize: 10, color: c.textMuted, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, paddingHorizontal: 6, paddingVertical: 1 },
     tierCore: { color: c.accent, borderColor: c.accent },
+    parallelTag: { fontSize: 10, color: c.textMuted, borderRadius: 999, borderWidth: 1, borderStyle: 'dashed', borderColor: c.border, paddingHorizontal: 6, paddingVertical: 1, marginStart: 4 },
     emptyCol: { padding: spacing.lg, color: c.textMuted, fontSize: 13, textAlign: 'center' },
     empty: { textAlign: 'center', color: c.textMuted, marginTop: spacing.xl },
     crumbBar: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
