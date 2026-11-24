@@ -608,6 +608,66 @@ try {
     assert.ok(['rgb(33, 33, 33)', 'rgb(42, 42, 42)', 'rgb(48, 48, 48)'].includes(paneBg), `commentary drawer ${paneBg}`);
     await shot('r9-dark-commentary');
     await tid('commentary-close').click();
+
+    // --- long-press on the main text: copy toolbar (a tap still opens the drawer) --------------------------
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
+    const hold = async (id) => {
+      const b = await tid(id).boundingBox();
+      await page.mouse.move(b.x + b.width / 2, b.y + Math.min(b.height / 2, 20));
+      await page.mouse.down();
+      await page.waitForTimeout(750);
+      await page.mouse.up();
+    };
+    const clip = () => page.evaluate(() => navigator.clipboard.readText());
+    await page.waitForFunction(() => !document.querySelector('[data-testid="commentary-pane"]'));
+    assert.strictEqual(await all('para-toolbar').count(), 0, 'no toolbar by default');
+    await hold('para-4');
+    await tid('para-toolbar').waitFor();
+    assert.strictEqual(await all('commentary-pane').count(), 0, 'a long-press does not open the commentary drawer');
+    for (const id of ['copy-with-citation', 'copy-plain', 'copy-select']) assert.strictEqual(await all(id).count(), 1, `${id} in the toolbar`);
+    assert.strictEqual(await all('copy-open-in-book').count(), 0, 'פתח בספר is a commentary-drawer action only');
+    assert.deepStrictEqual((await tid('para-toolbar').locator('button, [role="button"]').allInnerTexts()).filter((x) => x !== '✕'), ['העתק עם ציטוט', 'העתק ללא ציטוט', 'בחירת טקסט']);
+    await shot('r9a-copy-toolbar');
+    await tid('copy-with-citation').click();
+    await tid('copy-toast').waitFor();
+    assert.strictEqual((await tid('copy-toast').innerText()).trim(), 'הועתק ללוח');
+    assert.strictEqual(await all('para-toolbar').count(), 0, 'toolbar dismissed after copying');
+    const cited = await clip();
+    assert.ok(/^«[^»]+»\n— בראשית, פרק א$/.test(cited) && !/<[a-z/]+>/.test(cited), cited);
+    await hold('para-4');
+    await tid('copy-plain').click();
+    const plainCopy = await clip();
+    assert.ok(plainCopy.length > 3 && !plainCopy.includes('«') && !plainCopy.includes('—') && cited.includes(plainCopy), plainCopy);
+    // multi-paragraph selection: long-press, בחירת טקסט, tap one more, long-press another = the range
+    await hold('para-4');
+    await tid('copy-select').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="para-toolbar-info"]')?.innerText.trim() === '1 נבחרו');
+    await tid('para-6').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="para-toolbar-info"]')?.innerText.trim() === '2 נבחרו');
+    assert.strictEqual(await all('commentary-pane').count(), 0, 'taps while selecting do not open the drawer');
+    await hold('para-8');
+    await page.waitForFunction(() => /^4 נבחרו$/.test(document.querySelector('[data-testid="para-toolbar-info"]')?.innerText.trim() || ''));
+    const count = Number((await tid('para-toolbar-info').innerText()).trim().split(' ')[0]);
+    assert.strictEqual(count, 4, 'paragraph 4 + the range 6..8 (the long-press selects every paragraph from the last tapped one)');
+    await shot('r9b-copy-select');
+    await tid('copy-with-citation').click();
+    await tid('copy-toast').waitFor();
+    const multi = await clip();
+    assert.ok(multi.startsWith('«') && /\n— בראשית, פרק א$/.test(multi) && multi.split('\n').length === count + 1, `multi-paragraph copy:\n${multi}`);
+    await hold('para-5');
+    await tid('copy-select').click();
+    await tid('copy-plain').click();
+    assert.ok(!(await clip()).includes('«'), 'selected paragraph copied without citation');
+    await hold('para-5');
+    await tid('copy-select').click();
+    await tid('para-toolbar-close').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="para-toolbar"]'));
+    // a normal tap still opens the commentary drawer, with no toolbar
+    await tid('para-3').click();
+    await tid('commentary-pane').waitFor({ timeout: 10000 });
+    assert.strictEqual(await all('para-toolbar').count(), 0);
+    await tid('commentary-close').click();
+    step('main text: long-press opens the copy toolbar (with / without citation, בחירת טקסט, multi-paragraph range, toast); a tap still opens the drawer');
     await openToc(0);
     const tocBg = await paintedBg('toc-col-0');
     assert.ok(['rgb(33, 33, 33)', 'rgb(42, 42, 42)', 'rgb(48, 48, 48)'].includes(tocBg), `TOC ${tocBg}`);

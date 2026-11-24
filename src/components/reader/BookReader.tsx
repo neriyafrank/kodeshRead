@@ -49,6 +49,7 @@ import {
 } from '../../../shared/reader';
 import { attachLinkCounts, fetchLinkCounts } from '../../../shared/commentary';
 import { lineHeightMultiplier, splitVerseMarker, verseGutterWidth } from '../../../shared/typography';
+import { formatCopy } from '../../../shared/copyFormat';
 import { markTerms } from '../../../shared/search';
 import { parallelMember } from '../../../shared/parallelWorks';
 import type { LineDivider } from '../../../shared/torahParshiot';
@@ -60,6 +61,7 @@ import { useTabs, type ReaderTab } from '../../state/tabsStore';
 import { spacing, useAppTheme, type Palette } from '../../theme';
 import { RichText } from '../RichText';
 import { CommentaryPane, commentaryPaneHeight } from './CommentaryPane';
+import { ParagraphToolbar, useCopyMode, useCopyToast } from './CopyToolbar';
 
 export const BREADCRUMB_HEIGHT = 40;
 /**
@@ -399,7 +401,43 @@ export function BookReader({ tab, onOpenToc }: Props) {
     });
   }, []);
 
+  // Long-press toolbar: copy a paragraph (with / without citation) or select several / part of the text.
+  const copyMode = useCopyMode();
+  const copyToast = useCopyToast();
+  const rowsRef = useRef<ReaderRow[]>([]);
+  rowsRef.current = win?.rows ?? [];
+  const typoRef = useRef(typo);
+  typoRef.current = typo;
+  const copyItems = (keys: string[]) => {
+    const want = new Set(keys);
+    return rowsRef.current
+      .filter((r) => want.has(String(r.line_index)))
+      .map((r) => ({
+        bookTitle: tab.bookTitle,
+        tocPath: r.toc_path,
+        html: prepareDisplayText(r.display_text, { showNikkud: typoRef.current.showNikkud, showCantillation: typoRef.current.showCantillation }),
+      }));
+  };
+  const copyKeys = copyMode.state.mode === 'actions' ? [copyMode.state.key] : copyMode.state.mode === 'select' ? copyMode.state.keys : [];
+  const doCopy = (citation: boolean) => {
+    void copyToast.copy(formatCopy(copyItems(copyKeys), { citation }));
+    copyMode.reset();
+  };
+  const onLongPressRow = useCallback(
+    (row: ReaderRow) => {
+      const key = String(row.line_index);
+      if (copyMode.ref.current.mode === 'select') copyMode.rangeTo(key, rowsRef.current.map((r) => String(r.line_index)));
+      else copyMode.openActions(key);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [copyMode.rangeTo, copyMode.openActions],
+  );
+
   const onPressRow = useCallback((row: ReaderRow) => {
+    // While copying: a tap toggles a paragraph into the selection (select mode) or just dismisses the toolbar.
+    const cm = copyMode.ref.current.mode;
+    if (cm === 'select') return copyMode.toggle(String(row.line_index));
+    if (cm === 'actions') return copyMode.reset();
     const open = selectedRef.current != null;
     if (open && selectedRef.current === row.line_index) {
       setSelected(null); // tapping the selected paragraph again closes the drawer
@@ -409,7 +447,8 @@ export function BookReader({ tab, onOpenToc }: Props) {
       setSelected({ line: row.line_index, tocPath: row.toc_path });
       if (!open) setTimeout(() => revealRow(row.line_index), 50);
     }
-  }, [revealRow]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRow, copyMode.toggle, copyMode.reset]);
 
   /** Neighbouring paragraph with links inside the loaded window. */
   const linkedNeighbour = (dir: 1 | -1): ReaderRow | null => {
@@ -436,11 +475,15 @@ export function BookReader({ tab, onOpenToc }: Props) {
         selected={item.line_index === selectedLine}
         divider={dividers?.get(item.line_index)}
         onPress={onPressRow}
+        onLongPress={onLongPressRow}
+        marked={copyMode.marked(String(item.line_index))}
+        selectable={copyMode.selecting}
         highlightNonce={highlight && item.line_index >= highlight.line && item.line_index <= (highlight.end ?? highlight.line) ? highlight.nonce : 0}
         highlightTerms={highlight && highlight.line === item.line_index ? highlight.terms : undefined}
       />
     ),
-    [typo, highlight, selectedLine, onPressRow, dividers],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [typo, highlight, selectedLine, onPressRow, onLongPressRow, dividers, copyMode.state],
   );
 
   const crumbs = topRow.tocPath ? topRow.tocPath.split(' > ') : [];
@@ -513,6 +556,27 @@ export function BookReader({ tab, onOpenToc }: Props) {
           <Text style={[styles.crumbIcon, { color: palette.accent }]}>☰</Text>
         </Pressable>
       </Animated.View>
+      {copyMode.state.mode !== 'idle' ? (
+        <ParagraphToolbar
+          style={styles.copyBar}
+          info={copyMode.state.mode === 'select' ? `${copyMode.state.keys.length} נבחרו` : null}
+          actions={
+            copyMode.state.mode === 'select'
+              ? [
+                  { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
+                  { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+                ]
+              : [
+                  { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
+                  { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+                  { key: 'select', label: 'בחירת טקסט', onPress: copyMode.startSelect, testID: 'copy-select' },
+                ]
+          }
+          closeLabel={copyMode.state.mode === 'select' ? 'סיום' : undefined}
+          onClose={copyMode.reset}
+        />
+      ) : null}
+      {copyToast.toast}
       </View>
 
       {selected && areaHeight > 0 ? (
@@ -544,6 +608,12 @@ interface RowProps {
   /** The commentary drawer is showing this paragraph. */
   selected: boolean;
   onPress: (row: ReaderRow) => void;
+  /** Long-press: the copy toolbar. */
+  onLongPress: (row: ReaderRow) => void;
+  /** The paragraph is the target / part of the copy selection. */
+  marked: boolean;
+  /** Copy-selection mode: native text selection inside the paragraph. */
+  selectable: boolean;
   /** Non-zero while this row is the highlighted jump target. */
   highlightNonce: number;
   /** Search terms marked inside the row while it is highlighted. */
@@ -579,7 +649,7 @@ function TorahDivider({ divider, palette: c, fontSize }: { divider: LineDivider;
   );
 }
 
-const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, highlightNonce, highlightTerms, divider }: RowProps) {
+const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, onLongPress, marked, selectable, highlightNonce, highlightTerms, divider }: RowProps) {
   const { html, verse } = useMemo(() => {
     const prepared = prepareDisplayText(row.display_text, { showNikkud: typo.showNikkud, showCantillation: typo.showCantillation });
     // "(א) ..." -> the verse number goes to the margin column, the text keeps a clean edge.
@@ -631,17 +701,20 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
         headingStyle,
         verse ? styles.verseText : null,
       ]}
+      selectable={selectable}
       testID={verse ? `verse-text-${row.line_index}` : undefined}
     />
   );
   const body = (
     <Pressable
       onPress={() => onPress(row)}
-      style={[styles.row, selected && { backgroundColor: c.selection }]}
+      onLongPress={() => onLongPress(row)}
+      delayLongPress={450}
+      style={[styles.row, selected && { backgroundColor: c.selection }, marked && { backgroundColor: c.accentSoft }]}
       accessibilityHint={links ? `${links} מפרשים` : undefined}
       testID={`para-${row.line_index}`}
     >
-      {selected ? <View pointerEvents="none" style={[styles.selectedBar, { backgroundColor: c.accent }]} /> : null}
+      {selected || marked ? <View pointerEvents="none" style={[styles.selectedBar, { backgroundColor: c.accent }]} /> : null}
       <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: glow }]} />
       {verse ? (
         <View style={styles.verseRow}>
@@ -684,6 +757,7 @@ const styles = StyleSheet.create({
   // Web preview: a mouse drag on the drawer grabber must not select (and auto-scroll) the text.
   noSelect: { userSelect: 'none' } as ViewStyle,
   content: { paddingHorizontal: spacing.md },
+  copyBar: { position: 'absolute', top: spacing.xs, start: spacing.sm, end: spacing.sm, zIndex: 30 },
   row: { paddingVertical: 6, paddingHorizontal: spacing.sm },
   glow: { position: 'absolute', top: 0, bottom: 0, start: 0, end: 0, borderRadius: 6 },
   selectedBar: { position: 'absolute', top: 4, bottom: 4, start: -spacing.sm, width: 3, borderRadius: 2 },

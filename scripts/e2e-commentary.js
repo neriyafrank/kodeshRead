@@ -251,7 +251,66 @@ try {
     await tid('commentary-chip').filter({ hasText: 'רש"י' }).click();
 
     // Open the commentary at its line in a tab.
-    await tid('commentary-open').first().click();
+    // --- long-press paragraph toolbar (the per-paragraph ↗ icons are gone) ---------------------------------
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
+    const lp_hold = async (loc) => {
+      const b = await loc.boundingBox();
+      await page.mouse.move(b.x + b.width / 2, b.y + Math.min(b.height / 2, 24));
+      await page.mouse.down();
+      await page.waitForTimeout(750);
+      await page.mouse.up();
+    };
+    const lp_clip = () => page.evaluate(() => navigator.clipboard.readText());
+    const lp_toolbar = rawTid('para-toolbar');
+    const paraEntries = page.locator('[data-testid^="commentary-entry"]');
+    assert.strictEqual(await page.locator('[data-testid="commentary-open"]').count(), 0, 'no repeated per-paragraph ↗ buttons');
+    assert.ok(!(await tid('commentary-list').innerText()).includes('↗') || (await tid('commentary-list').innerText()).split('↗').length - 1 <= 1, 'only the card-level פתח בספר ↗ remains');
+    assert.strictEqual(await tid('commentary-open-block').count(), 1, 'the card-level "פתח בספר ↗" stays');
+    await paraEntries.first().click(); // a normal tap never opens the toolbar
+    await page.waitForTimeout(400);
+    assert.strictEqual(await lp_toolbar.count(), 0, 'a tap does not open the toolbar');
+    await lp_hold(paraEntries.first());
+    await lp_toolbar.waitFor();
+    for (const id of ['copy-open-in-book', 'copy-with-citation', 'copy-plain', 'copy-select']) assert.strictEqual(await rawTid(id).count(), 1, `${id} in the toolbar`);
+    assert.deepStrictEqual(await rawTid('para-toolbar').locator('button, [role="button"]').allInnerTexts().then((t) => t.filter((x) => x !== '✕')), ['פתח בספר', 'העתק עם ציטוט', 'העתק ללא ציטוט', 'בחירת טקסט']);
+    await shot('10a-para-toolbar');
+    // copy with citation: «text» + — book, location
+    await rawTid('copy-with-citation').click();
+    await rawTid('copy-toast').waitFor();
+    assert.strictEqual((await rawTid('copy-toast').innerText()).trim(), 'הועתק ללוח');
+    assert.strictEqual(await lp_toolbar.count(), 0, 'the toolbar is dismissed after copying');
+    const lp_cited = await lp_clip();
+    assert.ok(/^«[^»]+»\n— רש"י על שבת/.test(lp_cited) && !/<[a-z/]+>/.test(lp_cited), lp_cited);
+    // copy without citation: clean text only
+    await lp_hold(paraEntries.first());
+    await rawTid('copy-plain').click();
+    const lp_plain = await lp_clip();
+    assert.ok(lp_plain.length > 3 && !lp_plain.includes('«') && !lp_plain.includes('—') && !/<[a-z/]+>/.test(lp_plain), lp_plain);
+    assert.ok(lp_cited.includes(lp_plain.split('\n')[0]), 'same text, without the quotes / citation');
+    // selection mode: more paragraphs, copy together; סיום / ביטול leaves it (הכל: רש"י + תוספות cards)
+    await tid('commentary-chip-all').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    await lp_hold(paraEntries.first());
+    await rawTid('copy-select').click();
+    await rawTid('para-toolbar-info').waitFor();
+    assert.strictEqual((await rawTid('para-toolbar-info').innerText()).trim(), '1 נבחרו');
+    assert.strictEqual(await rawTid('copy-open-in-book').count(), 0, 'no פתח בספר while selecting');
+    await paraEntries.nth(1).click(); // a tap toggles a paragraph in
+    await page.waitForFunction(() => document.querySelector('[data-testid="para-toolbar-info"]')?.innerText.trim() === '2 נבחרו');
+    await rawTid('copy-with-citation').click();
+    await rawTid('copy-toast').waitFor();
+    const lp_multi = await lp_clip();
+    assert.ok(lp_multi.startsWith('«') && lp_multi.includes('\n— ') && (lp_multi.match(/«/g) || []).length >= 1 && lp_multi.split('\n').length >= 4 && !/<[a-z/]+>/.test(lp_multi), lp_multi);
+    await lp_hold(paraEntries.first());
+    await rawTid('copy-select').click();
+    await rawTid('para-toolbar-close').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="para-toolbar"]'));
+    step('drawer: no per-paragraph ↗; a long-press (not a tap) opens פתח בספר / העתק עם ציטוט / העתק ללא ציטוט / בחירת טקסט; copy + toast; multi-paragraph selection');
+    await lp_hold(paraEntries.first());
+    await tid('commentary-chip').filter({ hasText: 'רש"י' }).click(); // back to the רש"י focus
+    await page.waitForFunction(() => !!document.querySelector('[data-testid="commentary-focus-row"]'));
+    await lp_hold(paraEntries.first());
+    await rawTid('copy-open-in-book').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('רש"י על שבת'));
     await tid('links-badge-7').waitFor();
     await shot('4-opened');

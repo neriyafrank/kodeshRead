@@ -778,6 +778,7 @@ async function main() {
   await starterPackTests();
   // 16. Canonical book roles + bidirectional parallel works (Turim / Shas / Parasha families).
   await parallelWorksTests();
+  await copyFormatTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -6364,6 +6365,58 @@ async function parshaQuickJumpTests() {
  * Section 16: canonical book roles (shared/bookRoles.js) and the bidirectional parallel-works engine
  * (shared/parallelWorks.js), on the real Otzaria map and on fixture libraries of every family.
  */
+/** Long-press copy toolbar: clean text + canonical citation (shared/copyFormat.js) and the UI wiring. */
+async function copyFormatTests() {
+  const cf = require('../shared/copyFormat');
+  await check('copy: plainText strips HTML tags, entities and bidi marks, collapses whitespace', () => {
+    assert.strictEqual(cf.plainText('\u200F<b>בראשית</b> <small>ברא</small>&nbsp;אלהים &amp; <i>את</i><br>השמים'), 'בראשית ברא אלהים & את השמים');
+    assert.strictEqual(cf.plainText('<mark>x</mark>  y\n z'), 'x y z');
+    assert.strictEqual(cf.plainText(null), '');
+    assert.strictEqual(cf.plainText('&lt;b&gt; כן'), '<b> כן', 'escaped markup stays as text');
+  });
+  await check('copy: one paragraph with citation = «text» + — book, location', () => {
+    const out = cf.formatCopy([{ bookTitle: 'בראשית', tocPath: 'פרק א', html: '<b>בראשית</b> ברא אלהים' }], { citation: true });
+    assert.strictEqual(out, '«בראשית ברא אלהים»\n— בראשית, פרק א');
+    assert.strictEqual(cf.formatCopy([{ bookTitle: 'רש"י על בראשית', tocPath: null, html: 'x' }], { citation: true }), '«x»\n— רש"י על בראשית', 'no location: just the book');
+  });
+  await check('copy: without citation is the clean text only (no quotes, no HTML)', () => {
+    const items = [{ bookTitle: 'שבת', tocPath: 'דף ב.', html: '<b>א</b> ב' }, { bookTitle: 'שבת', tocPath: 'דף ב.', html: '' }, { bookTitle: 'שבת', tocPath: 'דף ב:', html: 'ג<br>ד' }];
+    assert.strictEqual(cf.formatCopy(items), 'א ב\nג ד', 'empty paragraphs are dropped, one per line');
+    assert.strictEqual(cf.formatCopy([], { citation: true }), '');
+    assert.strictEqual(cf.formatCopy([{ bookTitle: 'x', html: '<br>' }], { citation: true }), '');
+  });
+  await check('copy: several paragraphs of one book are quoted together and cite the first – last location; books are separated', () => {
+    const out = cf.formatCopy(
+      [
+        { bookTitle: 'שבת', tocPath: 'דף ב. > שורה א', html: 'א' },
+        { bookTitle: 'שבת', tocPath: 'דף ב. > שורה ב', html: 'ב' },
+        { bookTitle: 'רש"י על שבת', tocPath: 'דף ב.', html: '<b>ג</b>' },
+      ],
+      { citation: true },
+    );
+    assert.strictEqual(out, '«א\nב»\n— שבת, דף ב., שורה א – דף ב., שורה ב\n\n«ג»\n— רש"י על שבת, דף ב.');
+    // the same location twice is cited once
+    assert.strictEqual(cf.formatCopy([{ bookTitle: 'ב', tocPath: 'פרק א', html: 'x' }, { bookTitle: 'ב', tocPath: 'פרק א', html: 'y' }], { citation: true }), '«x\ny»\n— ב, פרק א');
+  });
+  await check('copy: location drops the book title and joins the heading path', () => {
+    assert.strictEqual(cf.locationOf('שולחן ערוך > סימן א > סעיף ב', 'שולחן ערוך'), 'סימן א, סעיף ב');
+    assert.strictEqual(cf.locationOf('<b>סימן</b> א', 'x'), 'סימן א');
+    assert.strictEqual(cf.locationOf(null, 'x'), '');
+    assert.strictEqual(cf.citationLine('ברכות', 'דף ב.'), '— ברכות, דף ב.');
+  });
+  await check('copy toolbar wiring: long-press everywhere, no per-paragraph ↗, פתח בספר only in the drawer', () => {
+    const pane = fs.readFileSync(path.join(ROOT, 'src/components/reader/CommentaryPane.tsx'), 'utf8');
+    const reader = fs.readFileSync(path.join(ROOT, 'src/components/reader/BookReader.tsx'), 'utf8');
+    assert.ok(!pane.includes('commentary-open"') && !pane.includes("testID=\"commentary-open\"") && !/entryOpen/.test(pane), 'the per-paragraph ↗ button is gone');
+    assert.ok(pane.includes('פתח בספר ↗'), 'the card-level button stays');
+    assert.ok(pane.includes("testID: 'copy-open-in-book'") && !reader.includes('copy-open-in-book'), 'פתח בספר only in the drawer toolbar');
+    for (const [name, src] of [['drawer', pane], ['reader', reader]]) {
+      assert.ok(src.includes('onLongPress') && src.includes("'copy-with-citation'") && src.includes("'copy-plain'") && src.includes("'copy-select'"), `${name} toolbar actions`);
+    }
+    assert.ok(/copyMode\.selecting \? copyMode\.toggle/.test(pane) && /undefined\)/.test(pane), 'a plain tap in the drawer never opens the toolbar');
+  });
+}
+
 async function parallelWorksTests() {
   const pw = require('../shared/parallelWorks');
   const roles = require('../shared/bookRoles');

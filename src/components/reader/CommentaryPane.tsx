@@ -48,6 +48,7 @@ import {
   type ScrollViewInstance,
 } from 'react-native';
 
+import { formatCopy } from '../../../shared/copyFormat';
 import { fetchLinkedEntries, groupLinkedEntries, mergeParallelGroups, parallelGroups, type CommentaryGroup, type LinkedEntry } from '../../../shared/commentary';
 import { defaultExpandedKeys, filterCommentaries, kindCounts, rankCommentaries, selectCommentaries, type Ranked } from '../../../shared/commentaryRank';
 import { findParallels, type ParallelResult } from '../../../shared/parallelWorks';
@@ -60,6 +61,7 @@ import { useCommentaryPrefs } from '../../state/commentaryStore';
 import { COMMENTARY_RATIO, useSettings } from '../../state/settingsStore';
 import { radius, spacing, useAppTheme, type Palette } from '../../theme';
 import { Collapsible } from '../Collapsible';
+import { ParagraphToolbar, useCopyMode, useCopyToast } from './CopyToolbar';
 import { SlidersIcon } from '../Icons';
 import { RichText } from '../RichText';
 
@@ -254,6 +256,26 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   // Same vocalization-aware leading as the reader (commentaries quote vocalized verses).
   const entryTextStyle = [s.entryText, { fontFamily: font.regular, fontSize: entrySize, lineHeight: lineHeightPx(entrySize, lineHeight, { showNikkud, showCantillation }) }];
 
+  // --- long-press toolbar (open in book / copy with or without citation / select) ------------------
+  const copyMode = useCopyMode();
+  const copyToast = useCopyToast();
+  const entryKey = (e: { book_id: number; line: number }) => `${e.book_id}:${e.line}`;
+  /** Entries of the open cards, in reading order. */
+  const openEntries = () => visible.filter((g) => focusMode || isExpanded(g)).flatMap((g) => g.entries);
+  const entryOrder = () => openEntries().map(entryKey);
+  const copyEntries = (keys: string[]) => {
+    const want = new Set(keys);
+    return openEntries()
+      .filter((e) => want.has(entryKey(e)))
+      .map((e) => ({ bookTitle: e.book_title, tocPath: e.toc_path, html: prepareDisplayText(e.display_text ?? '', { showNikkud, showCantillation }) }));
+  };
+  const copyKeys = copyMode.state.mode === 'actions' ? [copyMode.state.key] : copyMode.state.mode === 'select' ? copyMode.state.keys : [];
+  const doCopy = (citation: boolean) => {
+    void copyToast.copy(formatCopy(copyEntries(copyKeys), { citation }));
+    copyMode.reset();
+  };
+  const actionEntry = copyMode.state.mode === 'actions' ? openEntries().find((e) => entryKey(e) === (copyMode.state as { key: string }).key) : undefined;
+
   const openGroup = (g: RankedGroup) => {
     // A parallel work opens at the start of its סימן / פרק / פרשה (no whole-unit highlight).
     if (g.isParallel && g.block) onOpenEntry({ bookId: g.bookId, bookTitle: g.bookTitle, line: g.block.start });
@@ -355,9 +377,13 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
         )}
         {open
           ? g.entries.map((e) => (
-              <View
+              <Pressable
                 key={`${e.book_id}:${e.line}`}
-                style={[s.entry, g.block && e.direct ? { borderStartWidth: 3, borderStartColor: c.accent } : null]}
+                // A tap never opens the toolbar (reading / scrolling); only a long-press does. While selecting a tap toggles.
+                onPress={() => (copyMode.selecting ? copyMode.toggle(entryKey(e)) : copyMode.state.mode === 'actions' ? copyMode.reset() : undefined)}
+                onLongPress={() => (copyMode.selecting ? copyMode.rangeTo(entryKey(e), entryOrder()) : copyMode.openActions(entryKey(e)))}
+                delayLongPress={450}
+                style={[s.entry, g.block && e.direct ? { borderStartWidth: 3, borderStartColor: c.accent } : null, copyMode.marked(entryKey(e)) && { backgroundColor: c.accentSoft }]}
                 testID={par ? 'parallel-entry' : e.direct && g.block ? 'commentary-entry-direct' : 'commentary-entry'}
               >
                 {/* A block / parallel unit is named once in the card header: never repeated per paragraph. */}
@@ -372,19 +398,10 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                     fontSize={entrySize}
                     boldFamily={font.bold}
                     style={[entryTextStyle, { flex: 1 }]}
+                    selectable={copyMode.selecting}
                   />
-                  <Pressable
-                    onPress={() => onOpenEntry({ bookId: e.book_id, bookTitle: e.book_title, line: e.line })}
-                    hitSlop={8}
-                    style={s.entryOpen}
-                    accessibilityRole="button"
-                    accessibilityLabel={`פתח את ${e.book_title} בשורה זו`}
-                    testID="commentary-open"
-                  >
-                    <Text style={s.entryOpenText}>↗</Text>
-                  </Pressable>
                 </View>
-              </View>
+              </Pressable>
             ))
           : null}
       </View>
@@ -581,6 +598,34 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           </View>
       </Collapsible>
 
+      {copyMode.state.mode !== 'idle' ? (
+        <ParagraphToolbar
+          style={s.copyBar}
+          info={copyMode.state.mode === 'select' ? `${copyMode.state.keys.length} נבחרו` : null}
+          actions={[
+            ...(copyMode.state.mode === 'actions' && actionEntry
+              ? [
+                  {
+                    key: 'open',
+                    label: 'פתח בספר',
+                    onPress: () => {
+                      onOpenEntry({ bookId: actionEntry.book_id, bookTitle: actionEntry.book_title, line: actionEntry.line });
+                      copyMode.reset();
+                    },
+                    testID: 'copy-open-in-book',
+                    primary: true,
+                  },
+                ]
+              : []),
+            { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: copyMode.state.mode === 'select' },
+            { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+            ...(copyMode.state.mode === 'actions' ? [{ key: 'select', label: 'בחירת טקסט', onPress: copyMode.startSelect, testID: 'copy-select' }] : []),
+          ]}
+          closeLabel={copyMode.state.mode === 'select' ? 'סיום' : undefined}
+          onClose={copyMode.reset}
+        />
+      ) : null}
+
       {error ? (
         <Text style={s.message}>{error}</Text>
       ) : loading && !data ? (
@@ -628,6 +673,7 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           ))}
         </ScrollView>
       )}
+      {copyToast.toast}
     </View>
   );
 }
@@ -811,8 +857,7 @@ const createStyles = (c: Palette) =>
     entry: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, gap: 2 },
     entryRow: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.xs },
     entryPath: { flex: 1, fontSize: 12, color: c.textMuted, ...alignRight },
-    entryOpen: { paddingHorizontal: 4, paddingTop: 2 },
-    entryOpenText: { fontSize: 13, color: c.accent, opacity: 0.7 },
+    copyBar: { marginHorizontal: spacing.sm, marginVertical: spacing.xs },
     openBtn: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm, backgroundColor: c.accentSoft },
     openText: { fontSize: 12, fontWeight: '600', color: c.accent },
     // Parallel works: the prominent action is to open the parallel סימן / פרק / פרשה itself.

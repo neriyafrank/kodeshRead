@@ -56,6 +56,13 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > chip strip + the name-filter row together: picking a commentator collapses both (reading space), the button reopens both, a
 > long-press multi-select keeps them open, הכל keeps the strip accessible; a `?` button explains the long-press.
 >
+> **Long-press paragraph toolbar (reader + commentary drawer):** `CopyToolbar.tsx` (`useCopyMode`: idle -> actions -> select,
+> `ParagraphToolbar`, `useCopyToast` = clipboard + `הועתק ללוח`) is used by `BookReader.tsx` and `CommentaryPane.tsx`. A long-press
+> opens `העתק עם ציטוט` / `העתק ללא ציטוט` / `בחירת טקסט` (the drawer adds `פתח בספר` for that exact paragraph); a tap never opens it
+> (the reader tap still opens the drawer). `בחירת טקסט`: native-selectable text, taps toggle paragraphs, a long-press selects the range
+> from the last one, `סיום` leaves. The per-paragraph `↗` icons are gone (the card-level `פתח בספר ↗` stays). Text/citation formatting:
+> `shared/copyFormat.js` (`plainText`, `formatCopy`: `«text»\n— book, location`). Self-tested (`copy:` checks), `e2e:reader` / `e2e:commentary`.
+>
 > **Shulchan Aruch seif 1:** `refAlign.inlineUnits` (base side of `סימן X סעיף N` links) reads seif markers `(א)` / `[א]` /
 > `סעיף א` / `א.` (`seifMarkerKey`), the text after a heading tag on the same line (`<h2>סימן א</h2>(א) ...`: kept in `clean_text`,
 > read back by `indexer.indexRefLinks` via `headingLeadText`, shown by `commentary.fetchLinkedEntries` as the unit's first paragraph),
