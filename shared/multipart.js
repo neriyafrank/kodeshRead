@@ -117,6 +117,20 @@ function formatPartProgress({ partIndex, partCount, doneBytes, totalBytes }) {
   return `חלק ${partIndex} מתוך ${partCount} · ${formatBytes(doneBytes)} / ${formatBytes(totalBytes)} · ${pct}%`;
 }
 
+/**
+ * Title / text / progress of the Android foreground-service notification of a cloud job:
+ * "מוריד ספרייה מהענן… 42%". `current` / `total` are per-mille for the notification's progress bar.
+ */
+function formatCloudNotification(stage, fraction, detail) {
+  const pct = fraction == null ? null : Math.max(0, Math.min(100, Math.floor(fraction * 100)));
+  let label = stage || '';
+  if (/^מוריד…?$|^ממשיך — חלק קיים$/.test(label)) label = 'מוריד ספרייה מהענן…';
+  else if (label === 'מרכיב את החלקים…') label = 'מרכיב את הספרייה…';
+  else if (label === 'מחלץ…') label = 'מחלץ את הספרייה…';
+  const showPct = pct != null && label !== NETWORK_RETRY_STAGE;
+  return { title: showPct ? `${label} ${pct}%` : label, text: detail || '', current: pct == null ? 0 : Math.round(Math.max(0, Math.min(1, fraction)) * 1000), total: pct == null ? 0 : 1000 };
+}
+
 const cancelledError = () => {
   const e = new Error('cancelled');
   return e;
@@ -140,44 +154,131 @@ async function isValidPart(io, part) {
   return true;
 }
 
+/** Suffix of an in-progress part: kept on disk across interruptions and resumed with an HTTP Range request. */
+const PARTIAL_SUFFIX = '.partial';
+const partialName = (name) => name + PARTIAL_SUFFIX;
+
+const TRANSIENT_RE =
+  /unable to resolve host|no address associated|unknownhost|enotfound|eai_again|econnreset|econnaborted|econnrefused|etimedout|ehostunreach|enetunreach|enetdown|epipe|time[d ]?-?out|connection (?:dropped|reset|closed|aborted|lost|refused)|connect(?:ion)? failed|failed to connect|software caused connection abort|unexpected end of stream|stream was reset|socket|network|offline|internet|ssl|handshake|premature|broken pipe|http (?:408|429|5\d\d)\b/i;
+
+/**
+ * True for an error worth retrying: DNS / connectivity loss (Android revokes background network access
+ * -> "Unable to resolve host"), resets, timeouts, 5xx / 429. HTTP 404 / 403, a full disk or a
+ * cancellation are not transient and fail at once.
+ */
+function isTransientNetworkError(e) {
+  const msg = e instanceof Error ? e.message : String(e == null ? '' : e);
+  if (!msg || /^cancelled$/i.test(msg)) return false;
+  return TRANSIENT_RE.test(msg);
+}
+
+/** Exponential backoff: base * 2^attempt (attempt 0-based), capped. 2 s, 4 s, 8 s, 16 s, ... 30 s. */
+function backoffDelayMs(attempt, baseMs = 2000, capMs = 30000) {
+  return Math.min(capMs, baseMs * Math.pow(2, Math.max(0, attempt)));
+}
+
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Sleeps `ms` in slices of <= 500 ms so a cancel request ends the wait quickly. */
+async function sleepCancellable(sleep, ms, isCancelled) {
+  let left = ms;
+  while (left > 0) {
+    if (isCancelled && isCancelled()) throw cancelledError();
+    const step = Math.min(500, left);
+    await sleep(step);
+    left -= step;
+  }
+  if (isCancelled && isCancelled()) throw cancelledError();
+}
+
+/** "הרשת נותקה זמנית — מנסה להמשיך הורדה…" */
+const NETWORK_RETRY_STAGE = 'הרשת נותקה זמנית — מנסה להמשיך הורדה…';
+
 /**
  * Downloads every part sequentially, skipping parts that are already on disk and valid (resume
- * after a dropped connection / app restart). A downloaded part is verified; one corrupt part is
- * retried `retries` times before the run fails.
+ * after a dropped connection / app restart).
  *
- * @param {object} opts { manifestUrl, retries = 2, onProgress({ partIndex, partCount, doneBytes, totalBytes, skipped }), isCancelled }
+ * A part is written to `<part>.partial` and renamed once it has the manifest size. The partial file is
+ * never deleted on an interruption: the next attempt (automatic retry, or a later run) continues with
+ * `io.download(url, partial, onProgress, isCancelled, { resumeFrom, expectedBytes })`, i.e. an HTTP
+ * Range request, instead of starting from 0%.
+ *
+ * Transient network errors (isTransientNetworkError) are retried `networkRetries` times with exponential
+ * backoff; the budget is refilled whenever an attempt made progress, so a long download over a flaky link
+ * is not abandoned. A failure while the app is in the background (the OS revoked network access) is not
+ * counted: the loop waits for `whenForeground()` and resumes. One corrupt part is retried `retries` times.
+ *
+ * @param {object} opts { manifestUrl, retries = 2, networkRetries = 4, backoffBaseMs, backoffCapMs, sleep,
+ *   isBackgrounded(), whenForeground(), onRetry({ partIndex, attempt, maxAttempts, delayMs, error, background }),
+ *   onProgress({ partIndex, partCount, doneBytes, totalBytes, skipped }), isCancelled }
  * @returns {{ downloaded: number, skipped: number }}
  */
 async function downloadParts(io, manifest, opts) {
   const o = opts || {};
   const retries = o.retries == null ? 2 : o.retries;
+  const maxNet = o.networkRetries == null ? 4 : o.networkRetries;
+  const sleep = o.sleep || defaultSleep;
   const total = manifest.totalZipBytes;
   const count = manifest.parts.length;
   let done = 0;
   let downloaded = 0;
   let skipped = 0;
+  const cancelled = () => !!(o.isCancelled && o.isCancelled());
   const report = (partIndex, within, wasSkipped) => o.onProgress && o.onProgress({ partIndex, partCount: count, doneBytes: done + within, totalBytes: total, skipped: !!wasSkipped });
   for (let i = 0; i < count; i++) {
     const part = manifest.parts[i];
     const idx = i + 1;
-    if (o.isCancelled && o.isCancelled()) throw cancelledError();
+    const partial = partialName(part.name);
+    if (cancelled()) throw cancelledError();
     if (await isValidPart(io, part)) {
+      await io.remove(partial); // a stale partial of an already complete part
       skipped++;
       done += part.sizeBytes;
       report(idx, 0, true);
       continue;
     }
-    let attempt = 0;
+    let attempt = 0; // corrupt-part attempts
+    let netAttempt = 0; // consecutive transient failures without progress
     for (;;) {
-      report(idx, 0, false);
-      try {
-        await io.download(partUrl(o.manifestUrl, part), part.name, (written) => report(idx, Math.min(written, part.sizeBytes), false), o.isCancelled);
-      } catch (e) {
-        if (o.isCancelled && o.isCancelled()) throw cancelledError();
-        if (attempt++ >= retries) throw new Error(`הורדת ${part.name} נכשלה: ${e instanceof Error ? e.message : String(e)}`);
+      let have = (await io.size(partial)) || 0;
+      if (have > part.sizeBytes) {
+        await io.remove(partial); // cannot be a prefix of this part
+        have = 0;
+      }
+      report(idx, have, false);
+      if (have < part.sizeBytes) {
+        try {
+          await io.download(partUrl(o.manifestUrl, part), partial, (written) => report(idx, Math.min(written, part.sizeBytes), false), o.isCancelled, { resumeFrom: have, expectedBytes: part.sizeBytes });
+        } catch (e) {
+          if (cancelled()) throw cancelledError();
+          const after = (await io.size(partial)) || 0;
+          const background = !!(o.isBackgrounded && o.isBackgrounded());
+          if (!isTransientNetworkError(e) && !background) throw new Error(`הורדת ${part.name} נכשלה: ${e instanceof Error ? e.message : String(e)}`);
+          if (after > have) netAttempt = 0; // progress was made: refill the retry budget
+          if (background && o.whenForeground) {
+            // Android cut the network while the app was not in the foreground: not the network's fault.
+            if (o.onRetry) o.onRetry({ partIndex: idx, attempt: netAttempt, maxAttempts: maxNet, delayMs: 0, error: e, background: true });
+            await o.whenForeground();
+            if (cancelled()) throw cancelledError();
+            await sleepCancellable(sleep, 1000, o.isCancelled);
+            continue;
+          }
+          if (netAttempt >= maxNet) throw new Error(`הורדת ${part.name} נכשלה אחרי ${maxNet + 1} ניסיונות (ההורדה תמשיך מאותה נקודה): ${e instanceof Error ? e.message : String(e)}`);
+          const delayMs = backoffDelayMs(netAttempt, o.backoffBaseMs, o.backoffCapMs);
+          netAttempt++;
+          if (o.onRetry) o.onRetry({ partIndex: idx, attempt: netAttempt, maxAttempts: maxNet, delayMs, error: e, background: false });
+          await sleepCancellable(sleep, delayMs, o.isCancelled);
+          continue;
+        }
+      }
+      if (cancelled()) throw cancelledError();
+      const got = (await io.size(partial)) || 0;
+      if (got !== part.sizeBytes) {
+        // The transfer ended "successfully" but short (a proxy cut it): keep it and continue from there.
+        if (netAttempt++ >= maxNet) throw new Error(`הורדת ${part.name} הסתיימה קצרה (${got} מתוך ${part.sizeBytes} בתים)`);
         continue;
       }
-      if (o.isCancelled && o.isCancelled()) throw cancelledError();
+      await io.rename(partial, part.name);
       if (await isValidPart(io, part)) break;
       if (attempt++ >= retries) throw new Error(`${part.name} פגום (גודל או SHA-256 לא תואמים) גם אחרי ${retries + 1} ניסיונות`);
     }
@@ -283,32 +384,51 @@ async function stageCloudLibrary(io, manifest, opts) {
   const report = o.report || (() => undefined);
   const zipName = o.zipName || CLOUD_ZIP_NAME;
   const dbName = o.dbName || CLOUD_DB_NAME;
+  let lastFraction = 0;
+  const keepAwake = o.keepAwake || ((fn) => fn());
   await downloadParts(io, manifest, {
     manifestUrl: o.manifestUrl,
     isCancelled: o.isCancelled,
     retries: o.retries,
-    onProgress: (p) =>
+    networkRetries: o.networkRetries,
+    backoffBaseMs: o.backoffBaseMs,
+    backoffCapMs: o.backoffCapMs,
+    sleep: o.sleep,
+    isBackgrounded: o.isBackgrounded,
+    whenForeground: o.whenForeground,
+    onRetry: (r) =>
+      report({
+        stage: NETWORK_RETRY_STAGE,
+        fraction: lastFraction,
+        detail: r.background ? 'ההורדה תמשיך כשתחזרו לאפליקציה' : `ניסיון ${r.attempt} מתוך ${r.maxAttempts} · בעוד ${Math.max(1, Math.round(r.delayMs / 1000))} שנ׳`,
+      }),
+    onProgress: (p) => {
+      lastFraction = p.totalBytes ? p.doneBytes / p.totalBytes : 0;
       report({
         stage: p.skipped ? 'ממשיך — חלק קיים' : 'מוריד…',
         fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null,
         detail: formatPartProgress(p),
-      }),
+      });
+    },
   });
-  report({ stage: 'מרכיב את החלקים…', fraction: 0, detail: null });
-  await assembleParts(io, manifest, zipName, {
-    isCancelled: o.isCancelled,
-    onProgress: (p) => report({ stage: 'מרכיב את החלקים…', fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null, detail: `${formatBytes(p.doneBytes)} / ${formatBytes(p.totalBytes)}` }),
-  });
-  report({ stage: 'מחלץ…', fraction: 0, detail: null });
-  try {
-    await extractZip(io, manifest, zipName, dbName, {
+  // Assembly + extraction are the heavy disk steps: the device must not sleep in the middle of them.
+  await keepAwake(async () => {
+    report({ stage: 'מרכיב את החלקים…', fraction: 0, detail: null });
+    await assembleParts(io, manifest, zipName, {
       isCancelled: o.isCancelled,
-      onProgress: ({ bytesIn, bytesOut, totalIn }) =>
-        report({ stage: 'מחלץ…', fraction: totalIn ? bytesIn / totalIn : null, detail: `${formatBytes(bytesOut)} / ${formatBytes(manifest.uncompressedDbBytes)}` }),
+      onProgress: (p) => report({ stage: 'מרכיב את החלקים…', fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null, detail: `${formatBytes(p.doneBytes)} / ${formatBytes(p.totalBytes)}` }),
     });
-  } finally {
-    if ((await io.size(zipName)) != null) await io.remove(zipName);
-  }
+    report({ stage: 'מחלץ…', fraction: 0, detail: null });
+    try {
+      await extractZip(io, manifest, zipName, dbName, {
+        isCancelled: o.isCancelled,
+        onProgress: ({ bytesIn, bytesOut, totalIn }) =>
+          report({ stage: 'מחלץ…', fraction: totalIn ? bytesIn / totalIn : null, detail: `${formatBytes(bytesOut)} / ${formatBytes(manifest.uncompressedDbBytes)}` }),
+      });
+    } finally {
+      if ((await io.size(zipName)) != null) await io.remove(zipName);
+    }
+  });
 }
 
 /**
@@ -332,16 +452,23 @@ function createMemoryIO(opts) {
     files,
     size: (name) => (files.has(name) ? files.get(name).length : null),
     remove: (name) => void files.delete(name),
+    rename: (from, to) => {
+      files.set(to, files.get(from));
+      files.delete(from);
+    },
     sha256: async (name) => {
       const buf = await globalThis.crypto.subtle.digest('SHA-256', files.get(name));
       return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
     },
-    download: async (url, name, onProgress, isCancelled) => {
-      const res = await doFetch(url);
+    download: async (url, name, onProgress, isCancelled, resume) => {
+      const from = (resume && resume.resumeFrom) || 0;
+      const res = await (from > 0 ? doFetch(url, { headers: { Range: `bytes=${from}-` } }) : doFetch(url));
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // 206 -> the server continues after `from`; 200 -> it ignored Range and sent the whole file.
+      const resumed = from > 0 && res.status === 206 && files.has(name);
       const total = Number(res.headers.get('content-length')) || 0;
-      const chunks = [];
-      let got = 0;
+      const chunks = resumed ? [files.get(name)] : [];
+      let got = resumed ? from : 0;
       if (res.body && res.body.getReader) {
         const reader = res.body.getReader();
         for (;;) {
@@ -349,12 +476,13 @@ function createMemoryIO(opts) {
           const { done, value } = await reader.read();
           if (done) break;
           chunks.push(value);
+          files.set(name, concat(chunks)); // kept even if the stream breaks later: the next try resumes
           got += value.length;
           onProgress(got, total);
         }
       } else {
         chunks.push(new Uint8Array(await res.arrayBuffer()));
-        got = chunks[0].length;
+        got += chunks[resumed ? 1 : 0].length;
         onProgress(got, total);
       }
       files.set(name, concat(chunks));
@@ -399,6 +527,12 @@ module.exports = {
   formatBytes,
   formatPartProgress,
   isValidPart,
+  PARTIAL_SUFFIX,
+  NETWORK_RETRY_STAGE,
+  partialName,
+  isTransientNetworkError,
+  backoffDelayMs,
+  formatCloudNotification,
   downloadParts,
   assembleParts,
   extractZip,

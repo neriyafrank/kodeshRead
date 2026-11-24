@@ -3601,18 +3601,26 @@ async function cloudLibraryTests() {
 
     // A local "GitHub release": serves the parts, counts requests, can corrupt / drop a part once.
     const hits = [];
+    const ranges = [];
     const behaviour = { corruptOnce: new Set(), dropOnce: new Set() };
     const server = http.createServer((req, res) => {
       const name = decodeURIComponent(req.url.split('/').pop());
       const i = manifest.parts.findIndex((p) => p.name === name);
       if (i < 0) return res.writeHead(404).end();
       hits.push(name);
+      ranges.push(req.headers.range || null);
       let body = slices[i];
       if (behaviour.corruptOnce.delete(name)) {
         body = Buffer.from(body);
         body[10] ^= 0xff;
       }
-      res.writeHead(200, { 'content-length': body.length });
+      const m = /^bytes=(\d+)-$/.exec(req.headers.range || '');
+      if (m) {
+        const from = Number(m[1]);
+        if (from >= body.length) return res.writeHead(416).end();
+        body = body.subarray(from);
+        res.writeHead(206, { 'content-length': body.length, 'content-range': `bytes ${from}-${from + body.length - 1}/${slices[i].length}` });
+      } else res.writeHead(200, { 'content-length': body.length });
       if (behaviour.dropOnce.delete(name)) {
         res.write(body.subarray(0, Math.floor(body.length / 2)));
         return setTimeout(() => res.destroy(), 10);
@@ -3630,18 +3638,40 @@ async function cloudLibraryTests() {
         size: (n) => (fs.existsSync(p(n)) ? fs.statSync(p(n)).size : null),
         remove: (n) => fs.rmSync(p(n), { force: true }),
         sha256: (n) => cloudRelease.sha256Files([p(n)]),
-        download: (url, n, onProgress) =>
+        rename: (a, b) => fs.renameSync(p(a), p(b)),
+        // Resumable like the app's backend: Range request from `resumeFrom`; bytes that arrived before a drop stay on disk.
+        download: (url, n, onProgress, isCancelled, resume) =>
           new Promise((resolve, reject) => {
-            http.get(url, (res) => {
-              if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-              const out = fs.createWriteStream(p(n));
-              let got = 0;
-              res.on('data', (c) => onProgress((got += c.length), Number(res.headers['content-length'])));
-              res.on('aborted', () => out.destroy(new Error('connection dropped')));
-              res.on('error', reject);
-              res.pipe(out);
-              out.on('finish', () => (res.complete ? resolve() : reject(new Error('connection dropped'))));
-              out.on('error', reject);
+            const from = (resume && resume.resumeFrom) || 0;
+            http.get(url, { headers: from > 0 ? { Range: `bytes=${from}-` } : {} }, (res) => {
+              if (res.statusCode !== 200 && res.statusCode !== 206) return reject(new Error(`HTTP ${res.statusCode}`));
+              const append = from > 0 && res.statusCode === 206;
+              const fd = fs.openSync(p(n), append ? 'a' : 'w');
+              let got = append ? from : 0;
+              const total = got + Number(res.headers['content-length']);
+              res.on('data', (c) => {
+                fs.writeSync(fd, c);
+                got += c.length;
+                onProgress(got, total);
+                if (isCancelled && isCancelled()) res.destroy(new Error('cancelled'));
+              });
+              let closed = false;
+              const close = () => {
+                if (!closed) fs.closeSync(fd);
+                closed = true;
+              };
+              res.on('aborted', () => {
+                close();
+                reject(new Error('connection dropped'));
+              });
+              res.on('error', (e) => {
+                close();
+                reject(e);
+              });
+              res.on('end', () => {
+                close();
+                resolve();
+              });
             }).on('error', reject);
           }),
         openRead: (n) => {
@@ -3722,8 +3752,8 @@ async function cloudLibraryTests() {
       });
       await check('multipart: cancel stops between chunks of work; the next run resumes', async () => {
         const { dir, io } = fresh('run-g');
-        let n = 0;
-        await assert.rejects(() => mp.downloadParts(io, manifest, { manifestUrl, isCancelled: () => ++n > 1 }), /cancelled/);
+        // cancel as soon as part 1 is complete (isCancelled is also polled while bytes arrive)
+        await assert.rejects(() => mp.downloadParts(io, manifest, { manifestUrl, isCancelled: () => fs.existsSync(path.join(dir, manifest.parts[0].name)) }), /cancelled/);
         assert.ok(fs.existsSync(path.join(dir, manifest.parts[0].name)));
         hits.length = 0;
         assert.deepStrictEqual(await mp.downloadParts(io, manifest, { manifestUrl }), { downloaded: 2, skipped: 1 });
@@ -3748,6 +3778,196 @@ async function cloudLibraryTests() {
         fs.writeFileSync(path.join(dir, 'core_library.db.zip'), zipBuf);
         await assert.rejects(() => mp.extractZip(io, { ...manifest, uncompressedDbBytes: dbBytes.length + 1 }, 'core_library.db.zip', 'core_library.db.tmp'), /שונה מהצפוי/);
         assert.ok(!fs.existsSync(path.join(dir, 'core_library.db.tmp')));
+      });
+      // ---- Resilient download: transient errors, backoff, partial files, foreground resume, keep-awake ----
+      const DNS = 'Unable to download a file: Unable to resolve host "github.com": No address associated with hostname';
+      /** Wraps an io so the first `plan.length` downloads fail: each entry = bytes of the part written first (or 0). */
+      const flaky = (io, plan, message = DNS) => {
+        let call = 0;
+        const calls = [];
+        return {
+          calls,
+          io: {
+            ...io,
+            download: async (url, n, onProgress, isCancelled, resume) => {
+              const step = plan[call++];
+              calls.push({ name: n, resumeFrom: resume.resumeFrom });
+              if (step === undefined) return io.download(url, n, onProgress, isCancelled, resume);
+              if (step > 0) {
+                const i = manifest.parts.findIndex((q) => n.startsWith(q.name));
+                const have = fs.existsSync(path.join(io.dir, n)) ? fs.readFileSync(path.join(io.dir, n)) : Buffer.alloc(0);
+                fs.writeFileSync(path.join(io.dir, n), Buffer.concat([have, slices[i].subarray(have.length, have.length + step)]));
+              }
+              throw new Error(message);
+            },
+          },
+        };
+      };
+      const withDir = (f) => ({ ...f.io, dir: f.dir });
+      const sleeps = () => {
+        const log = [];
+        return { log, sleep: async (ms) => void log.push(ms), total: () => log.reduce((a, b) => a + b, 0) };
+      };
+      await check('resilient download: transient error classification and exponential backoff schedule', () => {
+        for (const m of [DNS, 'ECONNRESET', 'connection dropped', 'socket hang up', 'Network request failed', 'java.net.SocketTimeoutException: timeout', 'HTTP 503', 'HTTP 429', 'Software caused connection abort', 'Unexpected end of stream']) {
+          assert.ok(mp.isTransientNetworkError(new Error(m)), m);
+        }
+        for (const m of ['HTTP 404', 'HTTP 403', 'cancelled', 'ENOSPC: no space left on device', 'ההורדה נכשלה']) assert.ok(!mp.isTransientNetworkError(new Error(m)), m);
+        assert.deepStrictEqual([0, 1, 2, 3, 4, 5].map((a) => mp.backoffDelayMs(a)), [2000, 4000, 8000, 16000, 30000, 30000]);
+        assert.strictEqual(mp.backoffDelayMs(2, 100, 1000), 400);
+      });
+      await check('resilient download: "Unable to resolve host" is retried with backoff and the part completes', async () => {
+        const f = fresh('run-r1');
+        const w = flaky(withDir(f), [0, 0]);
+        const sl = sleeps();
+        const events = [];
+        const r = await mp.downloadParts(w.io, manifest, { manifestUrl, sleep: sl.sleep, onRetry: (e) => events.push(e) });
+        assert.deepStrictEqual(r, { downloaded: 3, skipped: 0 });
+        assert.strictEqual(sl.total(), 2000 + 4000, `slept ${sl.log}`);
+        assert.deepStrictEqual(events.map((e) => [e.partIndex, e.attempt, e.maxAttempts, e.delayMs, e.background]), [[1, 1, 4, 2000, false], [1, 2, 4, 4000, false]]);
+        assert.ok(/Unable to resolve host/.test(events[0].error.message));
+        assert.deepStrictEqual(fs.readdirSync(f.dir).sort(), manifest.parts.map((q) => q.name).sort(), 'no .partial / .chunk left');
+      });
+      await check('resilient download: retries exhausted -> readable error, nothing deleted, next run still resumes', async () => {
+        const f = fresh('run-r2');
+        const w = flaky(withDir(f), [0, 0, 0, 0, 0, 0, 0]);
+        const sl = sleeps();
+        await assert.rejects(() => mp.downloadParts(w.io, manifest, { manifestUrl, sleep: sl.sleep }), /אחרי 5 ניסיונות.*תמשיך מאותה נקודה/);
+        assert.strictEqual(w.calls.length, 5, '1 try + 4 retries');
+        assert.strictEqual(sl.total(), 2000 + 4000 + 8000 + 16000);
+        assert.deepStrictEqual(await mp.downloadParts(f.io, manifest, { manifestUrl }), { downloaded: 3, skipped: 0 });
+      });
+      await check('resilient download: a non-transient error (404 / disk full) fails at once, without retry', async () => {
+        const f = fresh('run-r3');
+        const w = flaky(withDir(f), [0, 0], 'ENOSPC: no space left on device');
+        const sl = sleeps();
+        await assert.rejects(() => mp.downloadParts(w.io, manifest, { manifestUrl, sleep: sl.sleep }), /ENOSPC/);
+        assert.strictEqual(w.calls.length, 1);
+        assert.strictEqual(sl.log.length, 0);
+      });
+      await check('resilient download: an interrupted part keeps its .partial and the retry continues with a Range request', async () => {
+        const f = fresh('run-r4');
+        behaviour.dropOnce.add(manifest.parts[1].name); // server sends half of part 2, then the connection dies
+        hits.length = 0;
+        ranges.length = 0;
+        await assert.rejects(() => mp.downloadParts(f.io, manifest, { manifestUrl, networkRetries: 0, sleep: async () => undefined }), /connection dropped/);
+        const partial = path.join(f.dir, mp.partialName(manifest.parts[1].name));
+        assert.ok(fs.existsSync(partial), 'the partial file survives the interruption');
+        const kept = fs.readFileSync(partial);
+        assert.ok(kept.length > 0 && kept.length < slices[1].length && kept.equals(slices[1].subarray(0, kept.length)), 'a byte-exact prefix');
+        assert.ok(!fs.existsSync(path.join(f.dir, manifest.parts[1].name)), 'no half part under the final name');
+        assert.ok(fs.existsSync(path.join(f.dir, manifest.parts[0].name)), 'part 1 is complete');
+        hits.length = 0;
+        ranges.length = 0;
+        const r = await mp.downloadParts(f.io, manifest, { manifestUrl });
+        assert.deepStrictEqual(r, { downloaded: 2, skipped: 1 });
+        assert.deepStrictEqual(ranges, [`bytes=${kept.length}-`, null], 'resumed part 2 from its offset, part 3 from 0');
+        assert.deepStrictEqual(fs.readdirSync(f.dir).sort(), manifest.parts.map((q) => q.name).sort(), 'clean state after recovery');
+        for (const [i, q] of manifest.parts.entries()) assert.ok(fs.readFileSync(path.join(f.dir, q.name)).equals(slices[i]));
+      });
+      await check('resilient download: automatic retry resumes mid-part (server drop, no manual restart) and the budget refills on progress', async () => {
+        const f = fresh('run-r5');
+        behaviour.dropOnce.add(manifest.parts[0].name);
+        ranges.length = 0;
+        const sl = sleeps();
+        assert.deepStrictEqual(await mp.downloadParts(f.io, manifest, { manifestUrl, sleep: sl.sleep }), { downloaded: 3, skipped: 0 });
+        assert.ok(ranges[0] === null && /^bytes=\d+-$/.test(ranges[1]), ranges.join(' | '));
+        // 6 failed attempts that each made progress do not exhaust a budget of 2.
+        const g = fresh('run-r6');
+        const step = Math.floor(manifest.parts[0].sizeBytes / 8);
+        const w = flaky(withDir(g), [step, step, step, step, step, step]);
+        const r = await mp.downloadParts(w.io, manifest, { manifestUrl, networkRetries: 2, sleep: sl.sleep });
+        assert.deepStrictEqual(r, { downloaded: 3, skipped: 0 });
+        assert.deepStrictEqual(w.calls.slice(0, 4).map((c) => c.resumeFrom), [0, step, step * 2, step * 3]);
+      });
+      await check('resilient download: a failure while the app is backgrounded waits for the foreground and is not counted', async () => {
+        const f = fresh('run-r7');
+        const w = flaky(withDir(f), [0, 0, 0]);
+        const events = [];
+        let background = true;
+        let resumed = 0;
+        const r = await mp.downloadParts(w.io, manifest, {
+          manifestUrl,
+          networkRetries: 0, // would fail at once if the background failures were counted
+          sleep: async () => undefined,
+          isBackgrounded: () => background,
+          whenForeground: async () => {
+            resumed++;
+            background = resumed >= 3 ? false : true;
+          },
+          onRetry: (e) => events.push(e.background),
+        });
+        assert.deepStrictEqual(r, { downloaded: 3, skipped: 0 });
+        assert.strictEqual(resumed, 3);
+        assert.deepStrictEqual(events, [true, true, true]);
+      });
+      await check('resilient download: cancel keeps the partial; stale / oversize / corrupt partials self-heal', async () => {
+        const f = fresh('run-r8');
+        let n = 0;
+        await assert.rejects(() => mp.downloadParts(f.io, manifest, { manifestUrl, isCancelled: () => ++n > 4 }), /cancelled/);
+        assert.ok(!fs.existsSync(path.join(f.dir, manifest.parts[0].name + '.chunk')));
+        // oversize partial (cannot be a prefix) -> removed, part fetched from 0
+        const g = fresh('run-r9');
+        fs.writeFileSync(path.join(g.dir, mp.partialName(manifest.parts[0].name)), Buffer.alloc(manifest.parts[0].sizeBytes + 7, 1));
+        // stale partial next to a complete part -> removed
+        fs.writeFileSync(path.join(g.dir, manifest.parts[1].name), slices[1]);
+        fs.writeFileSync(path.join(g.dir, mp.partialName(manifest.parts[1].name)), Buffer.alloc(5, 2));
+        // full-size partial with wrong bytes (a bad resume) -> SHA mismatch -> restarted from 0
+        fs.writeFileSync(path.join(g.dir, mp.partialName(manifest.parts[2].name)), Buffer.alloc(manifest.parts[2].sizeBytes, 3));
+        assert.deepStrictEqual(await mp.downloadParts(g.io, manifest, { manifestUrl }), { downloaded: 2, skipped: 1 });
+        assert.deepStrictEqual(fs.readdirSync(g.dir).sort(), manifest.parts.map((q) => q.name).sort());
+        for (const [i, q] of manifest.parts.entries()) assert.ok(fs.readFileSync(path.join(g.dir, q.name)).equals(slices[i]));
+      });
+      await check('resilient download: stageCloudLibrary shows the Hebrew reconnect message and holds keep-awake through extraction', async () => {
+        const f = fresh('run-r10');
+        const w = flaky(withDir(f), [0]);
+        const seen = [];
+        const awake = [];
+        await mp.stageCloudLibrary(w.io, manifest, {
+          manifestUrl,
+          dbName: 'core_library.db.tmp',
+          sleep: async () => undefined,
+          report: (r) => seen.push(r),
+          keepAwake: async (fn) => {
+            awake.push('on');
+            try {
+              return await fn();
+            } finally {
+              awake.push('off');
+            }
+          },
+        });
+        const retry = seen.find((r) => r.stage === 'הרשת נותקה זמנית — מנסה להמשיך הורדה…');
+        assert.ok(retry && /ניסיון 1 מתוך 4/.test(retry.detail), JSON.stringify(retry));
+        assert.deepStrictEqual(awake, ['on', 'off']);
+        assert.ok(fs.readFileSync(path.join(f.dir, 'core_library.db.tmp')).equals(dbBytes));
+        // keep-awake is released when extraction fails too
+        const g = fresh('run-r11');
+        const off = [];
+        await assert.rejects(
+          () =>
+            mp.stageCloudLibrary(g.io, { ...manifest, uncompressedDbBytes: dbBytes.length + 1 }, {
+              manifestUrl,
+              dbName: 'core_library.db.tmp',
+              keepAwake: async (fn) => {
+                try {
+                  return await fn();
+                } finally {
+                  off.push('off');
+                }
+              },
+            }),
+          /שונה מהצפוי/,
+        );
+        assert.deepStrictEqual(off, ['off']);
+        assert.ok(!fs.existsSync(path.join(g.dir, 'core_library.db.tmp')) && !fs.existsSync(path.join(g.dir, 'core_library.db.zip')), 'no half-extracted DB / zip');
+      });
+      await check('resilient download: foreground-service notification text "מוריד ספרייה מהענן… 42%"', () => {
+        const n = mp.formatCloudNotification('מוריד…', 0.426, 'חלק 1 מתוך 3');
+        assert.deepStrictEqual([n.title, n.text, n.current, n.total], ['מוריד ספרייה מהענן… 42%', 'חלק 1 מתוך 3', 426, 1000]);
+        assert.strictEqual(mp.formatCloudNotification('מחלץ…', 1, null).title, 'מחלץ את הספרייה… 100%');
+        assert.strictEqual(mp.formatCloudNotification(mp.NETWORK_RETRY_STAGE, 0.5, 'x').title, mp.NETWORK_RETRY_STAGE);
+        assert.strictEqual(mp.formatCloudNotification('בודק…', null, null).total, 0);
       });
       await check('multipart: the in-memory backend (browser e2e) runs the same pipeline over fetch', async () => {
         const io = mp.createMemoryIO();

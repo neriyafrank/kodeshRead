@@ -21,10 +21,11 @@ import { useLibrary, useLibraryController } from '../db/LibraryContext';
 import { CORE_BUILD_DB } from '../db/library';
 import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
-import type { CloudManifest } from '../../shared/multipart';
-import { clearCloudParts, downloadAndStageCloud, isPreviewCloudDownload, stageCloudForPreview } from './cloudLibrary';
+import { formatCloudNotification, type CloudManifest } from '../../shared/multipart';
+import { clearCloudParts, CLOUD_KEEP_AWAKE_TAG, downloadAndStageCloud, isPreviewCloudDownload, stageCloudForPreview } from './cloudLibrary';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
 import * as importService from './importForegroundService';
+import { withKeepAwake } from './keepAwake';
 import {
   buildCoreFromFolder,
   deleteUserBooks,
@@ -77,6 +78,11 @@ type JobOutcome = string | Omit<JobResult, 'kind' | 'ok'>;
 
 /** Notification title / text of the running ingestion job ("מייבא ספרייה: 1,240 / 7,674"). */
 function notificationFor(job: JobProgress): [string, string, number, number] {
+  if (job.kind === 'download') {
+    // "מוריד ספרייה מהענן… 42%" with a per-mille progress bar
+    const n = formatCloudNotification(job.stage, job.fraction, job.detail);
+    return [n.title, n.text, n.current, n.total];
+  }
   const count = importService.formatCount(job.current, job.total);
   const title = job.phase === 'books' && count ? `${job.stage}: ${count}` : count ? `${job.stage} ${count}` : job.stage;
   const name = job.detail && job.detail.includes(' · ') ? job.detail.slice(job.detail.lastIndexOf(' · ') + 3) : (job.detail ?? '');
@@ -106,7 +112,9 @@ async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome
   const jobs = useLibraryJobs.getState();
   if (!jobs.start(kind, stage, { resumable })) return false;
   await activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch((e) => console.warn('keep-awake unavailable', e));
-  const stopService = resumable ? await startImportService(stage).catch((e) => (console.warn('import service failed', e), async () => undefined)) : null;
+  // Ingestion jobs and downloads run under the foreground service: Android 15/16 revokes the network of
+  // a backgrounded app (-> "Unable to resolve host") unless a foreground service keeps it alive.
+  const stopService = resumable || kind === 'download' ? await startImportService(stage).catch((e) => (console.warn('import service failed', e), async () => undefined)) : null;
   try {
     const out = await fn();
     useLibraryJobs.getState().finish(typeof out === 'string' ? { ok: true, message: out } : { ok: true, ...out });
@@ -259,7 +267,8 @@ export function useLibraryActions() {
           useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: null });
           if (preview) (globalThis as { __kodeshreadCloudInstalled?: string }).__kodeshreadCloudInstalled = version;
           else {
-            await ctl.installCore();
+            // The DB swap (drain readers, close, rename) must not be cut short by the device sleeping.
+            await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => ctl.installCore());
             clearCloudParts();
           }
           return `ספריית הליבה הותקנה מהענן (גרסה ${version}): ${manifest.bookCount.toLocaleString('he-IL')} ספרים`;

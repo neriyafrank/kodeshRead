@@ -156,6 +156,16 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > ערוך". Audit: `node scripts/audit-parallels.js [--db=…]` (also in `build-library.yml`). Self-tested (section 16),
 > e2e in `e2e:commentary` / `e2e:library` (sample `משנה שבת` excerpt).
 
+> **Resilient cloud download:** `shared/multipart.js` `downloadParts` writes each part to `<part>.partial` and renames it when it
+> has the manifest size; the partial is never deleted on an error, the retry continues it with an HTTP Range request
+> (`PartsIO.download(..., { resumeFrom, expectedBytes })`, native backend in `cloudLibrary.ts`: Range probe -> `.chunk` file ->
+> appended to the partial, also after a process death). Transient errors (`isTransientNetworkError`: "Unable to resolve host",
+> ECONNRESET, timeouts, 5xx) retry 4x with exponential backoff (`backoffDelayMs` 2/4/8/16 s; budget refills when bytes
+> arrived) and show `הרשת נותקה זמנית — מנסה להמשיך הורדה…`; a failure while `AppState` is not active (and no foreground
+> service) waits for `active` and is not counted. `runJob('download')` starts the import foreground service
+> (`formatCloudNotification`: "מוריד ספרייה מהענן… 42%"); assembly + extraction (`keepAwake` option) and the DB swap run under
+> `withKeepAwake` (`src/services/keepAwake.ts`, released in `finally`). Self-tested (section 12, "resilient download").
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

@@ -4,8 +4,12 @@
  *
  *   1. library-manifest.json (book count, sizes, SHA-256 of every part and of the whole zip)
  *   2. free-space check: zip + extracted DB + 500 MB
- *   3. parts are downloaded one after the other into Documents/core_library_parts/; a part that is
- *      already there with the right size + SHA-256 is skipped, so an interrupted download resumes
+ *   3. parts are downloaded one after the other into Documents/core_library_parts/ (as `<part>.partial`,
+ *      continued with an HTTP Range request after any interruption; transient network errors retry with
+ *      exponential backoff, and the run resumes when the app returns to the foreground). A part that is
+ *      already there with the right size + SHA-256 is skipped, so an interrupted download resumes.
+ *      The whole job runs under the Android foreground service (libraryActions.runJob) so Android keeps
+ *      the network alive in the background / with the screen off
  *   4. parts are appended into one zip in 1 MB chunks (each part deleted once appended), the zip is
  *      verified against fullZipSha256, then streamed (fflate) into SQLite/core_library.db.tmp
  *   5. the staged DB is checked (PRAGMA quick_check + meta) and installed by LibraryController.installCore()
@@ -17,15 +21,20 @@
 import Constants from 'expo-constants';
 import { Directory, File, FileMode, Paths } from 'expo-file-system';
 import { openDatabaseAsync } from 'expo-sqlite';
+import { AppState } from 'react-native';
 
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
 import { checkFreeSpace, cloudManifestUrl, createMemoryIO, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
 import { coreInfoFromMeta, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toAdapter } from '../db/library';
 import { CancelledError, useLibraryJobs } from '../state/libraryJobs';
+import * as importService from './importForegroundService';
+import { withKeepAwake } from './keepAwake';
 
 const DEFAULT_REPO = 'neriyafrank/kodeshRead';
 const PARTS_DIR = 'core_library_parts';
+/** Wake lock held through assembly + extraction (+ the DB swap in libraryActions). */
+export const CLOUD_KEEP_AWAKE_TAG = 'kodeshread-cloud-extract';
 
 export function defaultCloudManifestUrl(): string {
   const extra = Constants.expoConfig?.extra as { cloudManifestUrl?: string } | undefined;
@@ -81,6 +90,59 @@ function partsDir(): Directory {
   return dir;
 }
 
+/** True when the host answers a Range request with 206 (GitHub release assets do). */
+async function supportsRange(url: string): Promise<boolean> {
+  const res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  try {
+    void res.body?.cancel?.();
+  } catch {
+    // body already consumed / unsupported
+  }
+  return res.status === 206;
+}
+
+/** Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes it. */
+async function absorbChunk(chunk: File, target: File): Promise<void> {
+  if (!chunk.exists) return;
+  const size = chunk.size;
+  if (size > 0 && !target.exists) await chunk.move(target, { overwrite: true });
+  else if (size > 0) {
+    const start = target.size;
+    const input = chunk.open(FileMode.ReadOnly);
+    const output = target.open(FileMode.WriteOnly);
+    try {
+      output.offset = start;
+      for (let left = size; left > 0; ) {
+        const bytes = await input.readBytes(Math.min(1 << 20, left));
+        if (!bytes.length) break;
+        await output.writeBytes(bytes);
+        left -= bytes.length;
+      }
+    } finally {
+      input.close();
+      output.close();
+    }
+  }
+  if (chunk.exists) chunk.delete();
+}
+
+/** The OS may have revoked the network: only when no foreground service keeps the app alive. */
+const isBackgrounded = () => AppState.currentState !== 'active' && !importService.isActive();
+
+/** Resolves once the app is in the foreground again (or the job was cancelled). */
+function whenForeground(isCancelled: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    if (AppState.currentState === 'active') return resolve();
+    const done = () => {
+      sub.remove();
+      clearInterval(poll);
+      resolve();
+    };
+    const sub = AppState.addEventListener('change', (s) => s === 'active' && done());
+    const poll = setInterval(() => isCancelled() && done(), 1000);
+  });
+}
+
 /** expo-file-system backend of shared/multipart.js. Parts live in Documents/core_library_parts. */
 export function nativePartsIO(isCancelled: () => boolean): PartsIO {
   const dir = partsDir();
@@ -95,17 +157,37 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
       if (f.exists) f.delete();
     },
     sha256: async (name) => (await file(name).digest('SHA-256')).toLowerCase(),
-    download: async (url, name, onProgress) => {
+    rename: async (from, to) => {
+      const dst = file(to);
+      if (dst.exists) dst.delete();
+      await file(from).move(dst, { overwrite: true }); // File.move() is async: always awaited
+    },
+    download: async (url, name, onProgress, _isCancelled, resume) => {
       const target = file(name);
-      if (target.exists) target.delete();
-      const task = File.createDownloadTask(url, target, {
+      const chunk = new File(dir, `${name}.chunk`);
+      const expected = resume?.expectedBytes ?? 0;
+      // A chunk left by a process death continues exactly where the target ends.
+      await absorbChunk(chunk, target);
+      let from = target.exists ? target.size : 0;
+      if (from > 0 && !(await supportsRange(url))) {
+        target.delete();
+        from = 0;
+      }
+      const task = File.createDownloadTask(url, chunk, {
+        headers: from > 0 ? { Range: `bytes=${from}-` } : undefined,
         onProgress: ({ bytesWritten, totalBytes }) => {
           if (isCancelled()) task.cancel();
-          onProgress(bytesWritten, totalBytes);
+          onProgress(from + bytesWritten, expected || from + totalBytes);
         },
       });
-      const got = await task.downloadAsync();
-      if (!got || !target.exists) throw new Error('ההורדה נכשלה');
+      let got: File | null = null;
+      try {
+        got = await task.downloadAsync();
+      } finally {
+        // Whatever arrived before an error is a valid prefix: keep it, the retry continues after it.
+        await absorbChunk(chunk, target).catch((e) => console.warn('could not keep the partial download', e));
+      }
+      if (!got) throw new Error('ההורדה נכשלה');
     },
     openRead: (name) => {
       const f = file(name);
@@ -180,7 +262,15 @@ export async function downloadAndStageCloud(manifest: CloudManifest, manifestUrl
   try {
     report({ stage: 'מוריד…', fraction: 0, detail: null });
     try {
-      await stageCloudLibrary(io, manifest, { manifestUrl, dbName: CORE_TMP_DB, isCancelled: cancelled, report });
+      await stageCloudLibrary(io, manifest, {
+        manifestUrl,
+        dbName: CORE_TMP_DB,
+        isCancelled: cancelled,
+        report,
+        isBackgrounded,
+        whenForeground: () => whenForeground(cancelled),
+        keepAwake: (fn) => withKeepAwake(CLOUD_KEEP_AWAKE_TAG, fn),
+      });
     } catch (e) {
       if (cancelled()) throw new CancelledError();
       throw e;

@@ -31,7 +31,20 @@ export interface PartsIO {
   size(name: string): number | null | Promise<number | null>;
   remove(name: string): void | Promise<void>;
   sha256(name: string): Promise<string>;
-  download(url: string, name: string, onProgress: (bytesWritten: number, totalBytes: number) => void, isCancelled?: () => boolean): Promise<void>;
+  /** Moves `from` over `to` (the finished `.partial` -> the part name). */
+  rename(from: string, to: string): void | Promise<void>;
+  /**
+   * Downloads into `name`. `resume.resumeFrom > 0`: `name` already holds that many bytes of the file and the
+   * download continues after them (HTTP Range); bytes received before an error must stay in `name`.
+   * `onProgress` reports the absolute bytes of the file.
+   */
+  download(
+    url: string,
+    name: string,
+    onProgress: (bytesWritten: number, totalBytes: number) => void,
+    isCancelled?: () => boolean,
+    resume?: { resumeFrom: number; expectedBytes: number },
+  ): Promise<void>;
   openRead(name: string): PartReader | Promise<PartReader>;
   openWrite(name: string, append: boolean): PartWriter | Promise<PartWriter>;
 }
@@ -59,10 +72,36 @@ export function checkFreeSpace(m: CloudManifest, freeBytes: number | null): { ok
 export function formatBytes(n: number): string;
 export function formatPartProgress(p: { partIndex: number; partCount: number; doneBytes: number; totalBytes: number }): string;
 export function isValidPart(io: PartsIO, part: CloudPart): Promise<boolean>;
+export interface RetryEvent {
+  partIndex: number;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error: unknown;
+  /** The failure happened while the app was not in the foreground (not counted as an attempt). */
+  background: boolean;
+}
+export interface ResilienceOptions {
+  /** Corrupt-part attempts (default 2). */
+  retries?: number;
+  /** Transient network retries per stall (default 4), exponential backoff. */
+  networkRetries?: number;
+  backoffBaseMs?: number;
+  backoffCapMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  isBackgrounded?: () => boolean;
+  whenForeground?: () => Promise<void>;
+}
+export const PARTIAL_SUFFIX: string;
+export const NETWORK_RETRY_STAGE: string;
+export function partialName(name: string): string;
+export function isTransientNetworkError(e: unknown): boolean;
+export function backoffDelayMs(attempt: number, baseMs?: number, capMs?: number): number;
+export function formatCloudNotification(stage: string, fraction: number | null, detail: string | null): { title: string; text: string; current: number; total: number };
 export function downloadParts(
   io: PartsIO,
   manifest: CloudManifest,
-  opts: { manifestUrl: string; retries?: number; onProgress?: (p: PartProgress) => void; isCancelled?: () => boolean },
+  opts: ResilienceOptions & { manifestUrl: string; onRetry?: (e: RetryEvent) => void; onProgress?: (p: PartProgress) => void; isCancelled?: () => boolean },
 ): Promise<{ downloaded: number; skipped: number }>;
 export function assembleParts(
   io: PartsIO,
@@ -82,11 +121,12 @@ export function createMemoryIO(opts?: { fetch?: typeof fetch }): PartsIO & { fil
 export function stageCloudLibrary(
   io: PartsIO,
   manifest: CloudManifest,
-  opts: {
+  opts: ResilienceOptions & {
     manifestUrl: string;
     zipName?: string;
     dbName?: string;
-    retries?: number;
+    /** Wraps assembly + extraction (wake lock); must run and await `fn`. */
+    keepAwake?: (fn: () => Promise<void>) => Promise<void>;
     isCancelled?: () => boolean;
     report?: (p: { stage: string; fraction: number | null; detail: string | null }) => void;
   },
