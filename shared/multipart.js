@@ -19,7 +19,10 @@
  */
 'use strict';
 
-const CLOUD_RELEASE_TAG = 'library-latest';
+const editions = require('./editions');
+
+/** Release tag of the full edition (the original, backwards-compatible tag). The classic edition: shared/editions.js. */
+const CLOUD_RELEASE_TAG = editions.EDITIONS.full.tag;
 const CLOUD_MANIFEST_NAME = 'library-manifest.json';
 const CLOUD_ZIP_NAME = 'core_library.db.zip';
 const CLOUD_DB_NAME = 'core_library.db';
@@ -35,9 +38,9 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const partName = (n) => `${CLOUD_ZIP_NAME}.part-${String(n).padStart(2, '0')}`;
 const PART_NAME_RE = /^core_library\.db\.zip\.part-(\d{2,})$/;
 
-/** URL of the manifest of the repository's `library-latest` release. */
-function cloudManifestUrl(repo) {
-  return `https://github.com/${repo}/releases/download/${CLOUD_RELEASE_TAG}/${CLOUD_MANIFEST_NAME}`;
+/** URL of the manifest of an edition's release (`library-latest` = full, the default; `library-classic-latest` = classic). */
+function cloudManifestUrl(repo, edition = 'full') {
+  return editions.editionManifestUrl(repo, edition);
 }
 
 /** Asset URL of a part, next to the manifest. */
@@ -80,6 +83,7 @@ function validateCloudManifest(m) {
     version: m.version,
     sourceRepo: m.sourceRepo ? String(m.sourceRepo) : null,
     scope: m.scope ? String(m.scope) : null,
+    edition: editions.editionOfManifest(m),
     builtAt: m.builtAt ? String(m.builtAt) : null,
     bookCount: int('bookCount'),
     paragraphCount: int('paragraphCount'),

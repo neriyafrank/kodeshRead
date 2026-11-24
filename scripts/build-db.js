@@ -295,6 +295,7 @@ async function main() {
     built_at: builtAt,
     source: args.source === 'sample' || args.source === 'full' ? args.source : path.basename(args.sourceDir),
     script_version: SCHEMA_VERSION,
+    scope: args.scope || '',
     books: counts.books,
     categories: counts.categories,
     paragraphs: counts.paragraphs,

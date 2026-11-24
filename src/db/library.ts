@@ -74,6 +74,8 @@ export interface CoreInfo {
   /** Size of core_library.db in bytes (null on web). */
   size: number | null;
   scriptVersion: number;
+  /** build-db.js --scope the library was built with (`classical_full` | `all`); null = unknown (older / on-device builds). */
+  scope: string | null;
 }
 
 /** Meta row values as a CoreInfo, or null when this is not a valid core library. */
@@ -88,6 +90,7 @@ export function coreInfoFromMeta(meta: Record<string, string> | null, size: numb
     links: Number(meta.links ?? 0),
     size,
     scriptVersion: Number(meta.script_version ?? 0),
+    scope: meta.scope ? meta.scope : null,
   };
 }
 

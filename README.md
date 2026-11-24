@@ -485,10 +485,17 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
 ## Cloud library (GitHub Actions, multi-part release)
 
 No PC needed: the **Build cloud library** workflow (`.github/workflows/build-library.yml`, *Run workflow*) indexes
-the Otzaria library on a GitHub runner and publishes it to the `library-latest` release.
+the Otzaria library on a GitHub runner and publishes **two editions**, each to its own release (they never overwrite each other):
 
-Inputs: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`) and `library_scope`
-(`classical_full` default: every folder except the contemporary authors' `מחברי זמננו`; or `all`).
+| Edition | Scope | Release tag |
+| --- | --- | --- |
+| **ספרייה מלאה (כולל אחרוני זמננו)** | `all` | `library-latest` (unchanged name / assets) |
+| **ספרייה בסיסית (קלאסית, ללא אחרוני זמננו)** | `classical_full` | `library-classic-latest` |
+
+Inputs: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`) and `editions`
+(`both` default: one run builds and publishes both; or `full` / `classic`). `starter-latest` is exported once per run.
+The library manager lists both editions with their live size and book count, badges the installed one (`מותקן כעת`),
+checks for updates against the installed edition's own release, and switches editions with the same resumable download.
 
 Pipeline (each step deletes its input first, so the runner never holds two multi-GB copies; 35 GB free are enforced):
 `scripts/ci/fetch-otzaria-source.sh` (release zip(s) of the source repo, else the repository tarball streamed into `tar`)

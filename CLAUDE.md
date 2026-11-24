@@ -156,6 +156,16 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > ערוך". Audit: `node scripts/audit-parallels.js [--db=…]` (also in `build-library.yml`). Self-tested (section 16),
 > e2e in `e2e:commentary` / `e2e:library` (sample `משנה שבת` excerpt).
 
+> **Two cloud editions (basic / full):** `shared/editions.js` (pure) maps `classic` (`classical_full`, without the `מחברי זמננו` /
+> `אחרוני זמננו` folders; release `library-classic-latest`) and `full` (`all`; release `library-latest`, unchanged tag and asset names)
+> to scopes, tags and manifest URLs. `build-library.yml` (`editions`: `both` default | `full` | `classic`; matrix from
+> `scripts/ci/edition-matrix.js`, Node built-ins only) builds each edition in its own job and publishes to its own tag, so they never
+> overwrite each other; `starter-latest` is exported once per run (classic build, else full). Each build runs `cloud-release.js
+> check-edition` and `audit-parallels.js`. Manifests carry `edition` + `releaseTag`; `meta.scope` in the DB and
+> `libraryStore.installedCloud` tell the app which edition is installed (`editions.installedEdition`). `CloudLibraryCard.tsx` shows both
+> editions (live size + book count from each manifest, `מותקן כעת` badge, `קיים עדכון בענן` only for the installed edition's own release,
+> switching confirmed; `LibraryContext.installCore` remaps open tabs by title + folder). Self-tested (section 12 "editions"), `e2e:library`.
+
 > **Resilient cloud download:** `shared/multipart.js` `downloadParts` writes each part to `<part>.partial` and renames it when it
 > has the manifest size; the partial is never deleted on an error, the retry continues it with an HTTP Range request
 > (`PartsIO.download(..., { resumeFrom, expectedBytes })`, native backend in `cloudLibrary.ts`: Range probe -> `.chunk` file ->

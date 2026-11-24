@@ -244,8 +244,9 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
                 const core = await openCoreDatabase({ strict: true });
                 if (!core) throw new Error('core_library.db is not a valid library after the swap');
                 const next = await buildLibrary(core, lib.user, null, ++generation.current);
-                // Starter books -> the same books of the full library: open tabs follow them.
-                if (lib.starter) remapTabs(lib.bookIndex, next.bookIndex);
+                // Starter books -> the same books of the full library, or one edition -> the other
+                // (classic <-> full): open tabs follow their books (same title + folder).
+                if (lib.starter || lib.core) remapTabs(lib.bookIndex, next.bookIndex);
                 publish(next);
               },
               warn: (w) => console.warn(`library install: ${w.step} failed (ignored)`, w.message),

@@ -23,7 +23,7 @@ tmp="$(mktemp -d "${RUNNER_TEMP:-/tmp}/otzaria-dl.XXXXXX")"
 mkdir -p "$tmp/dl"
 trap 'rm -rf "$tmp"' EXIT
 
-modern=('מחברי זמננו' 'מחברי זמנינו')
+modern=('מחברי זמננו' 'מחברי זמנינו' 'אחרוני זמננו' 'אחרוני זמנינו')
 zip_excludes=('links/*' '*/links/*' '*.pdf')
 tar_excludes=(--exclude='*/links')
 if [[ "$scope" == "classical_full" ]]; then

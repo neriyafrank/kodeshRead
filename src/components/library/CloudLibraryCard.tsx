@@ -1,12 +1,13 @@
 /**
- * "הורד ספרייה מוכנה מהענן": the multi-part cloud library (GitHub Release `library-latest`).
- * Reads library-manifest.json, shows what will be downloaded (books, size, build date), warns when
+ * "ספרייה מוכנה מהענן": the multi-part cloud library, two editions (GitHub Releases `library-latest` = full and
+ * `library-classic-latest` = classic). Reads each library-manifest.json, shows what will be downloaded (books, size, build date), warns when
  * the free storage is below zip + extracted DB + 500 MB, and starts the resumable part download
  * (progress: "חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%" in the job card above).
  */
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { EDITION_IDS, EDITIONS, editionAction, installedEdition, type Edition } from '../../../shared/editions';
 import { formatBytes, type CloudManifest } from '../../../shared/multipart';
 import { useLibrary } from '../../db/LibraryContext';
 import { isWeb } from '../../db/library';
@@ -14,6 +15,7 @@ import { alignRight, isolateLtr } from '../../lib/direction';
 import { countPartsOnDisk, defaultCloudManifestUrl, fetchCloudManifest, isPreviewCloudDownload, storageVerdict } from '../../services/cloudLibrary';
 import { useLibraryActions } from '../../services/libraryActions';
 import { useLibraryJobs } from '../../state/libraryJobs';
+import { useLibrarySettings } from '../../state/libraryStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
 
 type State = { status: 'loading' } | { status: 'ready'; manifest: CloudManifest } | { status: 'error'; message: string };
@@ -25,27 +27,57 @@ const fmtDate = (iso: string | null) => {
 };
 
 /** Alert.alert is a no-op on react-native-web. */
-function confirmAnyway(message: string, onOk: () => void) {
+function confirmAnyway(title: string, message: string, ok: string, onOk: () => void, destructive = true) {
   if (Platform.OS === 'web') {
     if (typeof window !== 'undefined' && window.confirm(message)) onOk();
     return;
   }
-  Alert.alert('אין מספיק מקום פנוי', `${message}\n\nלהמשיך בכל זאת?`, [
+  Alert.alert(title, message, [
     { text: 'ביטול', style: 'cancel' },
-    { text: 'המשך', style: 'destructive', onPress: onOk },
+    { text: ok, style: destructive ? 'destructive' : 'default', onPress: onOk },
   ]);
 }
 
+/** Installed edition of the core library: its own meta.scope, else what this app installed (see shared/editions.js). */
+export function useInstalledEdition(): Edition | null {
+  const lib = useLibrary();
+  const recorded = useLibrarySettings((x) => x.installedCloud);
+  return installedEdition(lib.core?.info ?? null, recorded);
+}
+
+/**
+ * "ספרייה מוכנה מהענן": both full-library editions (GitHub Releases `library-classic-latest` and
+ * `library-latest`), each with its live size and book count from its own library-manifest.json, the
+ * installed one badged "מותקן כעת". Downloading the other edition switches to it (same resumable
+ * downloader + atomic swap; tabs, settings and personal books stay).
+ */
 export function CloudLibraryCard() {
+  const s = useThemedStyles(createStyles);
+  return (
+    <View style={s.wrap} testID="cloud-library-card">
+      <Text style={s.title}>ספרייה מוכנה מהענן</Text>
+      <Text style={s.body}>
+        ספריית אוצריא מאונדקסת לחיפוש, נבנית בענן ומורדת במספר חלקים. בחרו מהדורה: הבסיסית קטנה ומהירה יותר, והמלאה כוללת גם את אחרוני זמננו. אפשר להפסיק ולהמשיך: חלקים שכבר ירדו תקינים לא יורדים שוב.
+      </Text>
+      {EDITION_IDS.map((id) => (
+        <EditionCard key={id} edition={id} />
+      ))}
+      {isWeb && !isPreviewCloudDownload() ? <Text style={s.hint}>ההורדה זמינה באפליקציית Android בלבד.</Text> : null}
+    </View>
+  );
+}
+
+function EditionCard({ edition }: { edition: Edition }) {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const lib = useLibrary();
   const actions = useLibraryActions();
   const busy = useLibraryJobs((x) => !!x.job);
-  const manifestUrl = defaultCloudManifestUrl();
+  const info = EDITIONS[edition];
+  const manifestUrl = defaultCloudManifestUrl(edition);
   const [state, setState] = useState<State>({ status: 'loading' });
-
   const [attempt, setAttempt] = useState(0);
+  const installed = useInstalledEdition();
 
   // Subscribes to the manifest fetch; state is only set from the promise callbacks.
   useEffect(() => {
@@ -65,55 +97,88 @@ export function CloudLibraryCard() {
   };
 
   const manifest = state.status === 'ready' ? state.manifest : null;
-  const installed = lib.core?.info?.version ?? null;
-  const upToDate = !!(manifest && installed && manifest.version === installed);
+  const installedVersion = lib.core?.info?.version ?? null;
+  const action = manifest ? editionAction({ installedEdition: installed, installedVersion, manifest: { ...manifest, edition } }) : 'install';
+  const isInstalled = installed === edition;
   const verdict = manifest ? storageVerdict(manifest) : null;
   const onDisk = manifest ? countPartsOnDisk(manifest) : 0;
   const canDownload = !busy && (!isWeb || isPreviewCloudDownload());
 
+  const go = () => manifest && void actions.downloadCloud({ ...manifest, edition }, manifestUrl);
   const start = () => {
     if (!manifest) return;
-    const go = () => void actions.downloadCloud(manifest, manifestUrl);
-    if (verdict && !verdict.ok) confirmAnyway(verdict.message ?? '', go);
-    else go();
+    const proceed = () => {
+      if (action === 'switch') {
+        confirmAnyway(
+          'מעבר בין מהדורות',
+          `הספרייה המותקנת (${installed ? EDITIONS[installed].title : ''}) תוחלף ב"${info.title}". הלשוניות, ההגדרות והספרים האישיים יישמרו.`,
+          'עבור',
+          go,
+          false,
+        );
+      } else go();
+    };
+    if (verdict && !verdict.ok) confirmAnyway('אין מספיק מקום פנוי', `${verdict.message ?? ''}\n\nלהמשיך בכל זאת?`, 'המשך', proceed);
+    else proceed();
   };
 
-  return (
-    <View style={s.card} testID="cloud-library-card">
-      <Text style={s.title}>ספרייה מוכנה מהענן</Text>
-      <Text style={s.body}>ספריית אוצריא מאונדקסת לחיפוש, נבנית בענן ומורדת במספר חלקים. אפשר להפסיק ולהמשיך: חלקים שכבר ירדו תקינים לא יורדים שוב.</Text>
+  const label =
+    action === 'update' ? '☁︎  עדכן ספרייה' : action === 'switch' ? `☁︎  עבור ל${info.title}` : action === 'current' ? '☁︎  הורד שוב' : `☁︎  הורד ${info.title}`;
 
-      {state.status === 'loading' ? <ActivityIndicator color={c.accent} testID="cloud-loading" /> : null}
+  return (
+    <View style={[s.card, isInstalled && s.cardInstalled]} testID={`cloud-edition-${edition}`}>
+      <View style={s.head}>
+        <Text style={s.editionTitle} testID={`cloud-title-${edition}`}>
+          {info.title}
+        </Text>
+        {isInstalled ? (
+          <Text style={s.badge} testID={`cloud-installed-${edition}`}>
+            מותקן כעת
+          </Text>
+        ) : null}
+      </View>
+      <Text style={s.body}>{info.includes}</Text>
+
+      {state.status === 'loading' ? <ActivityIndicator color={c.accent} testID={`cloud-loading-${edition}`} /> : null}
       {state.status === 'error' ? (
         <View style={s.gap}>
-          <Text style={s.error} testID="cloud-error">
+          <Text style={s.error} testID={`cloud-error-${edition}`}>
             {state.message}
           </Text>
-          <Pressable onPress={retry} accessibilityRole="button" testID="cloud-retry">
+          <Pressable onPress={retry} accessibilityRole="button" testID={`cloud-retry-${edition}`}>
             <Text style={s.link}>נסה שוב</Text>
           </Pressable>
         </View>
       ) : null}
 
       {manifest ? (
-        <View style={s.info} testID="cloud-info">
-          <Row label="ספרים" value={manifest.bookCount.toLocaleString('he-IL')} />
-          <Row label="גודל הורדה" value={`${formatBytes(manifest.totalZipBytes)} · ${manifest.parts.length} חלקים`} testID="cloud-size" />
+        <View style={s.info} testID={`cloud-info-${edition}`}>
+          <Row label="ספרים" value={manifest.bookCount.toLocaleString('he-IL')} testID={`cloud-books-${edition}`} />
+          <Row label="גודל הורדה" value={`${formatBytes(manifest.totalZipBytes)} · ${manifest.parts.length} חלקים`} testID={`cloud-size-${edition}`} />
           <Row label="אחרי חילוץ" value={formatBytes(manifest.uncompressedDbBytes)} />
           <Row label="נבנתה" value={fmtDate(manifest.builtAt)} />
           <Row label="גרסה" value={`\u2066${manifest.version}\u2069`} />
-          {manifest.scope ? <Row label="היקף" value={manifest.scope === 'classical_full' ? 'ספרות קלאסית' : 'הכול'} /> : null}
         </View>
       ) : null}
 
-      {upToDate ? <Text style={s.ok}>✓ הגרסה המותקנת זהה לגרסה בענן</Text> : null}
-      {onDisk > 0 && manifest && !upToDate ? (
-        <Text style={s.hint} testID="cloud-resume-hint">
+      {isInstalled && action === 'current' ? <Text style={s.ok}>✓ הגרסה המותקנת זהה לגרסה בענן</Text> : null}
+      {isInstalled && action === 'update' ? (
+        <Text style={s.update} testID={`cloud-update-${edition}`}>
+          קיים עדכון בענן
+        </Text>
+      ) : null}
+      {action === 'switch' ? (
+        <Text style={s.hint} testID={`cloud-switch-hint-${edition}`}>
+          המעבר מחליף את הספרייה המותקנת; לשוניות, הגדרות וספרים אישיים נשמרים.
+        </Text>
+      ) : null}
+      {onDisk > 0 && manifest && action !== 'current' ? (
+        <Text style={s.hint} testID={`cloud-resume-hint-${edition}`}>
           {isolateLtr(`כבר ירדו ${onDisk} מתוך ${manifest.parts.length} חלקים — ההורדה תמשיך משם.`)}
         </Text>
       ) : null}
       {verdict && !verdict.ok ? (
-        <Text style={s.warn} testID="cloud-storage-warning">
+        <Text style={s.warn} testID={`cloud-storage-warning-${edition}`}>
           ⚠ {isolateLtr(verdict.message ?? '')}
         </Text>
       ) : null}
@@ -124,12 +189,11 @@ export function CloudLibraryCard() {
         style={({ pressed }) => [s.primary, (!canDownload || !manifest) && s.disabled, pressed && s.pressed]}
         accessibilityRole="button"
         accessibilityState={{ disabled: !canDownload || !manifest }}
-        testID="cloud-download"
+        testID={`cloud-download-${edition}`}
       >
-        <Text style={s.primaryText}>☁︎  הורד ספרייה מוכנה מהענן</Text>
-        {manifest ? <Text style={s.hintOnAccent}>{isolateLtr(`${formatBytes(manifest.totalZipBytes)} · ${manifest.parts.length} חלקים`)}</Text> : null}
+        <Text style={s.primaryText}>{label}</Text>
+        {manifest ? <Text style={s.hintOnAccent}>{isolateLtr(`${formatBytes(manifest.totalZipBytes)} · ${manifest.bookCount.toLocaleString('he-IL')} ספרים`)}</Text> : null}
       </Pressable>
-      {isWeb && !isPreviewCloudDownload() ? <Text style={s.hint}>ההורדה זמינה באפליקציית Android בלבד.</Text> : null}
     </View>
   );
 }
@@ -148,7 +212,13 @@ function Row({ label, value, testID }: { label: string; value: string; testID?: 
 
 const createStyles = (c: Palette) =>
   StyleSheet.create({
-    card: { backgroundColor: c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: c.border, padding: spacing.lg, gap: spacing.md, marginBottom: spacing.lg },
+    wrap: { gap: spacing.md, marginBottom: spacing.lg },
+    head: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: spacing.md },
+    editionTitle: { fontSize: 16, fontWeight: '800', color: c.text, flexShrink: 1, ...alignRight },
+    badge: { fontSize: 12, fontWeight: '700', color: c.surface, backgroundColor: c.accent, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 2, overflow: 'hidden' },
+    update: { color: c.accent, fontSize: 14, fontWeight: '700', ...alignRight },
+    cardInstalled: { borderColor: c.accent, borderWidth: 2 },
+    card: { backgroundColor: c.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: c.border, padding: spacing.lg, gap: spacing.md },
     title: { fontSize: 18, fontWeight: '800', color: c.text, ...alignRight },
     body: { fontSize: 14, lineHeight: 21, color: c.textMuted, ...alignRight },
     gap: { gap: spacing.xs },

@@ -7,6 +7,8 @@ export interface CloudPart {
 export interface CloudManifest {
   sourceRepo: string | null;
   scope: string | null;
+  /** 'classic' | 'full' (manifest field, else derived from `scope`); null for an unknown scope. */
+  edition: 'classic' | 'full' | null;
   version: string;
   builtAt: string | null;
   bookCount: number;
@@ -64,7 +66,7 @@ export const CLOUD_DB_NAME: string;
 export const FREE_SPACE_MARGIN: number;
 export const MAX_PART_BYTES: number;
 export function partName(n: number): string;
-export function cloudManifestUrl(repo: string): string;
+export function cloudManifestUrl(repo: string, edition?: 'classic' | 'full'): string;
 export function partUrl(manifestUrl: string, part: { name: string }): string;
 export function validateCloudManifest(m: unknown): CloudManifest;
 export function requiredFreeBytes(m: CloudManifest): number;

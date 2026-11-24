@@ -1,6 +1,7 @@
 /**
  * Multi-part cloud library: the pre-indexed core_library.db built by the "Build cloud library"
- * GitHub Action and published as `library-latest` (library-manifest.json + core_library.db.zip.part-NN).
+ * GitHub Action and published as `library-latest` (full edition) or `library-classic-latest` (classic edition,
+ * without אחרוני זמננו): library-manifest.json + core_library.db.zip.part-NN (shared/editions.js).
  *
  *   1. library-manifest.json (book count, sizes, SHA-256 of every part and of the whole zip)
  *   2. free-space check: zip + extracted DB + 500 MB
@@ -23,6 +24,7 @@ import { Directory, File, FileMode, Paths } from 'expo-file-system';
 import { openDatabaseAsync } from 'expo-sqlite';
 import { AppState } from 'react-native';
 
+import type { Edition } from '../../shared/editions';
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
 import { checkFreeSpace, cloudManifestUrl, createMemoryIO, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
@@ -36,9 +38,11 @@ const PARTS_DIR = 'core_library_parts';
 /** Wake lock held through assembly + extraction (+ the DB swap in libraryActions). */
 export const CLOUD_KEEP_AWAKE_TAG = 'kodeshread-cloud-extract';
 
-export function defaultCloudManifestUrl(): string {
-  const extra = Constants.expoConfig?.extra as { cloudManifestUrl?: string } | undefined;
-  return extra?.cloudManifestUrl || cloudManifestUrl(DEFAULT_REPO);
+/** Manifest URL of an edition's release: `library-latest` (full) / `library-classic-latest` (classic). */
+export function defaultCloudManifestUrl(edition: Edition = 'full'): string {
+  const extra = Constants.expoConfig?.extra as { cloudManifestUrl?: string; cloudClassicManifestUrl?: string } | undefined;
+  const override = edition === 'classic' ? extra?.cloudClassicManifestUrl : extra?.cloudManifestUrl;
+  return override || cloudManifestUrl(DEFAULT_REPO, edition);
 }
 
 /** Fetches + validates library-manifest.json. */

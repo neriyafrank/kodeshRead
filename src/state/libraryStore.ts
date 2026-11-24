@@ -56,6 +56,9 @@ interface LibrarySettingsState {
   manifestUrl: string | null;
   /** The first-launch onboarding card was dismissed. */
   onboardingDismissed: boolean;
+  /** Cloud edition (shared/editions.js) the app last installed, with its version (see installedEdition()). */
+  installedCloud: { edition: 'classic' | 'full'; version: string } | null;
+  setInstalledCloud: (edition: 'classic' | 'full', version: string) => void;
   setManifestUrl: (url: string | null) => void;
   dismissOnboarding: (dismissed?: boolean) => void;
 }
@@ -66,6 +69,8 @@ export const useLibrarySettings = create<LibrarySettingsState>()(
     (set) => ({
       manifestUrl: null,
       onboardingDismissed: false,
+      installedCloud: null,
+      setInstalledCloud: (edition, version) => set({ installedCloud: { edition, version } }),
       setManifestUrl: (url) => set({ manifestUrl: url && url.trim() ? url.trim() : null }),
       dismissOnboarding: (dismissed = true) => set({ onboardingDismissed: dismissed }),
     }),
