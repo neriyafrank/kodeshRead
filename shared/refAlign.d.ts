@@ -40,6 +40,8 @@ export function inlineUnitWord(parentTitle: string, categoryPath?: string | null
 /** Paragraph number of a Bavli "שורה N" sub-heading (1-based body paragraph of the amud), or null. */
 export function paragraphNumber(text: string | null | undefined): number | null;
 export function markerKey(text: string | null | undefined): string | null;
+export function seifMarkerKey(text: string | null | undefined): string | null;
+export function headingLeadText(cleanText: string | null | undefined, title: string): string | null;
 /** `ordinal: false`: markers only (never "n-th line = verse n"). */
 export function inlineUnits(contentLines: { line: number; text: string }[], unit: { start: number; end: number }, opts?: { ordinal?: boolean }): Map<string, { start: number; end: number }>;
 export function alignUnits(

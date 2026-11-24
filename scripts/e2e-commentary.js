@@ -47,11 +47,30 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  const tid = (id) => page.locator(`[data-testid="${id}"]`);
+  const rawTid = (id) => page.locator(`[data-testid="${id}"]`);
+  // Picking a commentator collapses the chip strip (reading space), so a flow that taps chips one after
+  // another first brings the strip back with the toolbar toggle (a no-op while it is already open).
+  const ensureStrip = async () => {
+    if (!(await rawTid('commentary-chipbar').count())) {
+      await rawTid('commentary-tools-toggle').click();
+      await rawTid('commentary-chipbar').waitFor();
+    }
+  };
+  const tid = (id) => {
+    const loc = rawTid(id);
+    if (!/^commentary-chip(-all|-parallel)?$/.test(id)) return loc;
+    return new Proxy(loc, {
+      get(target, prop) {
+        const v = target[prop];
+        if (['click', 'getAttribute', 'boundingBox', 'innerText'].includes(prop)) return async (...a) => (await ensureStrip(), v.apply(target, a));
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+  };
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
   const step = (name) => console.log(`✓ ${name}`);
   // Chip bar texts, right to left (הכל is the right-most chip).
-  const chipTexts = async () =>
+  const chipTexts = async () => (await ensureStrip(), true) &&
     (await page.locator('[data-testid="commentary-chip"], [data-testid="commentary-chip-all"]').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })))).sort((a, b) => b.x - a.x).map((p) => p.t);
 
   try {
@@ -98,9 +117,10 @@ try {
     assert.ok((await tid('commentary-block').first().innerText()).includes('דף ב. · שורה א'), await tid('commentary-block').first().innerText());
     // The "שורה א" sub-heading is the block's label, not a standalone row in the drawer body.
     assert.ok(!(await tid('commentary-group').first().innerText()).replace('שורה א', '').includes('שורה'), 'no שורה heading rows');
-    // Two commentators: no tools header and no toggle for it.
-    assert.strictEqual(await tid('commentary-tools-toggle').count(), 0);
+    // Two commentators: no filter row (the toolbar toggle still shows / hides the chip strip).
+    assert.strictEqual(await tid('commentary-tools-toggle').count(), 1);
     assert.strictEqual(await tid('commentary-tools').count(), 0);
+    assert.strictEqual(await tid('commentary-chipstrip').count(), 1, 'nothing selected: the strip is there to pick from');
     // The chip bar is just הכל + the commentators (no mode buttons).
     assert.deepStrictEqual(await chipTexts(), ['הכל', 'רש"י', 'תוספות']);
     await shot('2-drawer');
@@ -218,6 +238,11 @@ try {
     // Compact chrome: drawer title row and chip strip.
     const titleH = (await tid('commentary-title').evaluate((e) => e.parentElement.getBoundingClientRect().height));
     assert.ok(titleH <= 40, `single-line title bar (${titleH}px)`);
+    // Picking רש"י collapsed the chip strip (reading space); the toolbar toggle brings it back.
+    assert.strictEqual(await tid('commentary-chipstrip').count(), 0, 'strip collapsed after the selection');
+    assert.strictEqual(await tid('commentary-tools-toggle').getAttribute('aria-expanded'), 'false');
+    await tid('commentary-tools-toggle').click();
+    await tid('commentary-chipbar').waitFor();
     const chipH = (await tid('commentary-chip').first().boundingBox()).height;
     assert.ok(chipH <= 30, `slim chips (${chipH}px)`);
     await shot('3z-focus');
@@ -372,8 +397,18 @@ try {
     assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 11, 'הכל + 2 kind pills + 8 commentators, no mode buttons');
     const allBox = await tid('commentary-chip-all').boundingBox();
     assert.ok(allBox.x + allBox.width <= 401 && allBox.x > 200, `הכל visible at the right edge (${allBox.x})`);
-    const chip = (name) => page.locator('[data-testid="commentary-chip"]', { hasText: name });
+    const chip = (name) => {
+      const loc = page.locator('[data-testid="commentary-chip"]', { hasText: name });
+      return new Proxy(loc, {
+        get(target, prop) {
+          const v = target[prop];
+          if (['click', 'getAttribute', 'boundingBox', 'scrollIntoViewIfNeeded'].includes(prop)) return async (...a) => (await ensureStrip(), v.apply(target, a));
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+    };
     const longPress = async (name) => {
+      await ensureStrip();
       await chip(name).scrollIntoViewIfNeeded();
       const b = await chip(name).boundingBox();
       await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
@@ -450,6 +485,66 @@ try {
     }
     await tid('commentary-chip-all').click();
     step('selection stays while moving between verses');
+
+    // --- the toolbar toggle controls the chip strip + the filter row together ---------------------------
+    const stripShown = () => rawTid('commentary-chipbar').count().then((n) => n === 1);
+    const filterShown = () => rawTid('commentary-filter').count().then((n) => n === 1);
+    const settle = () => page.waitForTimeout(300); // the filter row animates away
+    await tid('commentary-chip-all').click(); // הכל: back to the default state
+    await settle();
+    assert.ok(await stripShown(), 'הכל: the strip is there to pick from');
+    assert.ok(!(await filterShown()), 'the filter row starts folded');
+    await toolsToggle.click(); // open both
+    await tid('commentary-filter').waitFor();
+    assert.ok((await stripShown()) && (await filterShown()), 'toggle opens the strip and the filter row');
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'true', 'toolbar button is active while the panel is open');
+    // 1. selecting a commentator collapses BOTH the chip strip and the filter row
+    await rawTid('commentary-chip').filter({ hasText: 'רש"י' }).click();
+    await rawTid('commentary-chipbar').waitFor({ state: 'detached' });
+    await settle();
+    assert.ok(!(await stripShown()) && !(await filterShown()), 'picking one commentator collapses the strip and the search bar');
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'false', 'toolbar button shows the collapsed state');
+    assert.strictEqual(await rawTid('commentary-focus-row').count(), 1, 'the reading area stays (focused commentator row)');
+    await shot('7d-collapsed');
+    // 2. the toolbar button expands both again, and collapses both
+    await toolsToggle.click();
+    await tid('commentary-filter').waitFor();
+    assert.ok((await stripShown()) && (await filterShown()), 'toolbar button expands the chip strip and the search bar');
+    assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'true');
+    await toolsToggle.click();
+    await rawTid('commentary-chipbar').waitFor({ state: 'detached' });
+    await settle();
+    assert.ok(!(await stripShown()) && !(await filterShown()), 'and collapses both');
+    // 3. the "?" hint explains the long-press multi-select
+    await toolsToggle.click();
+    await rawTid('commentary-chipbar').waitFor();
+    assert.strictEqual(await rawTid('commentary-help-hint').count(), 0, 'hint hidden by default');
+    await rawTid('commentary-help').click();
+    await rawTid('commentary-help-hint').waitFor();
+    assert.strictEqual((await rawTid('commentary-help-hint').innerText()).trim(), 'לחיצה ארוכה על פרשן מאפשרת לבחור אותו בנוסף לפרשנים אחרים');
+    const hintStyle = await rawTid('commentary-help-hint').evaluate((e) => ({ dir: getComputedStyle(e.firstElementChild || e).direction, align: getComputedStyle(e.firstElementChild || e).textAlign, h: e.getBoundingClientRect().height }));
+    assert.ok(hintStyle.h <= 44 && (hintStyle.align === 'right' || hintStyle.align === 'start'), JSON.stringify(hintStyle));
+    await shot('7e-help-hint');
+    await rawTid('commentary-help-hint').click(); // dismiss on tap
+    await rawTid('commentary-help-hint').waitFor({ state: 'detached' });
+    await rawTid('commentary-help').click();
+    await rawTid('commentary-help-hint').waitFor();
+    await rawTid('commentary-help').click();
+    await rawTid('commentary-help-hint').waitFor({ state: 'detached' });
+    // 4. a long-press multi-select keeps the strip open until the toolbar button closes it
+    await longPress('רמב"ן');
+    await showing(['רש"י', 'רמב"ן']);
+    assert.ok(await stripShown(), 'long-press multi-select keeps the strip open');
+    await chip('אבן עזרא').click(); // 2+ selected: a tap toggles a third in, still open
+    await showing(['רש"י', 'רמב"ן', 'אבן עזרא']);
+    assert.ok(await stripShown(), 'strip open while building a multi-selection');
+    await toolsToggle.click();
+    await rawTid('commentary-chipbar').waitFor({ state: 'detached' });
+    await showing(['רש"י', 'רמב"ן', 'אבן עזרא']);
+    await tid('commentary-chip-all').click();
+    await showing(PRIORITY);
+    assert.ok(await stripShown(), 'הכל keeps the strip accessible');
+    step('selecting collapses strip + search bar; the toolbar button expands / collapses both; "?" shows the long-press hint; multi-select keeps the strip open');
 
         await setTools(true);
     // Name filter: Hebrew + Torah abbreviations.

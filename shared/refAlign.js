@@ -360,6 +360,34 @@ function inlineUnitWord(parentTitle, categoryPath) {
   return 'אות';
 }
 
+/**
+ * Seif marker of a Shulchan Aruch style content line (normalized text): "(א) ...", "[א] ...",
+ * "סעיף א ..." (geresh / gershayim are already stripped) or "א. ..." / "ב: ...". null otherwise
+ * ("סעיף קטן" is a different unit kind).
+ */
+const SEIF_MARKER_RE = /^\s*(?:[([]\s*([א-ת]{1,4})\s*[)\]]|סעיפ\s+(?!קטנ)([א-ת]{1,4})(?![א-ת])|([א-ת]{1,3})\s*[.:](?=\s|$))/;
+function seifMarkerKey(text) {
+  const m = SEIF_MARKER_RE.exec(String(text || '').replace(/[\u200E\u200F]/g, ''));
+  const raw = m && (m[1] || m[2] || m[3]);
+  if (!raw) return null;
+  const key = normalizeHebrew(raw, { keepPunctuation: false });
+  // Only canonical numerals count ("יא", "טו"), never a stray word.
+  const n = hebrewNumeralToInt(raw);
+  return n && intToHebrew(n) === key ? key : null;
+}
+
+/**
+ * Text that follows the title on a heading line's normalized text ("סימנ א (א) יתגבר" with title
+ * "סימן א" -> "(א) יתגבר" cut to 12 chars), or null when the heading carries no text.
+ */
+function headingLeadText(cleanText, title) {
+  const t = normalizeHebrew(plainHeadingText(title));
+  const c = String(cleanText || '');
+  if (!t || !c.startsWith(t)) return null;
+  const rest = c.slice(t.length).trim();
+  return rest ? rest.slice(0, 12) : null;
+}
+
 /** Marker key of a content line ("(יא) ..." -> "יא"), or null. */
 function markerKey(text) {
   const m = VERSE_MARKER_RE.exec(String(text || ''));
@@ -373,14 +401,25 @@ function markerKey(text) {
  */
 function inlineUnits(contentLines, unit, opts) {
   const ordinal = !opts || opts.ordinal !== false;
-  const lines = contentLines.filter((l) => l.line > unit.start && l.line <= unit.end);
+  // A line flagged `heading` is the unit's own heading line carrying text after the title
+  // ("<h2>סימן א</h2>(א) יתגבר ..."): that text can be seif 1.
+  const lines = contentLines.filter((l) => (l.line > unit.start || (l.heading && l.line === unit.start)) && l.line <= unit.end);
   const out = new Map();
-  const marked = lines.filter((l) => VERSE_MARKER_RE.test(l.text));
+  const keyOf = ordinal ? (l) => markerKey(l.text) : (l) => seifMarkerKey(l.text);
+  const marked = lines.filter((l) => keyOf(l));
   if (marked.length) {
     for (let i = 0; i < marked.length; i++) {
-      const key = normalizeHebrew(VERSE_MARKER_RE.exec(marked[i].text)[1], { keepPunctuation: false });
+      const key = keyOf(marked[i]);
       const end = i + 1 < marked.length ? marked[i + 1].line - 1 : unit.end;
       if (!out.has(key)) out.set(key, { start: marked[i].line, end });
+    }
+    // Seif 1 of a siman that carries no marker of its own (text straight after the Siman heading, or its
+    // first paragraph) while "(ב)" opens the next one: everything before the first marker is seif א.
+    const lastType = unit.labels && unit.labels.length ? unit.labels[unit.labels.length - 1].type : '';
+    const first = marked[0];
+    if (!ordinal && (lastType === 'סימן' || lastType === 'כלל') && !out.has('א') && keyOf(first) === 'ב') {
+      const lead = lines.filter((l) => l.line < first.line);
+      if (lead.length) return new Map([['א', { start: lead[0].line, end: first.line - 1 }], ...out]);
     }
     return out;
   }
@@ -576,6 +615,8 @@ module.exports = {
   pairCommentariesAsync,
   inlineUnitWord,
   markerKey,
+  seifMarkerKey,
+  headingLeadText,
   paragraphNumber,
   numberKey,
   perekNumber,

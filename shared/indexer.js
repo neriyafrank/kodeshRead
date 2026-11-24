@@ -432,10 +432,14 @@ function createBookParser(fallbackTitle) {
         toc.push({ parentIdx: parent ? parent.tocIdx : null, level, title: headingTitle, refKey: extractRefKey(headingTitle), refPath: refAlign.refKeyOf(labels), startLine: lineIndex });
         stack.push({ level, tocIdx: toc.length - 1, title: headingTitle, labels });
         const p = { lineIndex, tocPath: stack.map((x) => x.title).join(' > '), display: sanitizeDisplay(h[2]), clean: normalizeHebrew(h[2]), isHeading: level };
-        // Rare: text after a closing heading tag on the same line.
+        // Text after a closing heading tag on the same line ("<h2>סימן א</h2>(א) יתגבר ..." in the Shulchan
+        // Aruch): shown, searchable, and read back as the unit's first content (seif 1) when aligning.
         if (h[3] && h[3].trim()) {
           const display = sanitizeDisplay(h[3]);
-          if (display) p.display += ' ' + display;
+          if (display) {
+            p.display += ' ' + display;
+            p.clean += ' ' + normalizeHebrew(h[3]);
+          }
         }
         return emit(p);
       }
@@ -1335,9 +1339,13 @@ async function indexRefLinks(db, opts) {
     }
     return u;
   };
-  const baseContentOf = (baseId) => (unit) =>
-    db
-      .all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end]);
+  const baseContentOf = (baseId) => async (unit) => {
+    const rows = await db.all('SELECT line_index AS line, substr(clean_text, 1, 12) AS text FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index <= ? AND is_heading = 0 ORDER BY line_index', [baseId, unit.start, unit.end]);
+    // The unit's own heading line may carry the text of its first seif ("<h2>סימן א</h2>(א) יתגבר ...").
+    const head = await db.all('SELECT substr(clean_text, 1, 80) AS text FROM paragraphs WHERE book_id = ? AND line_index = ? AND is_heading <> 0', [baseId, unit.start]);
+    const lead = head.length ? refAlign.headingLeadText(head[0].text, unit.title) : null;
+    return lead ? [{ line: unit.start, text: lead, heading: true }, ...rows] : rows;
+  };
   const perTx = Math.max(1, o.booksPerTransaction || 20);
   let inTx = false;
   let pending = 0;

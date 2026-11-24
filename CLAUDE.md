@@ -52,7 +52,14 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > cards (pins + top 3) and filters by name with Torah abbreviations. `CommentaryPane.tsx` renders collapsible
 > cards with a sticky filter / chips / pill-strip header. The drawer shows NO עיקריים / נוספים
 > distinction (uniform cards and pills, no tier badge, no primary-only view): canonical order is the only priority signal; only
-> תרגומים / מקבילים / מקור are badged. Regression-tested in `scripts/selftest.js`.
+> תרגומים / מקבילים / מקור are badged. The toolbar (sliders) button controls the commentator
+> chip strip + the name-filter row together: picking a commentator collapses both (reading space), the button reopens both, a
+> long-press multi-select keeps them open, הכל keeps the strip accessible; a `?` button explains the long-press.
+>
+> **Shulchan Aruch seif 1:** `refAlign.inlineUnits` (base side of `סימן X סעיף N` links) reads seif markers `(א)` / `[א]` /
+> `סעיף א` / `א.` (`seifMarkerKey`), the text after a heading tag on the same line (`<h2>סימן א</h2>(א) ...`: kept in `clean_text`,
+> read back by `indexer.indexRefLinks` via `headingLeadText`, shown by `commentary.fetchLinkedEntries` as the unit's first paragraph),
+> and an unmarked first seif before `(ב)` = seif א. Seif 2+ are unchanged; separate-paragraph seif 1 works as before. Regression-tested in `scripts/selftest.js`.
 
 > **Reading typography & themes:** `shared/typography.js` (font keys, vocalization-aware line height:
 > slider = plain leading 1.55x, +0.2 niqqud / +0.3 te'amim; margin verse numbers via `splitVerseMarker`;

@@ -18,6 +18,8 @@
  *    commentator pills — one tap scrolls to a commentator and opens it. It is folded away by
  *    default (the commentaries start right under the title bar) and toggled by the "סינון"
  *    button in the title bar, which carries a dot while a name filter or a kind chip is active.
+ *    Picking a commentator collapses the chip strip + filter row together (reading space); the same
+ *    toggle reopens both; a long-press multi-select keeps them open; `?` explains the long-press.
  *
  * Content of a card:
  *  - heading-aligned units (Otzaria reference alignment, `ref_links`): the WHOLE block of
@@ -170,11 +172,29 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   const toggleAll = () => setExpanded(Object.fromEntries(visible.map((g) => [g.key, !allExpanded])));
   const filtering = !!query.trim();
   const showTools = ranked.length >= TOOLS_MIN_GROUPS || !!query;
-  // The tools header (name filter / open-all) starts folded; the toggle in the title bar opens it.
-  const [toolsOpen, setToolsOpen] = useState(false);
+  // The controls panel = the commentator chip strip + the name filter / open-all row, opened and closed
+  // together by the toolbar toggle. 'auto': the strip is there while nothing is selected (to pick one),
+  // the filter row stays folded; picking a commentator collapses everything (reading space);
+  // 'open': strip + filter row (also kept while a long-press multi-select is in progress); 'closed'.
+  const [panel, setPanel] = useState<'auto' | 'open' | 'closed'>('auto');
+  const stripOpen = panel === 'open' || (panel === 'auto' && !selecting);
+  const toolsOpen = panel === 'open';
+  // The toolbar toggle is "on" while the whole panel (strip + filter row) is open.
+  const panelOn = toolsOpen;
+  const [helpOpen, setHelpOpen] = useState(false);
   const onChip = (g: RankedGroup, gesture: 'tap' | 'longpress') => {
     selectChip(g.key, gesture);
     setExpanded({ [g.key]: true });
+    // A tap that isolates a commentator (from הכל / another single) is "done picking": collapse.
+    // Long-press (multi-select) and taps inside a 2+ selection keep the panel open.
+    if (gesture === 'tap' && selection.length < 2) setPanel(selection.includes(g.key) ? 'auto' : 'closed');
+    else if (gesture === 'longpress') setPanel('open');
+  };
+  const togglePanel = () => {
+    setHelpOpen(false);
+    // Nothing selected: the chip strip always stays (to pick from), the toggle shows / hides the filter row.
+    // A selection is active: the toggle shows / hides strip + filter row together.
+    setPanel(panelOn ? (selecting ? 'closed' : 'auto') : 'open');
   };
 
   // --- scrolling ---------------------------------------------------------------------
@@ -396,25 +416,26 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
         >
           <Text style={[s.followText, follow && { color: c.surface }]}>סנכרון</Text>
         </Pressable>
-        {showTools && !error ? (
+        {(showTools || ranked.length >= 2) && !error ? (
           <Pressable
-            onPress={() => setToolsOpen((v) => !v)}
+            onPress={togglePanel}
             hitSlop={6}
-            style={[s.toolsToggle, toolsOpen && { backgroundColor: c.accentSoft }]}
+            style={[s.toolsToggle, panelOn && { backgroundColor: c.accentSoft }]}
             accessibilityRole="button"
-            aria-expanded={toolsOpen}
-            accessibilityState={{ expanded: toolsOpen }}
-            accessibilityLabel={`${toolsOpen ? 'הסתר' : 'הצג'} כלי סינון מפרשים${filtering ? ' (סינון פעיל)' : ''}`}
+            aria-expanded={panelOn}
+            accessibilityState={{ expanded: panelOn }}
+            accessibilityLabel={`${panelOn ? 'הסתר' : 'הצג'} בחירת מפרשים וסינון${filtering ? ' (סינון פעיל)' : ''}`}
             testID="commentary-tools-toggle"
           >
             <SlidersIcon size={16} />
-            {filtering && !toolsOpen ? <View style={[s.toolsDot, { borderColor: c.surface }]} testID="commentary-tools-badge" /> : null}
+            {filtering && !panelOn ? <View style={[s.toolsDot, { borderColor: c.surface }]} testID="commentary-tools-badge" /> : null}
           </Pressable>
         ) : null}
         <IconButton label="✕" a11y="סגור מפרשים" onPress={onClose} palette={c} testID="commentary-close" />
       </View>
 
-      {ranked.length >= 2 && !error ? (
+      {ranked.length >= 2 && !error && stripOpen ? (
+        <View style={s.chipRow} testID="commentary-chipstrip">
         <ScrollView
           ref={(n) => {
             pillsRef.current = n;
@@ -492,6 +513,7 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                 onPress={() => {
                   clearSelection();
                   setKindFilter('all');
+                  setPanel('auto');
                 }}
                 style={[s.pill, s.pillCore, !selecting && kind === 'all' && s.pillOn]}
                 accessibilityRole="button"
@@ -505,6 +527,24 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               </Pressable>,
             )}
         </ScrollView>
+        <Pressable
+          onPress={() => setHelpOpen((v) => !v)}
+          hitSlop={6}
+          style={[s.helpBtn, helpOpen && { backgroundColor: c.accentSoft }]}
+          accessibilityRole="button"
+          accessibilityLabel="עזרה: בחירת כמה פרשנים"
+          aria-expanded={helpOpen}
+          accessibilityState={{ expanded: helpOpen }}
+          testID="commentary-help"
+        >
+          <Text style={s.helpText}>?</Text>
+        </Pressable>
+        </View>
+      ) : null}
+      {ranked.length >= 2 && !error && stripOpen && helpOpen ? (
+        <Pressable onPress={() => setHelpOpen(false)} style={s.hint} accessibilityRole="button" accessibilityLabel="סגור את ההסבר" testID="commentary-help-hint">
+          <Text style={s.hintText}>לחיצה ארוכה על פרשן מאפשרת לבחור אותו בנוסף לפרשנים אחרים</Text>
+        </Pressable>
       ) : null}
 
       <Collapsible open={showTools && !error && toolsOpen} style={s.tools} testID="commentary-tools">
@@ -697,7 +737,12 @@ const createStyles = (c: Palette) =>
     clearText: { fontSize: 13, color: c.textMuted, paddingHorizontal: 2 },
     toggleAll: { height: 32, paddingHorizontal: spacing.sm, justifyContent: 'center', borderRadius: radius.md, backgroundColor: c.accentSoft },
     toggleAllText: { fontSize: 12, fontWeight: '700', color: c.accent },
-    pillsScroll: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border, backgroundColor: c.surface },
+    chipRow: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border, backgroundColor: c.surface },
+    helpBtn: { width: 22, height: 22, marginHorizontal: spacing.xs, borderRadius: 11, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
+    helpText: { fontSize: 12, fontWeight: '700', color: c.textMuted },
+    hint: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, backgroundColor: c.accentSoft },
+    hintText: { fontSize: 12, color: c.text, ...alignRight },
+    pillsScroll: { flexGrow: 1, flexShrink: 1, backgroundColor: c.surface },
     pills: { gap: spacing.xs, paddingHorizontal: spacing.sm, paddingVertical: 3, alignItems: 'center', justifyContent: 'flex-end', flexDirection: 'row' },
     pill: {
       height: 28,

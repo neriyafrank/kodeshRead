@@ -169,11 +169,22 @@ async function fetchLinkedEntries(db, bookId, line) {
   for (const u of await fetchUnitLinks(db, bookId, line)) {
     const end = Math.min(u.otherEnd, u.otherStart + MAX_BLOCK_LINES);
     const rows = await a.all(
-      `SELECT p.book_id, ${ENTRY_COLUMNS}, p.line_index AS line, p.display_text, p.toc_path
+      `SELECT p.book_id, ${ENTRY_COLUMNS}, p.line_index AS line, p.display_text, p.toc_path, p.is_heading, t.title AS heading_title
          FROM paragraphs p JOIN books b ON b.id = p.book_id LEFT JOIN categories c ON c.id = b.category_id
-        WHERE p.book_id = ? AND p.line_index BETWEEN ? AND ? AND p.is_heading = 0
+         LEFT JOIN toc_nodes t ON p.is_heading <> 0 AND t.book_id = p.book_id AND t.start_line = p.line_index
+        WHERE p.book_id = ? AND p.line_index BETWEEN ? AND ? AND (p.is_heading = 0 OR p.line_index = ?)
         ORDER BY p.line_index`,
-      [u.otherBookId, u.otherStart, end],
+      [u.otherBookId, u.otherStart, end, u.otherStart],
+    ).then((found) =>
+      found.flatMap(({ is_heading, heading_title, ...r }) => {
+        if (!is_heading) return [r];
+        // The unit's own heading line, "<h2>סימן א</h2>(א) יתגבר ...": its text after the title is the
+        // first paragraph (seif 1) of the unit; a bare heading is never an entry.
+        const title = String(heading_title || '').trim();
+        const text = String(r.display_text || '');
+        const rest = title && text.startsWith(title) ? text.slice(title.length).trim() : '';
+        return rest ? [{ ...r, display_text: rest }] : [];
+      }),
     );
     const block = { refKey: u.refKey, start: u.otherStart, end: u.otherEnd, role: u.role };
     blocks.push({ bookId: u.otherBookId, ...block });

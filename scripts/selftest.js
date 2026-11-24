@@ -1628,7 +1628,8 @@ async function libraryCatalogTests() {
   await check('commentary drawer: one uniform list - no עיקריים / נוספים UI, order still primary-first, only תרגומים / מקבילים / מקור are badged', () => {
     const ui = fs.readFileSync(path.join(ROOT, 'src/components/reader/CommentaryPane.tsx'), 'utf8');
     const code = ui.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-    assert.ok(!/עיקריים|נוספים|אחרים/.test(code), 'no primary / other labels in the drawer');
+    // (The `?` hint says "... בנוסף לפרשנים אחרים": a sentence about multi-select, not a section label.)
+    assert.ok(!/עיקריים|נוספים|אחרים/.test(code.replace('בנוסף לפרשנים אחרים', '')), 'no primary / other labels in the drawer');
     assert.ok(!/g\.core|\.core\b/.test(code), 'no per-commentator styling by primary status');
     assert.ok(!/pillCore[^\n]*g\.|g\.[^\n]*pillCore/.test(code) && !/tierCore/.test(code));
     // The order is intact: canonical commentators first, the rest after, deterministic.
@@ -1886,6 +1887,97 @@ async function libraryCatalogTests() {
       const rashi = await id('רש"י על ברכות');
       const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, rashi, await lineOf(rashi, 'רשי ברכות ב ב2')));
       assert.ok(back.some((g) => g.bookTitle === 'ברכות'), 'Rashi -> the tractate');
+      db.raw.close();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  await check('Shulchan Aruch: seif 1 is recognised inline after the siman heading and as its own paragraph; seif 2+ and commentaries / parallels stay aligned', async () => {
+    const pipeline = require('../shared/pipeline');
+    const pw = require('../shared/parallelWorks');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-sa-'));
+    try {
+      // unit tests of the text shapes
+      for (const [t, k] of [['(א) יתגבר', 'א'], ['[ב] משכים', 'ב'], ['סעיפ א יתגבר', 'א'], ['סעיפ יא ב', 'יא'], ['ב: משכימ', 'ב'], ['א. יתגבר', 'א']]) assert.strictEqual(refAlign.seifMarkerKey(t), k, t);
+      for (const t of ['יתגבר כארי', 'סעיפ קטנ א', 'א יתגבר', 'שיטה: משכימ', '']) assert.strictEqual(refAlign.seifMarkerKey(t), null, t);
+      assert.strictEqual(refAlign.headingLeadText('סימנ א (א) יתגבר כארי', 'סימן א'), '(א) יתגבר כא');
+      assert.strictEqual(refAlign.headingLeadText('סימנ א', 'סימן א'), null, 'a bare heading has no lead text');
+      const unit = { start: 10, end: 20, labels: [{ type: 'סימן', key: 'א' }] };
+      const seifim = (lines) => [...refAlign.inlineUnits(lines, unit, { ordinal: false })].map(([k, v]) => `${k}:${v.start}-${v.end}`).join(' ');
+      assert.strictEqual(seifim([{ line: 10, text: '(א) יתגבר', heading: true }, { line: 11, text: '(ב) משכימ' }, { line: 12, text: 'המשכ' }]), 'א:10-10 ב:11-20', 'inline after the heading');
+      assert.strictEqual(seifim([{ line: 11, text: '(א) יתגבר' }, { line: 12, text: '(ב) משכימ' }]), 'א:11-11 ב:12-20', 'own paragraph');
+      assert.strictEqual(seifim([{ line: 10, text: 'יתגבר כארי', heading: true }, { line: 11, text: '(ב) משכימ' }]), 'א:10-10 ב:11-20', 'unmarked seif 1 before (ב)');
+      assert.strictEqual(seifim([{ line: 11, text: 'יתגבר כארי' }, { line: 12, text: '(ב) משכימ' }, { line: 13, text: '(ג) שלישי' }]), 'א:11-11 ב:12-12 ג:13-20', 'first paragraph = seif 1');
+      assert.strictEqual(seifim([{ line: 11, text: '(ב) משכימ' }]), 'ב:11-20', 'a siman with only one marked seif keeps what it has when nothing precedes it');
+
+      const lib = path.join(tmp, 'אוצריא');
+      const put = (rel, lines) => {
+        fs.mkdirSync(path.dirname(path.join(lib, rel)), { recursive: true });
+        fs.writeFileSync(path.join(lib, rel + '.txt'), lines.join('\n'));
+      };
+      put('הלכה/שולחן ערוך/שולחן ערוך אורח חיים', [
+        '<h1>שולחן ערוך אורח חיים</h1>',
+        '<h2>סימן א</h2>(א) יתגבר כארי א1',          // inline after the heading
+        '(ב) משכים א2',
+        '<h2>סימן ב</h2>',
+        '(א) ראשון ב1',                                // own paragraph
+        '(ב) שני ב2',
+        '<h2>סימן ג</h2>סעיף א\' ראשון ג1',            // "סעיף א'" inline
+        'סעיף ב\' שני ג2',
+        '<h2>סימן ד</h2>',
+        'ראשון בלי סימון ד1',                          // unmarked seif 1
+        '(ב) שני ד2',
+        '(ג) שלישי ד3',
+      ]);
+      put('הלכה/שולחן ערוך/מפרשים/באר היטב/באר היטב על שולחן ערוך אורח חיים', [
+        '<h1>באר היטב על שולחן ערוך אורח חיים</h1>',
+        '<h2>סימן א</h2>', '<h3>סעיף א</h3>', 'בה א1', '<h3>סעיף ב</h3>', 'בה א2',
+        '<h2>סימן ב</h2>', '<h3>סעיף א</h3>', 'בה ב1', '<h3>סעיף ב</h3>', 'בה ב2',
+        '<h2>סימן ג</h2>', '<h3>סעיף א</h3>', 'בה ג1', '<h3>סעיף ב</h3>', 'בה ג2',
+        '<h2>סימן ד</h2>', '<h3>סעיף א</h3>', 'בה ד1', '<h3>סעיף ב</h3>', 'בה ד2', '<h3>סעיף ג</h3>', 'בה ד3',
+      ]);
+      put('הלכה/טור/טור אורח חיים', ['<h1>טור אורח חיים</h1>', '<h2>סימן א</h2>', 'טור א', '<h2>סימן ב</h2>', 'טור ב']);
+      const db = openWal(path.join(tmp, 'sa.db'));
+      await indexer.ensureSchema(db.w, { kind: 'core' });
+      await pipeline.runImport(db.w, nodeFs, { source: { kind: 'folder', root: lib }, sourceUri: lib, targetDb: 'core', yieldToUI: () => Promise.resolve(), finalize: false });
+      await pipeline.completeImport(db.w);
+      const id = async (title) => Number((await db.read.all('SELECT id FROM books WHERE title = ?', [title]))[0].id);
+      const sa = await id('שולחן ערוך אורח חיים');
+      const bh = await id('באר היטב על שולחן ערוך אורח חיים');
+      const lineOf = async (bookId, needle) => Number((await db.read.all('SELECT line_index AS l FROM paragraphs WHERE book_id = ? AND display_text LIKE ?', [bookId, `%${needle}%`]))[0].l);
+      // commentary entries shown for a base line
+      const shown = async (needle) => {
+        const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, sa, await lineOf(sa, needle)));
+        return groups.filter((g) => g.bookId === bh).flatMap((g) => g.entries.map((e) => e.display_text));
+      };
+      // siman א: seif 1 text sits on the heading line, seif 2 on the next line
+      assert.deepStrictEqual(await shown('א1'), ['בה א1'], 'seif 1 inline after the heading');
+      assert.deepStrictEqual(await shown('א2'), ['בה א2'], 'seif 2 not shifted');
+      assert.deepStrictEqual(await shown('ב1'), ['בה ב1'], 'seif 1 as its own paragraph');
+      assert.deepStrictEqual(await shown('ב2'), ['בה ב2']);
+      assert.deepStrictEqual(await shown('ג1'), ['בה ג1'], '"סעיף א\'" inline after the heading');
+      assert.deepStrictEqual(await shown('ג2'), ['בה ג2']);
+      assert.deepStrictEqual(await shown('ד1'), ['בה ד1'], 'unmarked seif 1');
+      assert.deepStrictEqual(await shown('ד2'), ['בה ד2']);
+      assert.deepStrictEqual(await shown('ד3'), ['בה ד3']);
+      // and back: each commentary seif shows exactly its own base seif
+      const back = async (needle) => {
+        const bl = await lineOf(bh, needle);
+        const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(db.read, bh, bl));
+        return groups.filter((g) => g.bookId === sa).flatMap((g) => g.entries.map((e) => e.display_text));
+      };
+      assert.ok((await back('בה א1'))[0].includes('א1') && !(await back('בה א1')).some((t) => t.includes('א2')), 'Seif 1 of the commentary -> base seif 1 only');
+      assert.ok((await back('בה ב1'))[0].includes('ב1') && !(await back('בה ב1')).some((t) => t.includes('ב2')));
+      // heading lines are searchable with their inline text, and stay headings in the TOC
+      const hit = await db.read.all("SELECT line_index, is_heading FROM paragraphs WHERE book_id = ? AND clean_text LIKE '%יתגבר כארי%'", [sa]);
+      assert.ok(hit.length === 1 && Number(hit[0].is_heading) !== 0, JSON.stringify(hit));
+      const toc = await db.read.all('SELECT title FROM toc_nodes WHERE book_id = ? ORDER BY start_line', [sa]);
+      assert.deepStrictEqual(toc.map((r) => r.title), ['סימן א', 'סימן ב', 'סימן ג', 'סימן ד'], 'the siman title stays the TOC entry');
+      // the Tur parallel of siman א still resolves from the seif 1 line
+      const par = await pw.findParallels(db.read, sa, await lineOf(sa, 'א1'));
+      const parGroups = commentary.parallelGroups(par);
+      assert.ok(parGroups.some((g) => /טור/.test(g.bookTitle)), `Tur parallel on seif 1: ${JSON.stringify(parGroups.map((g) => g.bookTitle))}`);
       db.raw.close();
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
