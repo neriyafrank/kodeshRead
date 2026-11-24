@@ -21,7 +21,7 @@ import { useLibrary, useLibraryController } from '../db/LibraryContext';
 import { CORE_BUILD_DB } from '../db/library';
 import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
-import { EDITIONS, editionOfManifest } from '../../shared/editions';
+import { LIBRARY_TITLE } from '../../shared/libraryRelease';
 import { formatCloudNotification, type CloudManifest } from '../../shared/multipart';
 import { clearCloudParts, CLOUD_KEEP_AWAKE_TAG, downloadAndStageCloud, isPreviewCloudDownload, stageCloudForPreview } from './cloudLibrary';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
@@ -258,7 +258,7 @@ export function useLibraryActions() {
         }),
 
       /**
-       * Multi-part cloud library (library-latest = full, library-classic-latest = classic): resumable part download -> assemble -> extract ->
+       * Multi-part cloud library (library-latest): resumable part download -> assemble -> extract ->
        * validate -> atomic install (shared/multipart.js, src/services/cloudLibrary.ts).
        */
       downloadCloud: (manifest: CloudManifest, manifestUrl: string) =>
@@ -272,11 +272,9 @@ export function useLibraryActions() {
             await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => ctl.installCore());
             clearCloudParts();
           }
-          // Which edition is installed (the DB's meta.scope says it too; this covers older builds).
-          const edition = editionOfManifest(manifest);
-          if (edition) useLibrarySettings.getState().setInstalledCloud(edition, version);
-          const name = edition ? ` — ${EDITIONS[edition].title}` : '';
-          return `ספריית הליבה הותקנה מהענן${name} (גרסה ${version}): ${manifest.bookCount.toLocaleString('he-IL')} ספרים`;
+          // Which cloud version is installed (the DB's meta.version says it too; this covers older builds).
+          useLibrarySettings.getState().setInstalledCloud(version);
+          return `ספריית הליבה הותקנה מהענן — ${LIBRARY_TITLE} (גרסה ${version}): ${manifest.bookCount.toLocaleString('he-IL')} ספרים`;
         }),
 
       /** Builds core_library.db on the device from a picked Otzaria folder (resumes the same folder). */

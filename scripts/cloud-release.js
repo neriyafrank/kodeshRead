@@ -8,10 +8,10 @@
  *       refLinkCount, uncompressedDbBytes } to --stats.
  *
  *   node scripts/cloud-release.js manifest --stats=stats.json --parts-dir=dist \
- *       --source-repo=Sivan22/otzaria-library --scope=classical_full [--edition=classic] --out=dist/library-manifest.json
+ *       --source-repo=Sivan22/otzaria-library --scope=all --out=dist/library-manifest.json
  *       Hashes every core_library.db.zip.part-NN (and, streaming over them in order, the whole zip)
  *       and writes library-manifest.json:
- *       { sourceRepo, scope, edition, releaseTag, version, builtAt, bookCount, paragraphCount, uncompressedDbBytes,
+ *       { sourceRepo, scope, releaseTag, version, builtAt, bookCount, paragraphCount, uncompressedDbBytes,
  *         totalZipBytes, fullZipSha256, parts: [{ name, sizeBytes, sha256 }] }
  *
  * The zip itself is never needed here (and is already deleted by then): its hash is the hash of the
@@ -24,8 +24,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { validateCloudManifest, CLOUD_ZIP_NAME, MAX_PART_BYTES, CLOUD_MANIFEST_NAME } = require('../shared/multipart');
 const { openDb } = require('./build-db');
-const editions = require('../shared/editions');
-const libraryScope = require('../shared/libraryScope');
+const releases = require('../shared/libraryRelease');
 
 const PART_RE = /^core_library\.db\.zip\.part-(\d{2,})$/;
 
@@ -71,26 +70,6 @@ function validateDb(file) {
   }
 }
 
-/**
- * Edition filter check on a finished DB: no book of a classic library may sit under a contemporary-authors
- * folder (מחברי זמננו / אחרוני זמננו); a full library should have some (warning when it has none, e.g. a source
- * without that folder). Throws on a violation.
- */
-function checkEdition(file, edition) {
-  editions.assertEdition(edition);
-  const db = openDb(file);
-  try {
-    const paths = db.prepare('SELECT file_path FROM books').all().map((r) => String(r.file_path));
-    const modern = paths.filter((p) => p.split(/[\\/]/).slice(0, -1).some((seg) => libraryScope.isModernAuthorsDir(seg))).length;
-    const warnings = [];
-    if (edition === 'classic' && modern) throw new Error(`classic edition contains ${modern} book(s) under a contemporary-authors folder`);
-    if (edition === 'full' && !modern) warnings.push('full edition has no book under a contemporary-authors folder (does the source have one?)');
-    return { books: paths.length, modern, warnings };
-  } finally {
-    db.close();
-  }
-}
-
 /** SHA-256 of one or more files, streamed in order (one digest over their concatenation). */
 async function sha256Files(files) {
   const h = crypto.createHash('sha256');
@@ -103,10 +82,8 @@ async function sha256Files(files) {
 }
 
 /** library-manifest.json content for the parts in `partsDir`. */
-async function buildManifest({ stats, partsDir, sourceRepo, scope, edition }) {
-  const ed = edition || editions.editionOfScope(scope);
-  if (ed) editions.assertEdition(ed);
-  if (ed && scope && editions.editionScope(ed) !== scope) throw new Error(`edition ${ed} is built with scope ${editions.editionScope(ed)}, not ${scope}`);
+async function buildManifest({ stats, partsDir, sourceRepo, scope }) {
+  if (scope && scope !== releases.LIBRARY_SCOPE) throw new Error(`the cloud library is built with scope ${releases.LIBRARY_SCOPE}, not ${scope}`);
   const names = fs
     .readdirSync(partsDir)
     .filter((n) => PART_RE.test(n))
@@ -121,9 +98,8 @@ async function buildManifest({ stats, partsDir, sourceRepo, scope, edition }) {
   }
   const manifest = {
     sourceRepo,
-    scope,
-    edition: ed || null,
-    releaseTag: ed ? editions.editionTag(ed) : null,
+    scope: scope || releases.LIBRARY_SCOPE,
+    releaseTag: releases.LIBRARY_TAG,
     version: stats.version,
     builtAt: stats.builtAt,
     bookCount: stats.bookCount,
@@ -156,16 +132,12 @@ async function main() {
     console.log(`[cloud-release] OK: ${stats.bookCount} books, ${stats.paragraphCount} paragraphs, ${stats.refLinkCount} ref links, ${(stats.uncompressedDbBytes / 1024 / 1024).toFixed(0)} MB`);
   } else if (cmd === 'manifest') {
     const stats = JSON.parse(fs.readFileSync(path.resolve(args.stats), 'utf8'));
-    const manifest = await buildManifest({ stats, partsDir: path.resolve(args['parts-dir']), sourceRepo: args['source-repo'], scope: args.scope, edition: args.edition });
+    const manifest = await buildManifest({ stats, partsDir: path.resolve(args['parts-dir']), sourceRepo: args['source-repo'], scope: args.scope });
     const out = path.resolve(args.out || path.join(args['parts-dir'], CLOUD_MANIFEST_NAME));
     fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + '\n');
     console.log(`[cloud-release] ${path.basename(out)}: ${manifest.parts.length} part(s), ${(manifest.totalZipBytes / 1024 / 1024).toFixed(0)} MB, version ${manifest.version}`);
-  } else if (cmd === 'check-edition') {
-    const r = checkEdition(path.resolve(args.db), args.edition);
-    console.log(`[cloud-release] edition ${args.edition}: ${r.books} books, ${r.modern} under a contemporary-authors folder`);
-    for (const w of r.warnings) console.log(`::warning::${w}`);
   } else {
-    console.error('usage: cloud-release.js validate --db=<file> --stats=<json> | manifest --stats=<json> --parts-dir=<dir> --source-repo=<o/r> --scope=<s> [--edition=classic|full] [--out=<file>] | check-edition --db=<file> --edition=classic|full');
+    console.error('usage: cloud-release.js validate --db=<file> --stats=<json> | manifest --stats=<json> --parts-dir=<dir> --source-repo=<o/r> [--scope=all] [--out=<file>]');
     process.exit(2);
   }
 }
@@ -177,4 +149,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { validateDb, buildManifest, sha256Files, checkEdition };
+module.exports = { validateDb, buildManifest, sha256Files };

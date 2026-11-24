@@ -47,7 +47,7 @@ export default function LibraryScreen() {
   const onMissingLearning = useCallback(
     (item: { title: string }) => {
       const go = () => router.navigate('/library-manager');
-      const msg = `הספר ״${item.title}״ עדיין לא נמצא במכשיר. אפשר להוריד ספרייה מוכנה מהענן (בסיסית או מלאה), או לייבא אותו כספר אישי. לפתוח את ניהול הספרייה?`;
+      const msg = `הספר ״${item.title}״ עדיין לא נמצא במכשיר. אפשר להוריד ספרייה מוכנה מהענן, או לייבא אותו כספר אישי. לפתוח את ניהול הספרייה?`;
       if (Platform.OS === 'web') {
         if (typeof window !== 'undefined' && window.confirm(msg)) go();
         return;

@@ -485,17 +485,11 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
 ## Cloud library (GitHub Actions, multi-part release)
 
 No PC needed: the **Build cloud library** workflow (`.github/workflows/build-library.yml`, *Run workflow*) indexes
-the Otzaria library on a GitHub runner and publishes **two editions**, each to its own release (they never overwrite each other):
-
-| Edition | Scope | Release tag |
-| --- | --- | --- |
-| **ספרייה מלאה (כולל אחרוני זמננו)** | `all` | `library-latest` (unchanged name / assets) |
-| **ספרייה בסיסית (קלאסית, ללא אחרוני זמננו)** | `classical_full` | `library-classic-latest` |
-
-Inputs: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`) and `editions`
-(`both` default: one run builds and publishes both; or `full` / `classic`). `starter-latest` is exported once per run.
-The library manager lists both editions with their live size and book count, badges the installed one (`מותקן כעת`),
-checks for updates against the installed edition's own release, and switches editions with the same resumable download.
+the Otzaria library on a GitHub runner and publishes **one complete library** (scope `all`, every folder) to the
+release `library-latest`. Input: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`).
+`starter-latest` is exported from the same build. The library manager shows one card (live size and book count) with a
+single download / update button, using the same resumable chunked-Range download and SHA-256 verification. Installs made
+by older builds with the smaller "classic" library keep working and are simply offered the complete library as an update.
 
 Pipeline (each step deletes its input first, so the runner never holds two multi-GB copies; 35 GB free are enforced):
 `scripts/ci/fetch-otzaria-source.sh` (release zip(s) of the source repo, else the repository tarball streamed into `tar`)

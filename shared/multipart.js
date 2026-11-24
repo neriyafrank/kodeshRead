@@ -19,10 +19,10 @@
  */
 'use strict';
 
-const editions = require('./editions');
+const releases = require('./libraryRelease');
 
-/** Release tag of the full edition (the original, backwards-compatible tag). The classic edition: shared/editions.js. */
-const CLOUD_RELEASE_TAG = editions.EDITIONS.full.tag;
+/** Release tag of the (single, complete) cloud library. */
+const CLOUD_RELEASE_TAG = releases.LIBRARY_TAG;
 const CLOUD_MANIFEST_NAME = 'library-manifest.json';
 const CLOUD_ZIP_NAME = 'core_library.db.zip';
 const CLOUD_DB_NAME = 'core_library.db';
@@ -38,9 +38,9 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const partName = (n) => `${CLOUD_ZIP_NAME}.part-${String(n).padStart(2, '0')}`;
 const PART_NAME_RE = /^core_library\.db\.zip\.part-(\d{2,})$/;
 
-/** URL of the manifest of an edition's release (`library-latest` = full, the default; `library-classic-latest` = classic). */
-function cloudManifestUrl(repo, edition = 'full') {
-  return editions.editionManifestUrl(repo, edition);
+/** URL of the manifest of the cloud library release (`library-latest`). */
+function cloudManifestUrl(repo) {
+  return releases.libraryManifestUrl(repo);
 }
 
 /** Asset URL of a part, next to the manifest. */
@@ -78,12 +78,13 @@ function validateCloudManifest(m) {
   const totalZipBytes = int('totalZipBytes');
   const sum = parts.reduce((a, p) => a + p.sizeBytes, 0);
   if (sum !== totalZipBytes) throw new Error(`part sizes add up to ${sum} bytes, but totalZipBytes is ${totalZipBytes}`);
+  // `edition` (written by builds that still had a classic tier) is dropped: there is one library.
+  const { edition: _legacyEdition, ...rest } = m;
   return {
-    ...m,
+    ...rest,
     version: m.version,
     sourceRepo: m.sourceRepo ? String(m.sourceRepo) : null,
     scope: m.scope ? String(m.scope) : null,
-    edition: editions.editionOfManifest(m),
     builtAt: m.builtAt ? String(m.builtAt) : null,
     bookCount: int('bookCount'),
     paragraphCount: int('paragraphCount'),

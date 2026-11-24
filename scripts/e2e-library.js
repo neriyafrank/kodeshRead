@@ -11,11 +11,11 @@
  * card, personal library untouched) and restoring it on reload. Downloading, verifying
  * and indexing are covered in Node by `npm test`.
  *
- * Cloud library (two editions: `library-latest` = full, `library-classic-latest` = classic): the browser has no file system, so the test
- * mocks both library-manifest.json files and two tiny zip chunks (page.route) and runs the real pipeline over
- * in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): both edition cards with their live size / book
- * count, the installed-edition badge, update detection ("קיים עדכון בענן"), switching editions, the
- * low-storage warning, "חלק 2 מתוך 2 · … · 50%" progress while part 2 is in flight, and the install.
+ * Cloud library (ONE complete library: `library-latest`): the browser has no file system, so the test
+ * mocks library-manifest.json and two tiny zip chunks (page.route) and runs the real pipeline over
+ * in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): the single card with its live size / book
+ * count and one download button (no basic / full picker), an older persisted `{ edition, version }`
+ * record still loading cleanly, the up-to-date state, the low-storage warning, "חלק 2 מתוך 2 · … · 50%" progress while part 2 is in flight, and the install.
  *
  * Instant cloud starter: with no full library (core removed) a fresh user sees the starter catalog
  * (starter-catalog.json + starter-*.json.gz are mocked with page.route from REAL packs exported out of the
@@ -72,13 +72,12 @@ try {
   const zip = Buffer.from(zipSync({ 'core_library.db': new Uint8Array(fakeDb) }, { level: 6 }));
   const half = Math.ceil(zip.length / 2);
   const chunks = [zip.subarray(0, half), zip.subarray(half)];
-  const manifestOf = (edition, over) => ({
+  const manifestOf = (over) => ({
     sourceRepo: 'Sivan22/otzaria-library',
-    scope: edition === 'classic' ? 'classical_full' : 'all',
-    edition,
-    version: edition === 'classic' ? 'cloud-e2e-classic-1' : 'cloud-e2e-1',
+    scope: 'all',
+    version: 'cloud-e2e-1',
     builtAt: '2026-11-20T10:00:00.000Z',
-    bookCount: edition === 'classic' ? 6100 : 7674,
+    bookCount: 7674,
     paragraphCount: 1234567,
     uncompressedDbBytes: fakeDb.length,
     totalZipBytes: zip.length,
@@ -86,21 +85,25 @@ try {
     parts: chunks.map((c, i) => ({ name: `core_library.db.zip.part-0${i + 1}`, sizeBytes: c.length, sha256: sha(c) })),
     ...over,
   });
-  const cloud = { classic: manifestOf('classic'), full: manifestOf('full') };
-  const cloudManifest = cloud.full;
-  const cloudRequests = { classic: [], full: [] };
-  for (const [edition, tag] of [['classic', 'library-classic-latest'], ['full', 'library-latest']]) {
-    await page.route(`**/releases/download/${tag}/**`, async (route) => {
-      const name = decodeURIComponent(route.request().url().split('/').pop());
-      const cors = { 'access-control-allow-origin': '*' };
-      if (name === 'library-manifest.json') return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(cloud[edition]) });
-      const i = cloud[edition].parts.findIndex((p) => p.name === name);
-      if (i < 0) return route.fulfill({ status: 404, headers: cors, body: '' });
-      cloudRequests[edition].push(name);
-      if (i === 1) await new Promise((r) => setTimeout(r, 2500)); // part 2 is "in flight" while the test reads the progress
-      return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body: chunks[i] });
-    });
-  }
+  const cloud = { current: manifestOf() };
+  const cloudManifest = cloud.current;
+  const cloudRequests = [];
+  await page.route('**/releases/download/library-latest/**', async (route) => {
+    const name = decodeURIComponent(route.request().url().split('/').pop());
+    const cors = { 'access-control-allow-origin': '*' };
+    if (name === 'library-manifest.json') return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(cloud.current) });
+    const i = cloud.current.parts.findIndex((p) => p.name === name);
+    if (i < 0) return route.fulfill({ status: 404, headers: cors, body: '' });
+    cloudRequests.push(name);
+    if (i === 1) await new Promise((r) => setTimeout(r, 2500)); // part 2 is "in flight" while the test reads the progress
+    return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body: chunks[i] });
+  });
+  // The old classic release is never requested any more.
+  const classicRequests = [];
+  await page.route('**/releases/download/library-classic-latest/**', (route) => {
+    classicRequests.push(route.request().url());
+    return route.abort();
+  });
   // --- mocked starter release (real packs exported from the sample library) --------------------------
   const starterDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-starter-'));
   const starter = await exportStarterPacks({ dbFile: path.join(__dirname, '..', 'assets', 'db', 'library.db'), outDir: starterDir });
@@ -151,23 +154,20 @@ try {
 
     // --- Cloud library card (multi-part release) -------------------------------------------------
     await tid('cloud-library-card').waitFor();
-    await tid('cloud-info-classic').waitFor();
-    await tid('cloud-info-full').waitFor();
+    await tid('cloud-info').waitFor();
     const clean = (t) => t.replace(/[\u2066-\u2069]/g, ''); // bidi isolates are invisible
-    const classicInfo = clean(await tid('cloud-info-classic').innerText());
-    const fullInfo = clean(await tid('cloud-info-full').innerText());
-    assert.ok(/ספרים\s*6,100/.test(classicInfo) && /cloud-e2e-classic-1/.test(classicInfo) && /נבנתה/.test(classicInfo), classicInfo);
-    assert.ok(/ספרים\s*7,674/.test(fullInfo) && /cloud-e2e-1/.test(fullInfo) && /נבנתה/.test(fullInfo), fullInfo);
-    for (const ed of ['classic', 'full']) {
-      assert.ok(/2 חלקים/.test(clean(await tid(`cloud-size-${ed}`).innerText())), await tid(`cloud-size-${ed}`).innerText());
-      assert.notStrictEqual(await tid(`cloud-download-${ed}`).getAttribute('aria-disabled'), 'true', 'enabled in the e2e preview');
-      assert.strictEqual(await tid(`cloud-storage-warning-${ed}`).count(), 0, 'no warning while the storage is unknown');
-      assert.strictEqual(await tid(`cloud-installed-${ed}`).count(), 0, 'nothing installed from the cloud yet');
-    }
-    assert.ok((await tid('cloud-title-classic').innerText()).includes('ספרייה בסיסית (קלאסית)'));
-    assert.ok((await tid('cloud-title-full').innerText()).includes('ספרייה מלאה (כולל אחרוני זמננו)'));
+    const info = clean(await tid('cloud-info').innerText());
+    assert.ok(/ספרים\s*7,674/.test(info) && /cloud-e2e-1/.test(info) && /נבנתה/.test(info), info);
+    assert.ok(/2 חלקים/.test(clean(await tid('cloud-size').innerText())), await tid('cloud-size').innerText());
+    assert.notStrictEqual(await tid('cloud-download').getAttribute('aria-disabled'), 'true', 'enabled in the e2e preview');
+    assert.strictEqual(await tid('cloud-storage-warning').count(), 0, 'no warning while the storage is unknown');
+    assert.strictEqual(await page.locator('[data-testid^="cloud-download"]').count(), 1, 'one download button, no library picker');
+    assert.strictEqual(await page.locator('[data-testid^="cloud-installed"], [data-testid^="cloud-switch"]').count(), 0, 'no installed-tier badge or switch hint');
+    assert.ok((await tid('cloud-title').innerText()).includes('הספרייה המלאה'));
     const cardText = await tid('cloud-library-card').innerText();
-    assert.ok(cardText.includes('ללא אחרוני זמננו') && cardText.includes('כל מאגר אוצריא המלא'), cardText);
+    assert.ok(cardText.includes('כל מאגר אוצריא המלא') && !/בסיסית|ללא אחרוני זמננו|כולל אחרוני זמננו|מותקן כעת/.test(cardText), cardText);
+    assert.ok(clean(await tid('cloud-download').innerText()).includes('הורד'), await tid('cloud-download').innerText());
+    assert.ok(/\d+(\.\d+)? (KB|MB|GB)/.test(clean(await tid('cloud-download').innerText())), 'the button shows the total size');
     const cloudAlign = await page.evaluate(() => {
       const el = document.querySelector('[data-testid="cloud-library-card"]');
       const card = el.getBoundingClientRect();
@@ -182,10 +182,10 @@ try {
     assert.ok(cloudAlign.length >= 3, `cloud card labels (${cloudAlign.length})`);
     for (const t of cloudAlign) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft + 1, `"${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
     await shot('cloud-card');
-    step('cloud card: both editions with their own size + book count from their release manifests, RTL right-aligned');
+    step('cloud card: one complete library with its size + book count from library-latest, one download button, RTL right-aligned');
 
-    // Download the classic edition: part 1 completes, part 2 is in flight (progress), then assembly, extraction, install.
-    await tid('cloud-download-classic').click();
+    // Download the library: part 1 completes, part 2 is in flight (progress), then assembly, extraction, install.
+    await tid('cloud-download').click();
     await tid('job-status').waitFor();
     await page.waitForFunction(
       () => /חלק 2 מתוך 2 · \d+ (KB|MB) \/ \d+ (KB|MB) · \d+%/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[⁦-⁩]/g, '')),
@@ -195,89 +195,53 @@ try {
     const progressText = await tid('job-status').innerText();
     assert.ok(/מוריד/.test(progressText), progressText);
     await shot('cloud-progress');
-    assert.deepStrictEqual(cloudRequests.classic, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02'], 'parts are fetched sequentially, from the classic release');
-    assert.deepStrictEqual(cloudRequests.full, [], 'the full release is untouched');
+    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02'], 'parts are fetched sequentially (resumable chunked download), from library-latest');
     await tid('job-result').waitFor({ timeout: 30000 });
     const cloudDone = await tid('job-result').innerText();
-    assert.ok(cloudDone.includes('הותקנה מהענן') && cloudDone.includes('ספרייה בסיסית') && cloudDone.includes('cloud-e2e-classic-1') && cloudDone.includes('6,100'), cloudDone);
-    assert.strictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), 'cloud-e2e-classic-1', 'the staged library reached the install step');
+    assert.ok(cloudDone.includes('הותקנה מהענן') && cloudDone.includes('הספרייה המלאה') && cloudDone.includes('cloud-e2e-1') && cloudDone.includes('7,674') && !cloudDone.includes('בסיסית'), cloudDone);
+    assert.strictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), 'cloud-e2e-1', 'the staged (SHA-256 verified) library reached the install step');
     const recorded = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings') || '{}').state?.installedCloud);
-    assert.deepStrictEqual(recorded, { edition: 'classic', version: 'cloud-e2e-classic-1' }, 'the installed edition is recorded');
+    assert.deepStrictEqual(recorded, { version: 'cloud-e2e-1' }, 'the installed cloud version is recorded (no edition)');
     await shot('cloud-installed');
     await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
-    step('cloud download (classic): חלק 1 → חלק 2 מתוך 2 progress, assemble + extract, install, edition recorded');
+    step('cloud download: חלק 1 → חלק 2 מתוך 2 progress, assemble + extract, install, version recorded');
 
-    // The preview cannot swap the file, so pretend the classic library is the installed one: record the edition
-    // with the version of the core library that is really open (the sample DB).
     const coreVersion = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'assets', 'db', 'db-version.json'), 'utf8')).version;
     assert.ok(coreVersion, 'db-version.json has a version');
-    const installAs = (edition) =>
-      page.evaluate(
-        ([ed, v]) => {
-          const k = 'kodeshread.librarySettings';
-          const cur = JSON.parse(localStorage.getItem(k) || '{"state":{},"version":1}');
-          cur.state.installedCloud = { edition: ed, version: v };
-          localStorage.setItem(k, JSON.stringify(cur));
-        },
-        [edition, coreVersion],
-      );
     const reopenManager = async () => {
       await page.goto(BASE + '/', { timeout: 180000 });
       await tid('open-library-manager').last().waitFor({ timeout: 180000 });
       await tid('open-library-manager').last().click();
-      await tid('cloud-info-classic').waitFor({ timeout: 60000 });
-      await tid('cloud-info-full').waitFor({ timeout: 60000 });
+      await tid('cloud-info').waitFor({ timeout: 60000 });
     };
-    // 1. classic installed, the cloud has a newer classic version -> badge + "קיים עדכון בענן" on the classic card only.
-    await installAs('classic');
+    // 1. Backward compatibility: a persisted v1 record of an older build ({ edition: 'classic', version }) loads
+    //    cleanly (migrated), the card is the same single card and the library can be (re)downloaded.
+    await page.evaluate((v) => {
+      localStorage.setItem('kodeshread.librarySettings', JSON.stringify({ state: { manifestUrl: null, onboardingDismissed: true, starterOpen: true, installedCloud: { edition: 'classic', version: v } }, version: 1 }));
+    }, coreVersion);
     await reopenManager();
-    await tid('cloud-installed-classic').waitFor();
-    assert.ok((await tid('cloud-installed-classic').innerText()).includes('מותקן כעת'));
-    assert.strictEqual(await tid('cloud-installed-full').count(), 0, 'only the installed edition is badged');
-    assert.ok((await tid('cloud-update-classic').innerText()).includes('קיים עדכון בענן'));
-    assert.strictEqual(await tid('cloud-update-full').count(), 0, 'the other edition is not an update');
-    assert.ok((await tid('cloud-download-classic').innerText()).includes('עדכן'));
-    assert.ok((await tid('cloud-download-full').innerText()).includes('עבור ל'), await tid('cloud-download-full').innerText());
-    assert.strictEqual(await tid('cloud-switch-hint-full').count(), 1);
-    await shot('cloud-installed-classic');
-    step('installed edition badge "מותקן כעת" + update check of the installed edition only (library-classic-latest)');
+    assert.strictEqual(await page.locator('[data-testid^="cloud-download"]').count(), 1);
+    assert.ok(!/בסיסית|מותקן כעת/.test(await tid('cloud-library-card').innerText()), 'a recorded classic install shows no tier');
+    assert.notStrictEqual(await tid('cloud-download').getAttribute('aria-disabled'), 'true');
+    step('an older persisted { edition: classic } record loads cleanly: one card, nothing to choose');
 
-    // 2. the cloud classic version equals the installed one -> up to date, no update line.
-    cloud.classic = manifestOf('classic', { version: coreVersion });
+    // 2. The cloud version equals the installed one -> up to date; a newer cloud version -> a plain download / update button.
+    cloud.current = manifestOf({ version: coreVersion });
     await reopenManager();
     assert.ok((await tid('cloud-library-card').innerText()).includes('הגרסה המותקנת זהה לגרסה בענן'));
-    assert.strictEqual(await tid('cloud-update-classic').count(), 0);
-    cloud.classic = manifestOf('classic');
-
-    // 3. switch classic -> full: confirm, then the full release is downloaded (classic untouched).
-    cloudRequests.classic.length = 0;
+    assert.strictEqual(await tid('cloud-update').count(), 0);
+    cloud.current = manifestOf();
     await reopenManager();
-    await tid('cloud-download-full').click();
-    await tid('job-status').waitFor();
-    await tid('job-result').waitFor({ timeout: 30000 });
-    const switched = await tid('job-result').innerText();
-    assert.ok(switched.includes('ספרייה מלאה') && switched.includes('cloud-e2e-1') && switched.includes('7,674'), switched);
-    assert.deepStrictEqual(cloudRequests.full, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02'], 'the full release is fetched');
-    assert.deepStrictEqual(cloudRequests.classic, [], 'switching never touches the classic release');
-    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud), { edition: 'full', version: 'cloud-e2e-1' });
-    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
-    // ... and back: with the full edition installed the badge moves and classic becomes the switch target.
-    await installAs('full');
-    await reopenManager();
-    await tid('cloud-installed-full').waitFor();
-    assert.strictEqual(await tid('cloud-installed-classic').count(), 0);
-    assert.ok((await tid('cloud-download-classic').innerText()).includes('עבור ל'));
-    assert.strictEqual(await tid('cloud-update-classic').count(), 0);
-    assert.ok((await tid('cloud-update-full').innerText()).includes('קיים עדכון בענן'), 'full edition update detected against library-latest');
-    await shot('cloud-installed-full');
-    // The edition record is dropped again so the later steps see a plain library.
+    assert.ok(!(await tid('cloud-library-card').innerText()).includes('הגרסה המותקנת זהה'));
+    // The record is dropped again so the later steps see a plain library.
     await page.evaluate(() => {
       const k = 'kodeshread.librarySettings';
       const cur = JSON.parse(localStorage.getItem(k));
       cur.state.installedCloud = null;
       localStorage.setItem(k, JSON.stringify(cur));
     });
-    step('edition switch classic -> full (confirmed) uses the full release; installed badge follows; no cross-edition updates');
+    assert.deepStrictEqual(classicRequests, [], 'the removed classic release is never requested');
+    step('cloud version == installed -> up to date; a different cloud version -> download again, no tier switching');
 
     // Failure card: the exact sub-step + native error, and "copy error details".
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
@@ -331,7 +295,7 @@ try {
     const sections = (await page.locator('[data-testid^="starter-section-"]').evaluateAll((els) => els.map((e) => e.innerText.split('\n')[0])));
     assert.deepStrictEqual(sections, ['תנ"ך', 'תלמוד בבלי']);
     const bannerText = (await tid('starter-upgrade-banner').innerText()).replace(/\s+/g, ' ');
-    assert.ok(bannerText.includes('ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה'), bannerText);
+    assert.ok(bannerText.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא'), bannerText);
     assert.ok(bannerText.includes('הורד ספרייה מלאה'));
     for (const b of starter.catalog.books) {
       const badge = bidi(await tid(`starter-badge-${b.slug}`).innerText());
@@ -712,26 +676,25 @@ try {
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-library-manager').last().waitFor({ timeout: 180000 });
     await tid('open-library-manager').last().click();
-    await tid('cloud-info-full').last().waitFor({ timeout: 60000 });
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
     // Low free storage: warn clearly (zip + extracted DB + 500 MB), still allow "continue anyway".
     const need = cloudManifest.totalZipBytes + cloudManifest.uncompressedDbBytes + 500 * 1024 * 1024;
     await page.evaluate((v) => sessionStorage.setItem('e2e.freeBytes', String(v)), need - 1024);
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-library-manager').last().click();
-    await tid('cloud-storage-warning-full').waitFor();
-    await tid('cloud-storage-warning-classic').waitFor();
-    const warn = await tid('cloud-storage-warning-full').innerText();
+    await tid('cloud-storage-warning').waitFor();
+    const warn = await tid('cloud-storage-warning').innerText();
     assert.ok(/אין מספיק מקום פנוי/.test(warn) && /500 MB/.test(warn.replace(/[\u2066-\u2069]/g, '')), warn);
     await shot('cloud-warning');
     step('cloud card warns when free space < zip + DB + 500 MB');
     await page.evaluate(() => sessionStorage.removeItem('e2e.freeBytes'));
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-library-manager').last().click();
-    await tid('cloud-info-full').waitFor();
-    assert.strictEqual(await tid('cloud-storage-warning-full').count(), 0);
+    await tid('cloud-info').waitFor();
+    assert.strictEqual(await tid('cloud-storage-warning').count(), 0);
 
     // Themes: the card follows the palette.
-    const cardBg = () => tid('cloud-edition-full').last().evaluate((el) => getComputedStyle(el).backgroundColor);
+    const cardBg = () => tid('cloud-edition').last().evaluate((el) => getComputedStyle(el).backgroundColor);
     const lightBg = await cardBg();
     await page.evaluate(() => {
       const k = 'kodeshread.appearance';
@@ -740,7 +703,7 @@ try {
       localStorage.setItem(k, JSON.stringify(v));
     });
     await page.reload();
-    await tid('cloud-info-full').last().waitFor({ timeout: 60000 });
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
     const darkBg = await cardBg();
     assert.notStrictEqual(darkBg, lightBg, `card background follows the theme (${lightBg} / ${darkBg})`);
     await shot('cloud-dark');
@@ -751,7 +714,7 @@ try {
       localStorage.setItem(k, JSON.stringify(v));
     });
     await page.reload();
-    await tid('cloud-info-full').last().waitFor({ timeout: 60000 });
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
     assert.notStrictEqual(await cardBg(), lightBg, 'sepia differs from light');
     await page.evaluate(() => {
       const k = 'kodeshread.appearance';
@@ -760,7 +723,7 @@ try {
       localStorage.setItem(k, JSON.stringify(v));
     });
     await page.reload();
-    await tid('cloud-info-full').last().waitFor({ timeout: 60000 });
+    await tid('cloud-info').last().waitFor({ timeout: 60000 });
     step('cloud card in בהיר / ספיה / כהה');
 
     // --- "לימוד יומי" bar ------------------------------------------------------------------------

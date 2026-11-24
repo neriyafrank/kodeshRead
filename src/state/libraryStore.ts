@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import { normalizeInstalledCloud } from '../../shared/libraryRelease';
 
 interface LibraryUiState {
   /** Expanded category ids in the library tree. */
@@ -59,9 +60,9 @@ interface LibrarySettingsState {
   /** Library screen: the ספרי התחלה section is expanded (persisted; collapsed = just its header). */
   starterOpen: boolean;
   setStarterOpen: (open: boolean) => void;
-  /** Cloud edition (shared/editions.js) the app last installed, with its version (see installedEdition()). */
-  installedCloud: { edition: 'classic' | 'full'; version: string } | null;
-  setInstalledCloud: (edition: 'classic' | 'full', version: string) => void;
+  /** Version of the cloud library the app last installed (older builds also stored an `edition`: ignored). */
+  installedCloud: { version: string } | null;
+  setInstalledCloud: (version: string) => void;
   setManifestUrl: (url: string | null) => void;
   dismissOnboarding: (dismissed?: boolean) => void;
 }
@@ -75,10 +76,19 @@ export const useLibrarySettings = create<LibrarySettingsState>()(
       starterOpen: true,
       setStarterOpen: (starterOpen) => set({ starterOpen }),
       installedCloud: null,
-      setInstalledCloud: (edition, version) => set({ installedCloud: { edition, version } }),
+      setInstalledCloud: (version) => set({ installedCloud: { version } }),
       setManifestUrl: (url) => set({ manifestUrl: url && url.trim() ? url.trim() : null }),
       dismissOnboarding: (dismissed = true) => set({ onboardingDismissed: dismissed }),
     }),
-    { name: 'kodeshread.librarySettings', storage: createJSONStorage(() => AsyncStorage), version: 1 },
+    {
+      name: 'kodeshread.librarySettings',
+      storage: createJSONStorage(() => AsyncStorage),
+      version: 2,
+      // v1 stored `installedCloud: { edition: 'classic' | 'full', version }`: there is one library now.
+      migrate: (persisted) => {
+        const p = (persisted ?? {}) as Record<string, unknown>;
+        return { ...p, installedCloud: normalizeInstalledCloud(p.installedCloud) } as unknown as LibrarySettingsState;
+      },
+    },
   ),
 );

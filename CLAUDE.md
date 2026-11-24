@@ -163,7 +163,7 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `otzaria_index_only.txt`: 39 / 63 / 37 / 39 / 83+ / 4 books), e2e in `e2e:search`.
 
 > **Cloud library (multi-part release):** `.github/workflows/build-library.yml` (workflow_dispatch: `source_repo`,
-> `library_scope` = `classical_full` | `all`) builds `core_library.db` on a runner (`scripts/ci/fetch-otzaria-source.sh`,
+> `library_scope` was removed: always `all`) builds `core_library.db` on a runner (`scripts/ci/fetch-otzaria-source.sh`,
 > `build-db.js --scope --lean`, `scripts/cloud-release.js validate|manifest`), zips it, splits it into 1.5 GB
 > `core_library.db.zip.part-NN` and publishes them with `library-manifest.json` to the `library-latest` release. The app
 > side is `shared/multipart.js` (manifest validation, resumable part download, streaming assembly, extraction;
@@ -195,15 +195,14 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > ערוך". Audit: `node scripts/audit-parallels.js [--db=…]` (also in `build-library.yml`). Self-tested (section 16),
 > e2e in `e2e:commentary` / `e2e:library` (sample `משנה שבת` excerpt).
 
-> **Two cloud editions (basic / full):** `shared/editions.js` (pure) maps `classic` (`classical_full`, without the `מחברי זמננו` /
-> `אחרוני זמננו` folders; release `library-classic-latest`) and `full` (`all`; release `library-latest`, unchanged tag and asset names)
-> to scopes, tags and manifest URLs. `build-library.yml` (`editions`: `both` default | `full` | `classic`; matrix from
-> `scripts/ci/edition-matrix.js`, Node built-ins only) builds each edition in its own job and publishes to its own tag, so they never
-> overwrite each other; `starter-latest` is exported once per run (classic build, else full). Each build runs `cloud-release.js
-> check-edition` and `audit-parallels.js`. Manifests carry `edition` + `releaseTag`; `meta.scope` in the DB and
-> `libraryStore.installedCloud` tell the app which edition is installed (`editions.installedEdition`). `CloudLibraryCard.tsx` shows both
-> editions (live size + book count from each manifest, `מותקן כעת` badge, `קיים עדכון בענן` only for the installed edition's own release,
-> switching confirmed; `LibraryContext.installCore` remaps open tabs by title + folder). Self-tested (section 12 "editions"), `e2e:library`.
+> **One complete cloud library:** there is no basic / full distinction. `shared/libraryRelease.js` (pure) names the single release
+> (`all` scope -> `library-latest`; `libraryAction` = install / current / update; `normalizeInstalledCloud` migrates the persisted
+> `installedCloud` of older builds `{ edition, version }` -> `{ version }`, `libraryStore` version 2). `build-library.yml` has no matrix or
+> `editions` input and builds / publishes the one library (+ `starter-latest`, `audit-parallels.js`). Manifests carry `releaseTag` (a legacy
+> `edition` field is dropped on validation). A DB installed from the older `classical_full` build is a partial scope: the card offers
+> `עדכן ספרייה` to the complete one (`LibraryContext.installCore` remaps tabs). `CloudLibraryCard.tsx` = one card, one button, no badges
+> or switching. (`build-db.js --scope=classical_full` remains only as a developer filter, never used by CI or the app.) Self-tested
+> (section 12 "library release"), `e2e:library`.
 
 > **Resilient cloud download:** `shared/multipart.js` `downloadParts` writes each part to `<part>.partial` and renames it when it
 > has the manifest size; the partial is never deleted on an error, the retry continues it with an HTTP Range request

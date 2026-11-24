@@ -1128,7 +1128,7 @@ async function starterPackTests() {
     await check('starter UI: Library screen shows the catalog, cloud / offline badges, loading text and the upgrade banner', () => {
       const ui = fs.readFileSync(path.join(ROOT, 'src/components/library/StarterBooks.tsx'), 'utf8');
       const home = fs.readFileSync(path.join(ROOT, 'src/app/index.tsx'), 'utf8');
-      assert.ok(ui.includes('ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה') && ui.includes('testID="starter-upgrade-banner"'));
+      assert.ok(ui.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא') && ui.includes('testID="starter-upgrade-banner"'));
       assert.ok(ui.includes("router.navigate('/library-manager')"), 'the banner leads to the manager with the cloud library card');
       assert.ok(ui.includes('טוען את ${t} מהענן…') && ui.includes('☁ · ${formatBytes(b.sizeBytes)}') && ui.includes('✓ זמין לא מקוון'));
       assert.ok(/const starterMode = layout\.starter/.test(home) && home.includes('homeLayout(') && home.includes('<StarterBooks'));
@@ -3677,34 +3677,21 @@ async function cloudLibraryTests() {
       assert.throws(() => cloudRelease.validateDb(path.join(tmp, 'classical.db')), /ref_links is empty/);
     });
 
-    // --- two editions: classic (library-classic-latest) | full (library-latest) ----------------------------
-    const editions = require('../shared/editions');
-    const { buildMatrix } = require('./ci/edition-matrix');
-    await check('editions: release tags, scopes and manifest URLs of classic (library-classic-latest) and full (library-latest)', () => {
-      assert.deepStrictEqual(editions.EDITION_IDS, ['classic', 'full']);
-      assert.strictEqual(editions.editionTag('full'), 'library-latest', 'the original tag stays the full edition');
-      assert.strictEqual(editions.editionTag('classic'), 'library-classic-latest');
-      assert.strictEqual(editions.editionScope('classic'), 'classical_full');
-      assert.strictEqual(editions.editionScope('full'), 'all');
-      assert.ok(libraryScope.SCOPES.includes(editions.editionScope('classic')) && libraryScope.SCOPES.includes(editions.editionScope('full')));
-      assert.strictEqual(mp.cloudManifestUrl('o/r'), 'https://github.com/o/r/releases/download/library-latest/library-manifest.json');
-      assert.strictEqual(mp.cloudManifestUrl('o/r', 'full'), 'https://github.com/o/r/releases/download/library-latest/library-manifest.json');
-      assert.strictEqual(mp.cloudManifestUrl('o/r', 'classic'), 'https://github.com/o/r/releases/download/library-classic-latest/library-manifest.json');
-      assert.strictEqual(mp.partUrl(mp.cloudManifestUrl('o/r', 'classic'), { name: 'core_library.db.zip.part-02' }), 'https://github.com/o/r/releases/download/library-classic-latest/core_library.db.zip.part-02');
-      assert.strictEqual(editions.tagOfManifestUrl(mp.cloudManifestUrl('o/r', 'classic')), 'library-classic-latest');
-      assert.strictEqual(editions.editionOfUrl(mp.cloudManifestUrl('o/r', 'classic')), 'classic');
-      assert.strictEqual(editions.editionOfUrl(mp.cloudManifestUrl('o/r', 'full')), 'full');
-      assert.strictEqual(editions.editionOfUrl('https://example.com/x/library-manifest.json'), null);
-      assert.notStrictEqual(editions.editionTag('classic'), editions.editionTag('full'), 'never the same release: no overwriting');
-      assert.throws(() => editions.editionTag('huge'), /edition must be/);
+    // --- one complete cloud library (shared/libraryRelease.js): scope all -> library-latest -------------------
+    const releases = require('../shared/libraryRelease');
+    await check('library release: a single tag / scope / manifest URL (no basic tier)', () => {
+      assert.strictEqual(releases.LIBRARY_TAG, 'library-latest');
+      assert.strictEqual(releases.LIBRARY_SCOPE, 'all');
+      assert.ok(libraryScope.SCOPES.includes(releases.LIBRARY_SCOPE));
+      assert.strictEqual(releases.libraryManifestUrl('o/r'), 'https://github.com/o/r/releases/download/library-latest/library-manifest.json');
+      assert.strictEqual(mp.cloudManifestUrl('o/r'), releases.libraryManifestUrl('o/r'));
+      assert.strictEqual(mp.partUrl(mp.cloudManifestUrl('o/r'), { name: 'core_library.db.zip.part-02' }), 'https://github.com/o/r/releases/download/library-latest/core_library.db.zip.part-02');
+      assert.strictEqual(releases.tagOfManifestUrl(mp.cloudManifestUrl('o/r')), 'library-latest');
+      assert.strictEqual(mp.CLOUD_RELEASE_TAG, 'library-latest');
+      for (const gone of ['shared/editions.js', 'shared/editions.d.ts', 'scripts/ci/edition-matrix.js']) assert.ok(!fs.existsSync(path.join(ROOT, gone)), `${gone} is removed`);
     });
-    await check('editions: אחרוני זמננו is excluded from classic and included in full (folder filter + built DBs)', async () => {
-      for (const name of ['מחברי זמננו', 'מחברי זמנינו', 'אחרוני זמננו', 'אחרוני זמנינו']) {
-        assert.ok(libraryScope.isExcludedDir(editions.editionScope('classic'), name), `classic drops ${name}`);
-        assert.ok(!libraryScope.isExcludedDir(editions.editionScope('full'), name), `full keeps ${name}`);
-      }
-      // The real Acharonim / Rishonim folders are NOT the contemporary-authors folder.
-      for (const name of ['אחרונים', 'ראשונים', 'תנך', 'הלכה']) assert.ok(!libraryScope.isExcludedDir('classical_full', name), name);
+    await check('library release: the complete scope keeps every folder, incl. אחרוני / מחברי זמננו', async () => {
+      for (const name of ['מחברי זמננו', 'מחברי זמנינו', 'אחרוני זמננו', 'אחרוני זמנינו', 'אחרונים', 'ראשונים']) assert.ok(!libraryScope.isExcludedDir(releases.LIBRARY_SCOPE, name), `the library keeps ${name}`);
       const src = path.join(tmp, 'ed-src');
       const w = (rel, lines) => {
         const f = path.join(src, ...rel.split('/'));
@@ -3715,118 +3702,76 @@ async function cloudLibraryTests() {
       w('repo/אוצריא/אחרונים/ספר קלאסי.txt', ['<h1>ספר קלאסי</h1>', 'טקסט']);
       w('repo/אוצריא/הלכה/אחרוני זמננו/ספר מודרני.txt', ['<h1>ספר מודרני</h1>', 'טקסט מודרני']);
       w('repo/אוצריא/הלכה/מחברי זמננו/ספר עכשווי.txt', ['<h1>ספר עכשווי</h1>', 'טקסט עכשווי']);
-      const titles = (file) => {
-        const db = writable(file);
-        try {
-          return db.prepare('SELECT title FROM books ORDER BY title').all().map((r) => r.title);
-        } finally {
-          db.close();
-        }
-      };
-      const out = {};
-      for (const ed of editions.EDITION_IDS) {
-        out[ed] = path.join(tmp, `edition-${ed}.db`);
-        const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts/build-db.js'), `--source=${src}`, `--scope=${editions.editionScope(ed)}`, '--lean', `--out=${out[ed]}`], { encoding: 'utf8' });
-        assert.strictEqual(r.status, 0, r.stderr + r.stdout);
+      const file = path.join(tmp, 'library-all.db');
+      const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts/build-db.js'), `--source=${src}`, `--scope=${releases.LIBRARY_SCOPE}`, '--lean', `--out=${file}`], { encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr + r.stdout);
+      const db = writable(file);
+      try {
+        assert.deepStrictEqual(db.prepare('SELECT title FROM books ORDER BY title').all().map((x) => x.title), ['בראשית', 'ספר מודרני', 'ספר עכשווי', 'ספר קלאסי']);
+        assert.strictEqual(db.prepare("SELECT value FROM meta WHERE key = 'scope'").get().value, 'all');
+      } finally {
+        db.close();
       }
-      assert.deepStrictEqual(titles(out.classic), ['בראשית', 'ספר קלאסי'], 'classic: no contemporary authors, real אחרונים stay');
-      assert.deepStrictEqual(titles(out.full), ['בראשית', 'ספר מודרני', 'ספר עכשווי', 'ספר קלאסי']);
-      // meta.scope tells the app which edition a DB is.
-      for (const [ed, file] of Object.entries(out)) {
-        const db = writable(file);
-        try {
-          assert.strictEqual(db.prepare("SELECT value FROM meta WHERE key = 'scope'").get().value, editions.editionScope(ed));
-        } finally {
-          db.close();
-        }
-      }
-      // The CI check: classic must hold no modern-authors book; full reports them.
-      assert.strictEqual(cloudRelease.checkEdition(out.classic, 'classic').modern, 0);
-      assert.strictEqual(cloudRelease.checkEdition(out.full, 'full').modern, 2);
-      assert.throws(() => cloudRelease.checkEdition(out.full, 'classic'), /classic edition contains 2 book/);
-      assert.ok(cloudRelease.checkEdition(out.classic, 'full').warnings.length === 1, 'a full edition without modern authors warns');
-      // Same source, different scope -> different db_version (an edition switch is never "up to date").
-      const version = (file) => {
-        const db = writable(file);
-        try {
-          return db.prepare("SELECT value FROM meta WHERE key = 'db_version'").get().value;
-        } finally {
-          db.close();
-        }
-      };
-      assert.notStrictEqual(version(out.classic), version(out.full));
     });
-    await check('editions: manifests carry their edition (manifest field, else derived from the scope)', async () => {
+    await check('library release: manifests (scope all, library-latest); legacy classic manifest fields are ignored', async () => {
       const stats = { version: 'v1', builtAt: '2026-01-01T00:00:00Z', bookCount: 3, paragraphCount: 9, uncompressedDbBytes: 100 };
       const pd = path.join(tmp, 'ed-parts');
       fs.mkdirSync(pd, { recursive: true });
       fs.writeFileSync(path.join(pd, 'core_library.db.zip.part-01'), Buffer.from('abc'));
-      const c = await cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r', scope: 'classical_full' });
-      assert.deepStrictEqual([c.edition, c.releaseTag, c.scope], ['classic', 'library-classic-latest', 'classical_full']);
-      const f = await cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r', scope: 'all', edition: 'full' });
-      assert.deepStrictEqual([f.edition, f.releaseTag], ['full', 'library-latest']);
-      await assert.rejects(() => cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r', scope: 'all', edition: 'classic' }), /classic is built with scope classical_full/);
-      assert.strictEqual(mp.validateCloudManifest(c).edition, 'classic');
-      assert.strictEqual(mp.validateCloudManifest(f).edition, 'full');
-      // A manifest of a release published before editions has no field: derived from its scope.
-      const { edition: _e, releaseTag: _t, ...old } = f;
-      assert.strictEqual(mp.validateCloudManifest(old).edition, 'full');
-      assert.strictEqual(mp.validateCloudManifest({ ...old, scope: 'classical_full' }).edition, 'classic');
-      assert.strictEqual(mp.validateCloudManifest({ ...old, scope: null }).edition, null);
+      const f = await cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r', scope: 'all' });
+      assert.deepStrictEqual([f.releaseTag, f.scope, 'edition' in f], ['library-latest', 'all', false]);
+      assert.strictEqual((await cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r' })).scope, 'all', 'scope defaults to the complete library');
+      await assert.rejects(() => cloudRelease.buildManifest({ stats, partsDir: pd, sourceRepo: 'o/r', scope: 'classical_full' }), /scope all, not classical_full/);
+      assert.ok(!('edition' in mp.validateCloudManifest({ ...f, edition: 'full' })), 'a manifest published with an edition field still validates; the field is dropped');
+      assert.ok(!('edition' in mp.validateCloudManifest({ ...f, edition: 'classic' })));
+      const { releaseTag: _t, ...old } = f;
+      assert.strictEqual(mp.validateCloudManifest(old).version, 'v1', 'a manifest from before releaseTag still validates');
     });
-    await check('editions: installed edition tracking, update detection per edition and clean switching', () => {
-      const man = (edition, version) => ({ edition, version, scope: editions.editionScope(edition) });
-      // installed edition: meta.scope wins, then the recorded install, only while the version matches
-      assert.strictEqual(editions.installedEdition({ scope: 'classical_full', version: 'a' }, null), 'classic');
-      assert.strictEqual(editions.installedEdition({ scope: 'all', version: 'a' }, { edition: 'classic', version: 'a' }), 'full', 'meta beats the record');
-      assert.strictEqual(editions.installedEdition({ scope: null, version: 'a' }, { edition: 'classic', version: 'a' }), 'classic');
-      assert.strictEqual(editions.installedEdition({ scope: null, version: 'b' }, { edition: 'classic', version: 'a' }), null, 'a stale record is ignored');
-      assert.strictEqual(editions.installedEdition(null, { edition: 'full', version: 'a' }), null, 'nothing installed');
-      const act = (installedEdition, installedVersion, manifest) => editions.editionAction({ installedEdition, installedVersion, manifest });
-      assert.strictEqual(act(null, null, man('classic', 'c1')), 'install');
-      assert.strictEqual(act('classic', 'c1', man('classic', 'c1')), 'current');
-      assert.strictEqual(act('classic', 'c1', man('classic', 'c2')), 'update', 'קיים עדכון בענן: same edition, new version');
-      assert.strictEqual(act('full', 'f1', man('full', 'f2')), 'update');
-      // The other edition is never an "update" (different release tag, different version): a switch.
-      assert.strictEqual(act('classic', 'c1', man('full', 'f1')), 'switch');
-      assert.strictEqual(act('full', 'f1', man('classic', 'c1')), 'switch');
-      assert.strictEqual(act('full', 'f1', man('classic', 'f1')), 'switch', 'even with an equal version string');
-      // A library of unknown edition (device build / pre-edition download) is replaced, never "switched".
-      assert.strictEqual(act(null, 'x', man('full', 'f1')), 'install');
-      assert.strictEqual(act(null, 'f1', man('full', 'f1')), 'current');
-      // An update check of the installed edition reads that edition's own release.
-      const installed = 'classic';
-      assert.strictEqual(editions.tagOfManifestUrl(mp.cloudManifestUrl('o/r', installed)), 'library-classic-latest');
-      // classic -> full -> classic round trip
-      let state = { ed: 'classic', v: 'c1' };
-      for (const target of [man('full', 'f1'), man('classic', 'c1')]) {
-        assert.strictEqual(act(state.ed, state.v, target), 'switch');
-        state = { ed: target.edition, v: target.version };
-        assert.strictEqual(act(state.ed, state.v, target), 'current');
+    await check('library release: install / current / update, and an older classic install updates cleanly to the complete library', () => {
+      const man = (version) => ({ version, scope: 'all' });
+      const act = (installedScope, installedVersion, version) => releases.libraryAction({ installedScope, installedVersion, manifest: man(version) });
+      assert.strictEqual(act(null, null, 'f1'), 'install', 'nothing installed');
+      assert.strictEqual(act('all', 'f1', 'f1'), 'current');
+      assert.strictEqual(act('all', 'f1', 'f2'), 'update', 'קיים עדכון בענן');
+      // Older builds installed a classic (classical_full) library: it is always offered the complete one, even at an equal version string.
+      assert.strictEqual(act('classical_full', 'c1', 'f1'), 'update');
+      assert.strictEqual(act('classical_full', 'f1', 'f1'), 'update');
+      assert.ok(releases.isPartialScope('classical_full') && !releases.isPartialScope('all') && !releases.isPartialScope(null));
+      // A library of unknown origin (built on the device / pre-scope download) is replaced, never an error.
+      assert.strictEqual(act(null, 'x', 'f1'), 'install');
+      assert.strictEqual(act(null, 'f1', 'f1'), 'current');
+      // persisted `installedCloud` of older builds ({ edition, version }) migrates to { version }
+      assert.deepStrictEqual(releases.normalizeInstalledCloud({ edition: 'classic', version: 'c1' }), { version: 'c1' });
+      assert.deepStrictEqual(releases.normalizeInstalledCloud({ edition: 'full', version: 'f1' }), { version: 'f1' });
+      assert.deepStrictEqual(releases.normalizeInstalledCloud({ version: 'f1' }), { version: 'f1' });
+      for (const junk of [null, undefined, 'x', {}, { version: '' }, { edition: 'classic' }]) assert.strictEqual(releases.normalizeInstalledCloud(junk), null);
+      const store = fs.readFileSync(path.join(ROOT, 'src/state/libraryStore.ts'), 'utf8');
+      assert.ok(store.includes('normalizeInstalledCloud') && /version: 2/.test(store) && !/edition/.test(store.replace(/older builds also stored an `edition`[^\n]*|v1 stored[^\n]*/g, '')), 'store migrates v1 and keeps no edition field');
+    });
+    await check('library release: the app has one card, one download button and no basic / full picker', () => {
+      const card = fs.readFileSync(path.join(ROOT, 'src/components/library/CloudLibraryCard.tsx'), 'utf8');
+      for (const id of ['cloud-download"', 'cloud-info"', 'cloud-size"', 'cloud-books"', 'libraryAction']) assert.ok(card.includes(id), id);
+      for (const gone of ['EDITION', 'cloud-installed', 'מותקן כעת', 'ספרייה בסיסית', 'מעבר בין מהדורות', 'עבור ל', 'switch']) assert.ok(!card.includes(gone), `card has no ${gone}`);
+      for (const f of ['src/components/library/StarterBooks.tsx', 'src/app/index.tsx', 'src/services/cloudLibrary.ts', 'src/services/libraryActions.ts', 'src/db/LibraryContext.tsx']) {
+        const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
+        assert.ok(!/library-classic-latest|cloudClassicManifestUrl|shared\/editions|בסיסית/.test(text), `${f} has no basic-tier leftovers`);
       }
     });
-    await check('editions: the workflow builds both editions to separate tags (matrix, starter once, audit + edition check per build)', () => {
-      const both = buildMatrix('both').include;
-      assert.deepStrictEqual(both.map((e) => [e.edition, e.scope, e.tag]), [['full', 'all', 'library-latest'], ['classic', 'classical_full', 'library-classic-latest']]);
-      assert.strictEqual(both.filter((e) => e.starter).length, 1, 'starter packs exported exactly once');
-      assert.strictEqual(both.find((e) => e.starter).edition, 'classic');
-      assert.deepStrictEqual(buildMatrix('full').include.map((e) => [e.edition, e.starter]), [['full', true]]);
-      assert.deepStrictEqual(buildMatrix('classic').include.map((e) => [e.edition, e.tag, e.starter]), [['classic', 'library-classic-latest', true]]);
-      assert.throws(() => buildMatrix('huge'), /edition must be/);
+    await check('library release: the workflow builds the one complete library (scope all -> library-latest), starter + audit from the same build', () => {
       const text = fs.readFileSync(path.join(ROOT, '.github/workflows/build-library.yml'), 'utf8');
-      assert.ok(text.includes('fail-fast: false') && text.includes('matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}'));
-      assert.ok(text.includes('RELEASE_TAG: ${{ matrix.tag }}') && !/RELEASE_TAG: library-/.test(text), 'the tag comes from the matrix');
-      assert.ok(text.includes('if: ${{ matrix.starter }}') && text.includes('!cancelled() && matrix.starter'), 'starter export + publish only once');
+      assert.ok(text.includes('RELEASE_TAG: library-latest') && text.includes('LIBRARY_SCOPE: all'));
+      assert.ok(!/matrix|edition|classic|classical_full|check-edition/i.test(text.replace(/^#.*$/gm, '')), 'no matrix / edition / classic tier in the workflow');
+      assert.ok(!text.includes('plan:') && !text.includes('inputs.editions'));
       const at = (needle) => {
         const i = text.indexOf(needle);
         assert.ok(i >= 0, `workflow lacks: ${needle}`);
         return i;
       };
-      assert.ok(at('cloud-release.js check-edition') > at('cloud-release.js validate') && at('cloud-release.js check-edition') < at('node scripts/audit-parallels.js'));
-      assert.ok(at('node scripts/audit-parallels.js') < at('export-starter-packs.js --db=') && text.lastIndexOf('--edition="$EDITION"') > at('cloud-release.js manifest'));
+      assert.ok(at('cloud-release.js validate') < at('node scripts/audit-parallels.js') && at('node scripts/audit-parallels.js') < at('export-starter-packs.js --db=') && at('export-starter-packs.js --db=') < at('cloud-release.js manifest'));
+      assert.ok(!/classical_full|--scope/.test(fs.readFileSync(path.join(ROOT, 'scripts/ci/fetch-otzaria-source.sh'), 'utf8').replace(/^#.*$/gm, '')), 'the fetch script has no tier filter');
       // Zero node_modules in CI: every script the workflow runs requires only built-ins / relative modules.
       assert.ok(!/npm (ci|install)|npx |yarn |pnpm /.test(text), 'no package install in build-library.yml');
-      for (const f of ['scripts/ci/edition-matrix.js', 'scripts/cloud-release.js', 'scripts/export-starter-packs.js', 'scripts/audit-parallels.js', 'scripts/build-db.js', 'shared/editions.js', 'shared/libraryScope.js']) {
+      for (const f of ['scripts/cloud-release.js', 'scripts/export-starter-packs.js', 'scripts/audit-parallels.js', 'scripts/build-db.js', 'shared/libraryRelease.js', 'shared/libraryScope.js']) {
         const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
         for (const m of src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
           const dep = m[1];
@@ -3854,10 +3799,10 @@ async function cloudLibraryTests() {
     fs.mkdirSync(partsDir);
     slices.forEach((b, i) => fs.writeFileSync(path.join(partsDir, mp.partName(i + 1)), b));
     const stats = { version: 'v-test', builtAt: '2026-01-01T00:00:00.000Z', bookCount: 15, paragraphCount: 9106, uncompressedDbBytes: dbBytes.length };
-    const manifest = await cloudRelease.buildManifest({ stats, partsDir, sourceRepo: 'Sivan22/otzaria-library', scope: 'classical_full' });
+    const manifest = await cloudRelease.buildManifest({ stats, partsDir, sourceRepo: 'Sivan22/otzaria-library', scope: 'all' });
 
     await check('multipart: CI manifest has the documented fields, ordered parts and the whole-zip hash', () => {
-      assert.deepStrictEqual(Object.keys(manifest), ['sourceRepo', 'scope', 'edition', 'releaseTag', 'version', 'builtAt', 'bookCount', 'paragraphCount', 'uncompressedDbBytes', 'totalZipBytes', 'fullZipSha256', 'parts']);
+      assert.deepStrictEqual(Object.keys(manifest), ['sourceRepo', 'scope', 'releaseTag', 'version', 'builtAt', 'bookCount', 'paragraphCount', 'uncompressedDbBytes', 'totalZipBytes', 'fullZipSha256', 'parts']);
       assert.strictEqual(manifest.parts.length, 3);
       assert.deepStrictEqual(manifest.parts.map((p) => p.name), ['core_library.db.zip.part-01', 'core_library.db.zip.part-02', 'core_library.db.zip.part-03']);
       assert.strictEqual(manifest.totalZipBytes, zipBuf.length);
@@ -4387,8 +4332,7 @@ async function cloudLibraryTests() {
         const wd = (doc.on || doc.true).workflow_dispatch.inputs; // YAML 1.1 reads the key `on` as true
         assert.deepStrictEqual(wd.source_repo.options, ['Sivan22/otzaria-library', 'Otzaria/otzaria-library']);
         assert.strictEqual(wd.source_repo.default, 'Sivan22/otzaria-library');
-  assert.deepStrictEqual(wd.editions.options, ['both', 'full', 'classic']);
-        assert.strictEqual(wd.editions.default, 'both');
+        assert.ok(!('editions' in wd), 'no edition picker input');
         assert.strictEqual(doc.permissions.contents, 'write');
       }
       const at = (needle) => {
@@ -4399,7 +4343,7 @@ async function cloudLibraryTests() {
       assert.ok(text.includes('/usr/share/dotnet') && text.includes('/usr/local/lib/android') && text.includes('/opt/ghc'));
       const order = ['Free disk space', 'fetch-otzaria-source.sh', 'scripts/build-db.js', 'rm -rf "$WORK/src"', 'cloud-release.js validate', 'zip -9', 'rm -f core_library.db core_library.db-journal', 'split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1', 'rm -f core_library.db.zip', 'cloud-release.js manifest', 'gh release upload "$RELEASE_TAG" library-manifest.json'].map(at);
       assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), 'steps run in the documented order');
-      assert.ok(/PART_SIZE: 1500M/.test(text) && text.includes('RELEASE_TAG: ${{ matrix.tag }}') && text.includes('--scope="$LIBRARY_SCOPE"'));
+      assert.ok(/PART_SIZE: 1500M/.test(text) && text.includes('RELEASE_TAG: library-latest') && text.includes('--scope="$LIBRARY_SCOPE"'));
       assert.ok(text.includes('-lt 35'), '35 GB free-space guard');
     });
   } finally {

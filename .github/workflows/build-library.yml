@@ -3,12 +3,9 @@ name: Build cloud library
 # Indexes the Otzaria library into core_library.db in the cloud and publishes it as a multi-part
 # GitHub Release that the app downloads and installs on the phone (Library manager -> "ספרייה מוכנה מהענן").
 #
-# Two editions, each built by its own matrix job and published to its OWN release tag (never overwriting
-# each other; shared/editions.js is the single source of the names):
-#   full     scope `all`            -> `library-latest`          (every folder, incl. אחרוני / מחברי זמננו)
-#   classic  scope `classical_full` -> `library-classic-latest`  (without אחרוני / מחברי זמננו)
-# `editions: both` (default) builds and publishes both in one manual run. The instant starter packs are
-# exported once per run (from the classic build, else the full one). Only Node built-ins are used.
+# One complete library: scope `all` (every Otzaria folder) -> release `library-latest`
+# (shared/libraryRelease.js is the single source of the names). The instant starter packs are
+# exported from the same build. Only Node built-ins are used.
 #
 #   source archive -> build-db.js -> (source deleted) -> validate -> core_library.db.zip
 #   -> (db deleted) -> 1.5 GB parts -> (zip deleted) -> library-manifest.json -> release
@@ -32,14 +29,6 @@ on:
         options:
           - Sivan22/otzaria-library
           - Otzaria/otzaria-library
-      editions:
-        description: both = full + classic (one run publishes both); full = library-latest (with אחרוני זמננו); classic = library-classic-latest (without)
-        type: choice
-        default: both
-        options:
-          - both
-          - full
-          - classic
 
 permissions:
   contents: write
@@ -50,6 +39,8 @@ concurrency:
 
 env:
   STARTER_TAG: starter-latest
+  RELEASE_TAG: library-latest
+  LIBRARY_SCOPE: all
   GH_TOKEN: ${{ github.token }}
   # gh must never need a .git folder (steps run in $WORK, which is not a repository).
   GH_REPO: ${{ github.repository }}
@@ -58,29 +49,10 @@ env:
   WORK: /mnt/library-work
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - name: Check out
-        uses: actions/checkout@v6
-      - name: Plan the editions
-        id: matrix
-        run: echo "matrix=$(node scripts/ci/edition-matrix.js "${{ inputs.editions }}")" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Build ${{ matrix.edition }} edition
-    needs: plan
+    name: Build the library
     runs-on: ubuntu-latest
     timeout-minutes: 360
-    strategy:
-      fail-fast: false # one edition failing never cancels the other
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    env:
-      RELEASE_TAG: ${{ matrix.tag }}
-      EDITION: ${{ matrix.edition }}
-      LIBRARY_SCOPE: ${{ matrix.scope }}
     steps:
       - name: Check out
         uses: actions/checkout@v6
@@ -107,7 +79,7 @@ jobs:
           node-version: 22 # node:sqlite (FTS5) needs >= 22.13
 
       - name: Fetch source (${{ inputs.source_repo }})
-        run: bash scripts/ci/fetch-otzaria-source.sh "${{ inputs.source_repo }}" "$WORK/src" "$LIBRARY_SCOPE"
+        run: bash scripts/ci/fetch-otzaria-source.sh "${{ inputs.source_repo }}" "$WORK/src"
 
       - name: Index the library (core_library.db)
         run: |
@@ -120,18 +92,12 @@ jobs:
       - name: Validate the database
         run: node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
 
-      - name: Check the edition filter (אחרוני זמננו)
-        # classic: no book under a contemporary-authors folder; full: warns when the source has none.
-        run: node scripts/cloud-release.js check-edition --db="$WORK/core_library.db" --edition="$EDITION"
-
       - name: Audit parallel works and book roles
         # Every parallel-family member (טור / שו"ע, משנה / בבלי / ירושלמי / תוספתא, חומש / מדרש רבה ...)
         # must stay a standalone work: no commentary leaks, no excluded title (קיצור שו"ע, חיי אדם ...).
         run: node scripts/audit-parallels.js --db="$WORK/core_library.db"
 
       - name: Export starter packs (instant cloud starter)
-        # Once per run: only the matrix entry flagged `starter` (classic when it is built, else full).
-        if: ${{ matrix.starter }}
         run: |
           set -euo pipefail
           # Must run before the compress step deletes core_library.db. A real library has all of them
@@ -163,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/cloud-release.js manifest --stats="$WORK/stats.json" --parts-dir="$WORK/parts" \
-            --source-repo="${{ inputs.source_repo }}" --scope="$LIBRARY_SCOPE" --edition="$EDITION" \
+            --source-repo="${{ inputs.source_repo }}" --scope="$LIBRARY_SCOPE" \
             --out="$WORK/library-manifest.json"
           cat "$WORK/library-manifest.json"
 
@@ -176,13 +142,13 @@ jobs:
           set -euo pipefail
           cd "$WORK"
           version=$(node -p "require('./library-manifest.json').version")
-          notes="Pre-indexed core library, ${EDITION} edition (${SOURCE_REPO}, scope ${LIBRARY_SCOPE}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
+          notes="Pre-indexed core library (${SOURCE_REPO}, scope ${LIBRARY_SCOPE}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes" --latest=false
             # Unpublish the old manifest first: no client pairs it with half-replaced parts.
             gh release delete-asset "$RELEASE_TAG" library-manifest.json --repo "$GITHUB_REPOSITORY" -y || true
           else
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Cloud library (${EDITION} edition)" --notes "$notes" --latest=false --target "$GITHUB_SHA"
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Cloud library" --notes "$notes" --latest=false --target "$GITHUB_SHA"
           fi
           for f in parts/core_library.db.zip.part-*; do
             for attempt in 1 2 3; do
@@ -201,7 +167,7 @@ jobs:
       - name: Publish starter packs (release ${{ env.STARTER_TAG }})
         # Independent of the library releases: runs (when the packs were exported) even if the multi-GB
         # upload failed, and never touches the library-latest assets.
-        if: ${{ !cancelled() && matrix.starter }}
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -253,7 +219,7 @@ jobs:
               echo "Starter packs: \`${STARTER_TAG}\` · $(CAT="$WORK/starter/starter-catalog.json" node -p "const c=require(process.env.CAT);c.books.length+' book(s), '+Math.round(c.books.reduce((a,b)=>a+b.sizeBytes,0)/1024)+' KB'" 2>/dev/null || echo unreadable)"
               echo
             fi
-            echo "Release: \`${RELEASE_TAG}\` (${EDITION} edition) · source \`${SOURCE_REPO}\` · scope \`${LIBRARY_SCOPE}\`"
+            echo "Release: \`${RELEASE_TAG}\` · source \`${SOURCE_REPO}\` · scope \`${LIBRARY_SCOPE}\`"
             if [ -f "$manifest" ]; then
               echo
               echo '```json'

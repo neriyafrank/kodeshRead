@@ -3,35 +3,26 @@
 # every archive is extracted and deleted right away, a repository tarball is piped straight
 # into tar. Used by .github/workflows/build-library.yml.
 #
-#   fetch-otzaria-source.sh <owner/repo> <dest> <classical_full|all>
+#   fetch-otzaria-source.sh <owner/repo> <dest>
 #
 # 1. The repository's latest GitHub Release is inspected (API). Its library archives are used:
 #    `otzaria_latest.zip` when present (Otzaria/otzaria-library), otherwise every .zip / .7z (or
 #    split .zip.001 / .7z.001) asset that is not a PDF / Dicta side archive.
 # 2. Without a usable release (Sivan22/otzaria-library has none) the default-branch tarball is
 #    streamed and only the `אוצריא` folder is unpacked.
-# The `links/` folder and (classical_full) the contemporary authors' folders are never written.
-# scripts/build-db.js --scope applies the same filter again, so this is only a disk optimisation.
+# The `links/` folder is never written.
 set -euo pipefail
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 repo="${1:?owner/repo}"
 dest="${2:?destination}"
-scope="${3:?scope}"
 mkdir -p "$dest"
 tmp="$(mktemp -d "${RUNNER_TEMP:-/tmp}/otzaria-dl.XXXXXX")"
 mkdir -p "$tmp/dl"
 trap 'rm -rf "$tmp"' EXIT
 
-modern=('מחברי זמננו' 'מחברי זמנינו' 'אחרוני זמננו' 'אחרוני זמנינו')
 zip_excludes=('links/*' '*/links/*' '*.pdf')
 tar_excludes=(--exclude='*/links')
-if [[ "$scope" == "classical_full" ]]; then
-  for m in "${modern[@]}"; do
-    zip_excludes+=("*/$m/*" "$m/*")
-    tar_excludes+=(--exclude="*/$m")
-  done
-fi
 
 free_gb() { df -BG --output=avail "$dest" | tail -1 | tr -dc '0-9'; }
 echo "free space before download: $(free_gb) GB"

@@ -3,7 +3,7 @@
  * base books of starter-catalog.json in canonical order, each loadable in ~1 second with its primary
  * commentaries. A book that was opened once is stored in starter_library.db and works offline.
  *
- *   ┌ ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה   [הורד ספרייה מלאה] ┐
+ *   ┌ ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא   [הורד ספרייה מלאה] ┐
  *   תנ"ך                                                     (section heading)
  *     בראשית   תורה · עם רש"י, אונקלוס                    ☁ · 165 KB
  *     במדבר    תורה                                         ✓ זמין לא מקוון
@@ -99,7 +99,7 @@ export function StarterBooks({ onOpenBook, footer, compact }: Props) {
     {header}
     <ScrollView style={s.flex} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="starter-books">
       <View style={s.banner} testID="starter-upgrade-banner">
-        <Text style={s.bannerText}>ספריית התחלה מהענן · להורדת ספרייה לאופליין וחיפוש מלא: בסיסית (ללא אחרוני זמננו) או מלאה</Text>
+        <Text style={s.bannerText}>ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא</Text>
         <Pressable onPress={() => router.navigate('/library-manager')} style={({ pressed }) => [s.bannerBtn, pressed && s.pressed]} accessibilityRole="button" testID="starter-upgrade-button">
           <Text style={s.bannerBtnText}>הורד ספרייה מלאה</Text>
         </Pressable>
