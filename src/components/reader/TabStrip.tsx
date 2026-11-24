@@ -1,7 +1,7 @@
 /**
  * Reader tab bar for many open tabs.
  *
- *  - RTL strip of compact pills (book title + innermost section, ✕ to close); the active tab is
+ *  - RTL strip of compact pills (book title + innermost section; no ✕: tabs are closed from the switcher panel or the long-press menu); the active tab is
  *    kept scrolled into view whenever tabs change or a tab opens.
  *  - Long-press a pill: close / close others / close the tabs to its left.
  *  - A counter button pinned at the end of the bar opens the all-tabs switcher.
@@ -27,7 +27,6 @@ export function TabStrip({ onOpenSwitcher }: Props) {
   const tabs = useTabs((x) => x.tabs);
   const activeTabId = useTabs((x) => x.activeTabId);
   const activate = useTabs((x) => x.activate);
-  const closeTab = useTabs((x) => x.closeTab);
   const scrollRef = useRef<ScrollViewInstance | null>(null);
   const layouts = useRef(new Map<string, { x: number; width: number }>());
   const [viewWidth, setViewWidth] = useState(0);
@@ -96,9 +95,6 @@ export function TabStrip({ onOpenSwitcher }: Props) {
                       {section}
                     </Text>
                   ) : null}
-                </Pressable>
-                <Pressable onPress={() => closeTab(t.tabId)} hitSlop={8} style={s.close} accessibilityLabel={`סגור ${t.bookTitle}`} testID={`tab-close-${t.bookId}`}>
-                  <Text style={s.closeText}>×</Text>
                 </Pressable>
               </View>
             );
@@ -173,7 +169,7 @@ const createStyles = (c: Palette) =>
       borderColor: c.border,
       backgroundColor: c.surfaceMuted,
       paddingStart: spacing.sm,
-      paddingEnd: 2,
+      paddingEnd: spacing.sm,
       height: 40,
     },
     tabActive: { backgroundColor: c.accentSoft, borderColor: c.accent, borderWidth: 1.5 },
@@ -182,8 +178,6 @@ const createStyles = (c: Palette) =>
     tabTitleActive: { color: c.text, fontWeight: '700' },
     tabSection: { fontSize: 11, color: c.textMuted, ...alignRight },
     tabSectionActive: { color: c.accent },
-    close: { paddingHorizontal: 6, paddingVertical: 4 },
-    closeText: { fontSize: 17, lineHeight: 18, color: c.textMuted },
     counter: {
       minWidth: 34,
       height: 32,

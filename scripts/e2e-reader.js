@@ -374,9 +374,15 @@ try {
     step(`Chumash TOC: פרקים | פרשות (פינחס › רביעי pre-selected, ${pn} labels flush right); בלק › שלישי and לתחילת פרשת בלק land on their verses under inline dividers; none in שבת`);
 
     // --- close all with confirmation ----------------------------------------------------------
+    // The top bar has no ✕ on its pills; a tab is closed from the switcher panel.
+    assert.strictEqual(await page.locator('[data-testid^="tab-close-"]').count(), 0, 'no ✕ on the top-bar tab pills');
     await tid('tabs-counter').click();
+    assert.strictEqual(await all('tab-card-close-').count(), 2);
+    await all('tab-card-close-').first().click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.length === 1);
+    assert.strictEqual(await all('tab-card-close-').count(), 1, 'closing from the panel removes that tab');
     await tid('tabs-close-all').click();
-    assert.strictEqual(await all('tab-card-close-').count(), 2, 'first tap only asks for confirmation');
+    assert.strictEqual(await all('tab-card-close-').count(), 1, 'first tap only asks for confirmation');
     await tid('tabs-close-all-confirm').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.length === 0);
     step('switcher: close all (with confirmation)');
