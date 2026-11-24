@@ -145,6 +145,12 @@ try {
     const toggle = tid('reader-tools-toggle');
     assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'false', 'tools start collapsed');
     for (const id of ['toc-button', 'reader-search', 'toggle-cantillation', 'toggle-nikkud', 'aa-button']) assert.ok(!(await visible(id)), `${id} hidden while collapsed`);
+    {
+      // The tools toggle lives in the breadcrumb bar (row 2) beside the ☰ icon, not in the tabs bar.
+      const tb = await toggle.boundingBox();
+      const bc = await tid('reader-breadcrumb').boundingBox();
+      assert.ok(tb.y >= bc.y - 2 && tb.y + tb.height <= bc.y + bc.height + 2, 'tools toggle sits in the breadcrumb row');
+    }
     const textTop = async () => (await tid('reader-breadcrumb').boundingBox()).y;
     const collapsedTop = await textTop();
     await toggle.click();

@@ -58,7 +58,8 @@ import { readerFont } from '../../fonts';
 import { useChumashBook, useChumashDividers } from '../../services/parshiotNav';
 import { useSettings } from '../../state/settingsStore';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
-import { spacing, useAppTheme, type Palette } from '../../theme';
+import { radius, spacing, useAppTheme, type Palette } from '../../theme';
+import { SlidersIcon } from '../Icons';
 import { RichText } from '../RichText';
 import { CommentaryPane, commentaryPaneHeight } from './CommentaryPane';
 import { ParagraphToolbar, useCopyMode, useCopyToast } from './CopyToolbar';
@@ -101,9 +102,12 @@ interface Typography {
 interface Props {
   tab: ReaderTab;
   onOpenToc: () => void;
+  /** Reader-tools row toggle, shown beside the ☰ icon in the breadcrumb bar. */
+  toolsOpen?: boolean;
+  onToggleTools?: () => void;
 }
 
-export function BookReader({ tab, onOpenToc }: Props) {
+export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools }: Props) {
   const { adapter } = useLibrary();
   const palette = useAppTheme();
   const fontSize = useSettings((s) => s.fontSize);
@@ -535,6 +539,7 @@ export function BookReader({ tab, onOpenToc }: Props) {
           { backgroundColor: palette.background, borderBottomColor: palette.border, transform: [{ translateY: headerY }] },
         ]}
       >
+        <View style={styles.crumbRow}>
         <Pressable
           style={styles.crumbPress}
           onPress={() => {
@@ -555,6 +560,25 @@ export function BookReader({ tab, onOpenToc }: Props) {
           </Text>
           <Text style={[styles.crumbIcon, { color: palette.accent }]}>☰</Text>
         </Pressable>
+        {onToggleTools ? (
+          <Pressable
+            onPress={onToggleTools}
+            hitSlop={6}
+            style={({ pressed }) => [
+              styles.toolsBtn,
+              toolsOpen && { backgroundColor: palette.accentSoft },
+              pressed && { opacity: 0.6 },
+            ]}
+            accessibilityRole="button"
+            aria-expanded={toolsOpen}
+            accessibilityState={{ expanded: toolsOpen }}
+            accessibilityLabel={toolsOpen ? 'הסתר כלי קריאה' : 'הצג כלי קריאה'}
+            testID="reader-tools-toggle"
+          >
+            <SlidersIcon size={18} />
+          </Pressable>
+        ) : null}
+        </View>
       </Animated.View>
       {copyMode.state.mode !== 'idle' ? (
         <ParagraphToolbar
@@ -804,7 +828,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     justifyContent: 'center',
   },
-  crumbPress: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, gap: spacing.sm, height: '100%' },
+  crumbRow: { flexDirection: 'row', alignItems: 'center', height: '100%', paddingEnd: spacing.sm },
+  crumbPress: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingStart: spacing.lg, paddingEnd: spacing.sm, gap: spacing.sm, height: '100%' },
+  toolsBtn: { width: 36, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
   crumbText: { flex: 1, fontSize: 14, writingDirection: 'rtl' },
   crumbIcon: { fontSize: 16 },
 });

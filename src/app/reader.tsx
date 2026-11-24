@@ -1,7 +1,7 @@
 /**
  * Reading workspace: a slim bar over the active tab's windowed reader.
- *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher) · tools
- *   row 2 (folded away by default, toggled by the tools button): תוכן עניינים · search ·
+ *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher)
+ *   row 2 (folded away by default, toggled by the tools button beside ☰ in the breadcrumb bar): תוכן עניינים · search ·
  *          טעמים / ניקוד · Aa
  * The text gets the full height while row 2 is collapsed; the breadcrumb above the text still
  * opens the TOC.
@@ -15,7 +15,7 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Collapsible } from '../components/Collapsible';
-import { SearchIcon, SlidersIcon } from '../components/Icons';
+import { SearchIcon } from '../components/Icons';
 import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
 import { TabStrip } from '../components/reader/TabStrip';
@@ -50,18 +50,6 @@ export default function ReaderWorkspace() {
           <Text style={s.iconText}>→</Text>
         </Pressable>
         <TabStrip onOpenSwitcher={() => setSwitcherOpen(true)} />
-        <Pressable
-          onPress={() => setToolsOpen((v) => !v)}
-          hitSlop={6}
-          style={({ pressed }) => [s.toolsBtn, toolsOpen && s.toolsBtnOn, pressed && s.pressed]}
-          accessibilityRole="button"
-          aria-expanded={toolsOpen}
-          accessibilityState={{ expanded: toolsOpen }}
-          accessibilityLabel={toolsOpen ? 'הסתר כלי קריאה' : 'הצג כלי קריאה'}
-          testID="reader-tools-toggle"
-        >
-          <SlidersIcon size={18} />
-        </Pressable>
       </View>
       <Collapsible open={toolsOpen} style={s.displayBar} testID="reader-tools">
         <Pressable
@@ -118,7 +106,7 @@ export default function ReaderWorkspace() {
             />
           ) : null}
           <View style={s.flex}>
-            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} />
+            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} toolsOpen={toolsOpen} onToggleTools={() => setToolsOpen((v) => !v)} />
           </View>
         </View>
       ) : (
@@ -177,9 +165,6 @@ const createStyles = (c: Palette) =>
     body: { flex: 1, flexDirection: 'row' },
     flex: { flex: 1 },
     barLabel: { fontSize: 13, fontWeight: '600', color: c.accent },
-    toolsBtn: { width: 34, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
-    toolsBtnOn: { backgroundColor: c.accentSoft },
-    pressed: { opacity: 0.6 },
     iconBtn: { minWidth: 36, height: 34, paddingHorizontal: 4, flexDirection: 'row', gap: 4, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
     iconText: { fontSize: 20, color: c.accent },
     aaBtn: { backgroundColor: c.accentSoft },
