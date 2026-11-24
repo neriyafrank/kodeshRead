@@ -17,7 +17,14 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const sp = require('../shared/starterPacks');
+
+/** Node built-ins only (CI has no node_modules). Level 9 + zlib's gzip header (mtime 0) = deterministic. */
+const codec = {
+  gzipSync: (u8) => zlib.gzipSync(u8, { level: 9 }),
+  gunzipSync: (u8) => zlib.gunzipSync(u8),
+};
 const { openDb, writerAdapter } = require('./build-db');
 
 function parseArgs(argv) {
@@ -56,9 +63,9 @@ async function exportStarterPacks({ dbFile, outDir, log = () => undefined }) {
     const items = [];
     for (const sel of selection) {
       const pack = await sp.buildStarterPack(db, sel, meta);
-      const bytes = sp.packToBytes(pack);
+      const bytes = sp.packToBytes(pack, codec);
       // Read it back exactly like the app will: gunzip + validate + same counts.
-      const back = sp.decodePack(bytes);
+      const back = sp.decodePack(bytes, codec);
       if (back.counts.paragraphs !== pack.counts.paragraphs || back.paragraphs.length !== pack.paragraphs.length) throw new Error(`${sel.spec.slug}: pack does not read back`);
       const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
       const file = path.join(outDir, sp.packFileName(sel.spec.slug));

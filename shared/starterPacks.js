@@ -23,7 +23,23 @@
  */
 'use strict';
 
-const { gzipSync, gunzipSync, strFromU8, strToU8 } = require('fflate');
+
+/**
+ * Compression codec. No top-level dependency: Node-only callers (CI export script, which runs without
+ * node_modules) pass `{ gzipSync, gunzipSync }` from Node's built-in zlib; the app passes nothing and
+ * `fflate` is loaded lazily on first use. This file never requires 'zlib' (Metro must not bundle it).
+ */
+let fflateModule = null;
+function fflate() {
+  if (!fflateModule) fflateModule = require('fflate');
+  return fflateModule;
+}
+function utf8Encode(str) {
+  return typeof TextEncoder === 'function' ? new TextEncoder().encode(str) : fflate().strToU8(str);
+}
+function utf8Decode(bytes) {
+  return typeof TextDecoder === 'function' ? new TextDecoder('utf-8').decode(bytes) : fflate().strFromU8(bytes);
+}
 const { aliasKey } = require('./hebrew');
 const pairing = require('./pairing');
 const libraryCatalog = require('./libraryCatalog');
@@ -181,8 +197,10 @@ async function buildStarterPack(db, sel, meta) {
 }
 
 /** Deterministic gzip (mtime 0): the same pack always hashes the same. */
-function packToBytes(pack) {
-  return gzipSync(strToU8(JSON.stringify(pack)), { level: 9, mtime: 0 });
+function packToBytes(pack, codec) {
+  const raw = utf8Encode(JSON.stringify(pack));
+  if (codec && codec.gzipSync) return new Uint8Array(codec.gzipSync(raw));
+  return fflate().gzipSync(raw, { level: 9, mtime: 0 });
 }
 
 /** @param {{ sel, pack, bytes: Uint8Array, sha256: string }[]} items  in canonical order */
@@ -314,10 +332,11 @@ async function verifyPackBytes(bytes, entry) {
 }
 
 /** gunzip + parse + validate. */
-function decodePack(bytes) {
+function decodePack(bytes, codec) {
   let pack;
   try {
-    pack = JSON.parse(strFromU8(gunzipSync(bytes)));
+    const raw = codec && codec.gunzipSync ? codec.gunzipSync(bytes) : fflate().gunzipSync(bytes);
+    pack = JSON.parse(utf8Decode(raw));
   } catch (e) {
     throw new Error(`חבילת הספר פגומה (${e && e.message ? e.message : e})`);
   }

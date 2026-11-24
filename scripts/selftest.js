@@ -840,6 +840,38 @@ async function starterPackTests() {
       });
     });
 
+    await check('starter export: runs on Node built-ins alone (no node_modules) and zlib packs decode identically with fflate', () => {
+      const { spawnSync } = require('child_process');
+      const outCi = path.join(tmp, 'out-ci');
+      // Child process with every non-builtin bare require forbidden = the CI runner (no node_modules).
+      const guard = `const M=require('module');const o=M._resolveFilename;M._resolveFilename=function(r,...a){` +
+        `if(!r.startsWith('.')&&!r.startsWith('/')&&!M.builtinModules.includes(r.replace(/^node:/,'')))throw new Error('third-party require: '+r);` +
+        `return o.call(this,r,...a)};`;
+      const guardFile = path.join(tmp, 'no-third-party.js');
+      fs.writeFileSync(guardFile, guard);
+      const r = spawnSync(process.execPath, ['-r', guardFile, path.join(ROOT, 'scripts/export-starter-packs.js'), `--db=${SAMPLE_DB}`, `--out=${outCi}`, '--min=1'], { encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, `export without node_modules failed:\n${r.stderr}${r.stdout}`);
+      assert.ok(!/Cannot find module|third-party require/.test(r.stderr));
+      const guarded = ['scripts/build-db.js', 'scripts/cloud-release.js', 'scripts/export-starter-packs.js'];
+      for (const f of guarded) {
+        const c = spawnSync(process.execPath, ['-r', guardFile, '-e', `require(${JSON.stringify(path.join(ROOT, f))})`], { encoding: 'utf8' });
+        assert.strictEqual(c.status, 0, `${f} needs a third-party module:\n${c.stderr}`);
+      }
+      assert.ok(!/require\(['"]zlib['"]\)/.test(fs.readFileSync(path.join(ROOT, 'shared/starterPacks.js'), 'utf8')), 'shared/starterPacks.js must stay free of zlib (Metro)');
+      // Packs written by Node's zlib are read back by the app's fflate path, and the app's fflate packs by zlib.
+      const zlib = require('zlib');
+      const fflate = require('fflate');
+      for (const f of fs.readdirSync(outCi).filter((n) => n.endsWith('.json.gz'))) {
+        const bytes = fs.readFileSync(path.join(outCi, f));
+        const viaFflate = Buffer.from(fflate.gunzipSync(new Uint8Array(bytes)));
+        assert.ok(viaFflate.equals(zlib.gunzipSync(bytes)), `${f}: zlib vs fflate`);
+        const pack = sp.decodePack(new Uint8Array(bytes)); // default (fflate) codec = the app
+        const appBytes = sp.packToBytes(pack);
+        assert.ok(Buffer.from(fflate.gunzipSync(appBytes)).equals(viaFflate), `${f}: app re-encode decodes to the same JSON`);
+        assert.ok(zlib.gunzipSync(Buffer.from(appBytes)).equals(viaFflate));
+      }
+    });
+
     await check('starter catalog: validation rejects unsafe or malformed entries', () => {
       const good = JSON.parse(fs.readFileSync(path.join(out, 'starter-catalog.json'), 'utf8'));
       assert.strictEqual(sp.validateStarterCatalog(good).books.length, 3);
