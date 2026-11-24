@@ -502,6 +502,7 @@ async function stageCloudLibrary(io, manifest, opts) {
   // Seeded with what is already on disk: a retry's first report is the saved percentage, never 0%.
   let lastFraction = overallTotal ? Math.min(1, overall(await existingBytes(io, manifest)) / overallTotal) : 0;
   const keepAwake = o.keepAwake || ((fn) => fn());
+  let lastDone = Math.round(lastFraction * overallTotal);
   await downloadParts(io, manifest, {
     manifestUrl: o.manifestUrl,
     isCancelled: o.isCancelled,
@@ -521,10 +522,11 @@ async function stageCloudLibrary(io, manifest, opts) {
     onProgress: (p) => {
       // Strictly monotonic: a transient drop / retry never moves the bar backwards.
       lastFraction = Math.max(lastFraction, overallTotal ? overall(p.doneBytes) / overallTotal : 0);
+      lastDone = Math.max(lastDone, overall(p.doneBytes));
       report({
         stage: p.skipped ? 'ממשיך — חלק קיים' : 'מוריד…',
         fraction: overallTotal ? lastFraction : null,
-        detail: formatPartProgress({ ...p, doneBytes: overall(p.doneBytes), totalBytes: overallTotal, label: win && win.label }),
+        detail: formatPartProgress({ ...p, doneBytes: lastDone, totalBytes: overallTotal, label: win && win.label }),
       });
     },
   });
@@ -567,13 +569,39 @@ async function downloadRangeChunks(env, opts) {
   const o = opts || {};
   const expected = o.expectedBytes;
   const chunkBytes = o.chunkBytes || RANGE_CHUNK_BYTES;
+  const maxStalls = o.maxStalls == null ? 3 : o.maxStalls;
   const cancelled = () => !!(o.isCancelled && o.isCancelled());
+  // Progress is ALWAYS cumulative over the whole part (bytes already saved + the chunk in flight) and strictly
+  // non-decreasing: a retry, a re-read of the partial or a chunk boundary can never move the bar backwards.
+  let reported = 0;
+  const report = (written) => {
+    const v = Math.min(written, expected);
+    if (o.onProgress && v >= reported) {
+      reported = v;
+      o.onProgress(v, expected);
+    }
+  };
   let have = await env.partialSize();
   let ignored = 0;
+  // Loop guards: the downloader must NEVER spin on the same bytes forever (a broken append on a device made it
+  // fetch bytes 0-4MB again and again). The offset of every chunk has to move forward.
+  let high = have; // furthest offset a chunk started at
+  let sameStart = 0; // consecutive chunks started at the very same offset
+  let lastStart = -1;
+  let shrunk = 0; // times the partial was found shorter than before
   while (have < expected) {
     if (cancelled()) throw cancelledError();
+    if (have === lastStart) sameStart++;
+    else sameStart = 0;
+    lastStart = have;
+    if (have < high) shrunk++;
+    high = Math.max(high, have);
+    if (sameStart >= maxStalls || shrunk > maxStalls) {
+      const why = sameStart >= maxStalls ? `${sameStart + 1} chunks in a row started at offset ${have}` : `the partial file shrank ${shrunk} times (back to ${have} after reaching ${high})`;
+      throw new Error(`DOWNLOAD_STALLED: the download does not advance: ${why} (part ${expected} bytes). The chunk is received but never appended to the partial file.`);
+    }
     const end = Math.min(have + chunkBytes, expected) - 1;
-    const want = end - have + 1;
+    const want = end - have + 1; // Range is inclusive: bytes=have-end is end - have + 1 bytes
     await env.discardChunk(); // a chunk left by a process death is never trusted
     const r = await env.resolve(have, end);
     if (r.status === 200) {
@@ -581,7 +609,8 @@ async function downloadRangeChunks(env, opts) {
       if (ignored++ > 0) throw new Error('השרת אינו תומך בהורדה חלקית (Range)');
       if (have > 0) await env.resetPartial();
       have = 0;
-      await env.fetchChunk(r.url, null, (n) => o.onProgress && o.onProgress(n, expected));
+      high = 0;
+      await env.fetchChunk(r.url, null, (n) => report(n));
       if ((await env.chunkSize()) !== expected) {
         await env.discardChunk();
         throw new Error('Unexpected end of download (short body)');
@@ -592,18 +621,25 @@ async function downloadRangeChunks(env, opts) {
     }
     if (r.status !== 206) throw new Error(`HTTP ${r.status}`);
     try {
-      await env.fetchChunk(r.url, `bytes=${have}-${end}`, (n) => o.onProgress && o.onProgress(have + n, expected));
+      await env.fetchChunk(r.url, `bytes=${have}-${end}`, (n) => report(have + n));
     } catch (e) {
       await env.discardChunk();
       throw e;
     }
-    if ((await env.chunkSize()) !== want) {
+    const got = await env.chunkSize();
+    if (got !== want) {
       await env.discardChunk();
-      throw new Error(`Unexpected end of download (expected ${want} bytes)`);
+      throw new Error(`Unexpected end of download (expected ${want} bytes, chunk has ${got})`);
     }
     await env.appendChunk();
-    have = await env.partialSize();
-    if (o.onProgress) o.onProgress(have, expected);
+    const next = await env.partialSize();
+    if (next > have && next !== have + want) {
+      // The append wrote a wrong number of bytes: the partial cannot be trusted any more.
+      await env.resetPartial();
+      throw new Error(`DOWNLOAD_APPEND_MISMATCH: appending the chunk at offset ${have} left ${next} bytes, expected ${have + want}; the partial file was reset`);
+    }
+    have = next;
+    report(have);
   }
 }
 

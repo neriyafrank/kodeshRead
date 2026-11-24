@@ -1,7 +1,7 @@
 /**
  * Reading workspace: a slim bar over the active tab's windowed reader.
  *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher)
- *   row 2 (folded away by default, toggled by the tools button beside ☰ in the breadcrumb bar): תוכן עניינים · search ·
+ *   row 2 (folded away by default, toggled by the tools button in the breadcrumb bar): תוכן עניינים · search ·
  *          טעמים / ניקוד · Aa
  * The text gets the full height while row 2 is collapsed; the breadcrumb above the text still
  * opens the TOC.

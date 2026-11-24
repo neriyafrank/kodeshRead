@@ -4177,6 +4177,67 @@ async function cloudLibraryTests() {
         assert.ok(ign.st.partial.equals(data));
         assert.deepStrictEqual(ign.st.calls, [null]);
       });
+      await check('chunked download: across several 4 MB chunks progress is cumulative (never back to 0) and the offset advances strictly', async () => {
+        const MB = 1024 * 1024;
+        const expected = 10 * MB + 123; // 3 chunks of the real chunk size: 4 MB, 4 MB, 2 MB + 123
+        const mk = (o = {}) => {
+          const st = { partial: 0, chunk: null, starts: [], progress: [], fetched: 0 };
+          const env = {
+            partialSize: () => st.partial,
+            resolve: async (a) => {
+              st.starts.push(a);
+              return { status: 206, url: 'final' };
+            },
+            fetchChunk: async (_u, range, onBytes) => {
+              const [a, b] = /bytes=(\d+)-(\d+)/.exec(range).slice(1).map(Number);
+              st.fetched++;
+              const len = b - a + 1; // Range is inclusive
+              for (let n = 0; n < len; n += MB) onBytes(Math.min(n, len)); // per-chunk bytes (0 -> chunk length), like the native task
+              onBytes(len);
+              st.chunk = len;
+            },
+            chunkSize: () => st.chunk,
+            discardChunk: () => void (st.chunk = null),
+            appendChunk: () => o.append(st),
+            adoptChunk: () => void (st.partial = st.chunk),
+            resetPartial: () => void (st.partial = 0),
+          };
+          return { st, env };
+        };
+        const good = mk({ append: (st) => { st.partial += st.chunk; st.chunk = null; } });
+        await mp.downloadRangeChunks(good.env, { expectedBytes: expected, isCancelled: () => false, onProgress: (w, t) => good.st.progress.push([w, t]) });
+        assert.deepStrictEqual(good.st.starts, [0, 4 * MB, 8 * MB], 'every chunk starts exactly where the previous one ended');
+        assert.strictEqual(good.st.partial, expected);
+        const p = good.st.progress.map((x) => x[0]);
+        for (let i = 1; i < p.length; i++) assert.ok(p[i] >= p[i - 1], `progress never goes backwards (${p[i - 1]} -> ${p[i]})`);
+        assert.ok(p.every((v) => v <= expected) && p[p.length - 1] === expected && good.st.progress.every((x) => x[1] === expected), 'always reported against the whole part');
+        assert.ok(p.some((v) => v > 4 * MB && v < 8 * MB) && p.some((v) => v > 8 * MB), 'bytes of earlier chunks are included in later reports');
+        assert.ok(p.filter((v) => v < 4 * MB).length < p.length, 'no report falls back into the first chunk after it was saved');
+        // The exact regression seen on Android: the append wipes the partial (the chunk file object aliased the .partial after a
+        // move), so every chunk restarts at 0. It must END with a clear diagnostic, never loop 0 -> 4 MB forever.
+        const wiped = mk({ append: (st) => { st.partial = 0; st.chunk = null; } });
+        await assert.rejects(() => mp.downloadRangeChunks(wiped.env, { expectedBytes: expected, isCancelled: () => false }), /DOWNLOAD_STALLED/);
+        assert.ok(wiped.st.fetched <= 4, `gave up after ${wiped.st.fetched} chunks`);
+        // The partial ping-pongs 0 -> 4 MB -> 0 (alternating offsets): also caught.
+        let flip = 0;
+        const pong = mk({ append: (st) => { st.partial = flip++ % 2 === 0 ? st.chunk : 0; st.chunk = null; } });
+        await assert.rejects(() => mp.downloadRangeChunks(pong.env, { expectedBytes: expected, isCancelled: () => false }), /DOWNLOAD_STALLED.*shrank/);
+        assert.ok(pong.st.fetched <= 10, `ping-pong stopped after ${pong.st.fetched} chunks`);
+        // An append that silently does nothing: same offset again and again -> diagnostic.
+        const noop = mk({ append: (st) => void (st.chunk = null) });
+        await assert.rejects(() => mp.downloadRangeChunks(noop.env, { expectedBytes: expected, isCancelled: () => false }), /DOWNLOAD_STALLED.*offset 0/);
+        assert.ok(noop.st.fetched <= 4);
+        // An append that writes a wrong number of bytes resets the partial and reports a mismatch.
+        const odd = mk({ append: (st) => { st.partial += st.chunk - 7; st.chunk = null; } });
+        await assert.rejects(() => mp.downloadRangeChunks(odd.env, { expectedBytes: expected, isCancelled: () => false }), /DOWNLOAD_APPEND_MISMATCH/);
+        assert.strictEqual(odd.st.partial, 0, 'the untrustworthy partial is reset');
+        // The stall is a hard, non-retried failure (not a "transient network error" that loops with a refilled budget).
+        for (const m of ['DOWNLOAD_STALLED: the download does not advance', 'DOWNLOAD_APPEND_MISMATCH: appending the chunk']) assert.ok(!mp.isTransientNetworkError(new Error(m)), m);
+        // Native backend: fresh File objects (move() re-points the object it is called on), verified append in Append mode.
+        const native = fs.readFileSync(path.join(ROOT, 'src/services/cloudLibrary.ts'), 'utf8');
+        assert.ok(!/const chunk = new File/.test(native) && /const chunkFile = \(\) => new File\(/.test(native) && /const targetFile = \(\) => file\(name\)/.test(native), 'no long-lived chunk / target File object');
+        assert.ok(/FileMode\.Append/.test(native) && !/output\.offset = start/.test(native) && /DOWNLOAD_APPEND_MISMATCH/.test(native));
+      });
       await check('resilient download: automatic retry resumes mid-part (server drop, no manual restart) and the budget refills on progress', async () => {
         const f = fresh('run-r5');
         behaviour.dropOnce.add(manifest.parts[0].name);

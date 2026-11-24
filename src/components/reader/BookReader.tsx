@@ -102,7 +102,7 @@ interface Typography {
 interface Props {
   tab: ReaderTab;
   onOpenToc: () => void;
-  /** Reader-tools row toggle, shown beside the ☰ icon in the breadcrumb bar. */
+  /** Reader-tools row toggle, shown at the end of the breadcrumb bar (the breadcrumb itself opens the TOC). */
   toolsOpen?: boolean;
   onToggleTools?: () => void;
 }
@@ -558,7 +558,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools }:
               </Text>
             ))}
           </Text>
-          <Text style={[styles.crumbIcon, { color: palette.accent }]}>☰</Text>
         </Pressable>
         {onToggleTools ? (
           <Pressable
@@ -832,5 +831,4 @@ const styles = StyleSheet.create({
   crumbPress: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingStart: spacing.lg, paddingEnd: spacing.sm, gap: spacing.sm, height: '100%' },
   toolsBtn: { width: 36, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
   crumbText: { flex: 1, fontSize: 14, writingDirection: 'rtl' },
-  crumbIcon: { fontSize: 16 },
 });

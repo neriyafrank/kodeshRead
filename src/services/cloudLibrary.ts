@@ -93,7 +93,15 @@ function partsDir(): Directory {
   return dir;
 }
 
-/** Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes it. */
+/**
+ * Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes the chunk.
+ *
+ * IMPORTANT (the "0 -> 4 MB loop" bug): `File.move()` of expo-file-system UPDATES the `uri` of the File object it is called on,
+ * so after moving the first chunk that object points at the .partial file. A chunk File object kept for the next chunk would
+ * then alias the partial: `discardChunk()` deleted the partial and the "download" wrote over it, so every chunk restarted at 0.
+ * Callers therefore pass FRESH File objects (see `chunkFile()` / `targetFile()` in nativePartsIO) and never reuse one after a move.
+ * The appended size is verified so a silent failure is an error, not a retry of the same offset.
+ */
 async function absorbChunk(chunk: File, target: File): Promise<void> {
   if (!chunk.exists) return;
   const size = chunk.size;
@@ -101,9 +109,9 @@ async function absorbChunk(chunk: File, target: File): Promise<void> {
   else if (size > 0) {
     const start = target.size;
     const input = chunk.open(FileMode.ReadOnly);
-    const output = target.open(FileMode.WriteOnly);
+    // FileMode.Append: the cursor starts at the end of the partial (no truncation, no manual seek).
+    const output = target.open(FileMode.Append);
     try {
-      output.offset = start;
       for (let left = size; left > 0; ) {
         const bytes = await input.readBytes(Math.min(1 << 20, left));
         if (!bytes.length) break;
@@ -114,6 +122,7 @@ async function absorbChunk(chunk: File, target: File): Promise<void> {
       input.close();
       output.close();
     }
+    if (target.size !== start + size) throw new Error(`DOWNLOAD_APPEND_MISMATCH: partial is ${target.size} bytes after appending ${size} to ${start}`);
   }
   if (chunk.exists) chunk.delete();
 }
@@ -157,15 +166,18 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
     download: async (url, name, onProgress, _isCancelled, resume) => {
       // Chunked Range download: each <= 4 MB chunk goes to its own temp file and is appended to the .partial only
       // when complete, so a hard network drop on Android loses at most one chunk. downloadAsync never targets
-      // the .partial itself.
-      const target = file(name);
-      const chunk = new File(dir, `${name}.chunk`);
+      // the .partial itself. Fresh File objects on every use: move() re-points the object it is called on.
+      const targetFile = () => file(name);
+      const chunkFile = () => new File(dir, `${name}.chunk`);
       const expected = resume?.expectedBytes ?? 0;
       if (!expected) throw new Error('גודל החלק לא ידוע');
-      await absorbChunk(chunk, target); // legacy chunk from an older build / process death: a valid prefix
+      await absorbChunk(chunkFile(), targetFile()); // legacy chunk from an older build / process death: a valid prefix
       await downloadRangeChunks(
         {
-          partialSize: () => (target.exists ? target.size : 0),
+          partialSize: () => {
+            const t = targetFile();
+            return t.exists ? t.size : 0;
+          },
           // Resolve the final CDN URL ourselves (fetch follows the 302 keeping Range): the native downloader
           // then talks to the CDN directly and cannot lose the header on the redirect.
           resolve: async (start: number, end: number) => {
@@ -178,7 +190,7 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
             return { url: res.url || url, status: res.status };
           },
           fetchChunk: async (finalUrl: string, range: string | null, onBytes: (n: number) => void) => {
-            const task = File.createDownloadTask(finalUrl, chunk, {
+            const task = File.createDownloadTask(finalUrl, chunkFile(), {
               headers: range ? { Range: range } : undefined,
               onProgress: ({ bytesWritten }) => {
                 if (isCancelled()) task.cancel();
@@ -188,17 +200,23 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
             const got = await task.downloadAsync();
             if (!got) throw new Error('ההורדה נכשלה');
           },
-          chunkSize: () => (chunk.exists ? chunk.size : null),
-          discardChunk: () => {
-            if (chunk.exists) chunk.delete();
+          chunkSize: () => {
+            const c = chunkFile();
+            return c.exists ? c.size : null;
           },
-          appendChunk: () => absorbChunk(chunk, target),
+          discardChunk: () => {
+            const c = chunkFile();
+            if (c.exists) c.delete();
+          },
+          appendChunk: () => absorbChunk(chunkFile(), targetFile()),
           adoptChunk: async () => {
-            if (target.exists) target.delete();
-            await chunk.move(target, { overwrite: true });
+            const t = targetFile();
+            if (t.exists) t.delete();
+            await chunkFile().move(targetFile(), { overwrite: true });
           },
           resetPartial: () => {
-            if (target.exists) target.delete();
+            const t = targetFile();
+            if (t.exists) t.delete();
           },
         },
         { expectedBytes: expected, isCancelled, onProgress },
