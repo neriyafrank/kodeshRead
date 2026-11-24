@@ -31,6 +31,14 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > notification; JS wrapper `src/services/importForegroundService.ts`, no-op on web). Kill/resume is self-tested
 > at every 9th SQL statement in `scripts/selftest.js`.
 
+> **Scan safety (Android SAF):** `shared/pipeline.js` `scanPhase` never scans a folder twice (canonical, decoded URI in a visited
+> set seeded from `import_queue`), stops descending at depth 12 (`MAX_SCAN_DEPTH`), skips hidden (`.x`) / `Android` folders, and a
+> name with a file extension is a FILE even when the provider reports a Directory (`indexer.looksLikeFileName`, URL-decoded; in
+> `localIndexer.deviceFs.list`). More than 500 folders with 0 `.txt` files throws `NoBooksFoundError` (Hebrew message: pick the
+> `אוצריא` folder; run marked `failed`, queue dropped, build file removed). `coreFinalize.coreBuildStart` decides what a core build does:
+> a "resume" without a build file (pause / cancel during the scan) starts clean, finalize-only without one is a quiet no-op: the
+> `קובץ הבנייה לא נמצא` error is gone. Self-tested (`scan safety:` checks).
+
 > **Import stability:** books are streamed (`shared/bookStream.js`: 64KB `FileHandle` chunks -> incremental UTF-8
 > -> lines -> `indexer.createBookParser`, 150-paragraph inserts, 2,000-row FTS statements), never held whole.
 > `shared/pipeline.js` commits `ingestion_state.inflight_key/inflight_attempts` before each book / links batch and

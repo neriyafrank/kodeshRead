@@ -74,6 +74,15 @@ export interface QueueCounts {
 export const PHASES: PipelinePhase[];
 export const SKIPPED_ROOT_DIRS: Set<string>;
 export const MAX_ATTEMPTS: number;
+export const MAX_SCAN_DEPTH: number;
+export const NO_BOOKS_AFTER_DIRS: number;
+export class NoBooksFoundError extends Error {
+  code: 'NO_BOOKS';
+  dirs: number;
+  constructor(dirs: number);
+}
+export function canonicalUri(uri: string): string;
+export function isSkippedScanDir(name: string): boolean;
 export const CRASH_MESSAGE: string;
 export function runImport<H>(db: WriterDb, fsa: PipelineFs<H>, opts: RunImportOptions<H>): Promise<RunImportResult>;
 export function completeImport(db: WriterDb): Promise<void>;

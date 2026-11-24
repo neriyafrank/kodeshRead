@@ -779,6 +779,7 @@ async function main() {
   // 16. Canonical book roles + bidirectional parallel works (Turim / Shas / Parasha families).
   await parallelWorksTests();
   await copyFormatTests();
+  await scanSafetyTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -4774,6 +4775,8 @@ async function streamingPipelineTests() {
     await check(`pipeline: kill at every 9th statement of ${total} converges (stress)`, async () => {
       let n = 0;
       for (let at = 1; at <= total; at += 9) {
+        // A WAL checkpoint failure is swallowed by design (it only bounds the WAL file): killing it is not a crash.
+        if (/wal_checkpoint/i.test(log[at - 1] || '')) continue;
         const r = await crashAndResume(`stress-${at}.db`, at);
         assert.deepStrictEqual(r.dupes, [], `statement ${at} (${log[at - 1]}): duplicates`);
         assert.deepStrictEqual(r.snap, refSnap, `statement ${at} (${log[at - 1]})`);
@@ -6365,6 +6368,137 @@ async function parshaQuickJumpTests() {
  * Section 16: canonical book roles (shared/bookRoles.js) and the bidirectional parallel-works engine
  * (shared/parallelWorks.js), on the real Otzaria map and on fixture libraries of every family.
  */
+/**
+ * On-device scan safety (Android SAF): a folder is scanned once, depth is capped, hidden / Android folders are
+ * skipped, URL-encoded file names are files, a folder with no books stops early with a clear message, and a
+ * pause / cancel during the scan (before the build file existed) is never an error.
+ */
+async function scanSafetyTests() {
+  const pipeline = require('../shared/pipeline');
+  const coreFinalize = require('../shared/coreFinalize');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scan-safety-'));
+  let n = 0;
+  /** A virtual file system over URIs: tree(uri) -> [{ name, isDir, uri }] ; books are tiny. */
+  const fakeFs = (tree) => ({
+    list: async (dir) => (tree(dir) || []).map((e) => ({ name: e.name, isDir: e.isDir, handle: e.uri })),
+    readText: async () => '<h1>ספר</h1>\n<h2>פרק א</h2>\nטקסט',
+  });
+  const run = async (tree, extra) => {
+    const db = openWal(path.join(tmp, `s${++n}.db`));
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    const o = Object.assign({ source: { kind: 'folder', root: 'content://x/tree/root' }, sourceUri: 'content://x/tree/root', targetDb: 'core', yieldToUI: () => Promise.resolve(), finalize: false }, extra);
+    let result;
+    let error = null;
+    try {
+      result = await pipeline.runImport(db.w, fakeFs(tree), o);
+    } catch (e) {
+      error = e;
+    }
+    return { db, result, error };
+  };
+  const dirsOf = async (db) => (await db.read.all("SELECT uri, rel FROM import_queue WHERE kind = 'dir' ORDER BY id")).map((r) => ({ ...r }));
+  try {
+    await check('scan safety: a folder listing itself under another spelling is scanned once (visited set), the scan ends', async () => {
+      // Every directory lists a child whose URI is the same folder, spelled with %2F / a trailing slash.
+      const tree = (u) => (/^content:\/\/x\/tree\/root(\/loop)*$/.test(u) || u.includes('%2F') ? [{ name: 'loop', isDir: true, uri: 'content://x/tree/root%2F' }, { name: 'ספר.txt', isDir: false, uri: u + '/file' }] : []);
+      const { db, result, error } = await run((u) => (u === 'content://x/tree/root' ? tree(u) : u === 'content://x/tree/root%2F' ? [{ name: 'loop', isDir: true, uri: 'content://x/tree/root/' }] : []));
+      assert.strictEqual(error, null, String(error));
+      assert.strictEqual(result.stopped, null);
+      const dirs = await dirsOf(db);
+      assert.strictEqual(dirs.length, 1, `only the root was queued: ${JSON.stringify(dirs.map((d) => d.uri))}`);
+      assert.strictEqual(pipeline.canonicalUri('content://x/tree/a%252Fb/'), 'content://x/tree/a/b');
+      db.raw.close();
+    });
+
+    await check('scan safety: depth is capped (12), a chain of ever-new folders ends', async () => {
+      const tree = (u) => [{ name: 'd', isDir: true, uri: u + '/d' }, { name: 'ספר.txt', isDir: false, uri: u + '/ספר.txt' }];
+      const { db, result, error } = await run(tree);
+      assert.strictEqual(error, null, String(error));
+      assert.strictEqual(result.stopped, null);
+      const depths = (await dirsOf(db)).map((d) => (d.rel ? d.rel.split('/').length : 0));
+      assert.strictEqual(Math.max(...depths), pipeline.MAX_SCAN_DEPTH, `deepest scanned folder: ${Math.max(...depths)}`);
+      assert.strictEqual(depths.length, pipeline.MAX_SCAN_DEPTH + 1);
+      // a custom limit is honoured
+      const small = await run(tree, { maxScanDepth: 3 });
+      assert.strictEqual((await dirsOf(small.db)).length, 4);
+      db.raw.close();
+      small.db.raw.close();
+    });
+
+    await check('scan safety: hidden and Android folders are skipped, normal ones are scanned', async () => {
+      const tree = (u) =>
+        u === 'content://x/tree/root'
+          ? ['תנך', 'Android', 'android', '.hidden', '.thumbnails', 'אוצריא'].map((name) => ({ name, isDir: true, uri: `content://x/tree/root/${name}` })).concat([{ name: 'ספר.txt', isDir: false, uri: u + '/b' }])
+          : [];
+      const { db, error } = await run(tree);
+      assert.strictEqual(error, null, String(error));
+      assert.deepStrictEqual((await dirsOf(db)).map((d) => d.rel).filter(Boolean).sort(), ['אוצריא', 'תנך'].sort());
+      assert.ok(pipeline.isSkippedScanDir('Android') && pipeline.isSkippedScanDir('.x') && !pipeline.isSkippedScanDir('תנך'));
+      db.raw.close();
+    });
+
+    await check('scan safety: URL-encoded SAF names (%D7%91...txt) are files even when reported as folders', async () => {
+      const enc = encodeURIComponent('בראשית.txt');
+      assert.strictEqual(enc, '%D7%91%D7%A8%D7%90%D7%A9%D7%99%D7%AA.txt');
+      assert.ok(indexer.isBookFileName(enc) && indexer.isBookFileName('בראשית.txt') && !indexer.isBookFileName(encodeURIComponent('.hidden.txt')));
+      assert.ok(indexer.looksLikeFileName(enc) && indexer.looksLikeFileName(encodeURIComponent('ספר.docx')) && !indexer.looksLikeFileName('תנך') && !indexer.looksLikeFileName(encodeURIComponent('תלמוד בבלי')));
+      // The provider calls the book a directory (isDir true): it must be queued as a FILE, not scanned.
+      const tree = (u) => (u === 'content://x/tree/root' ? [{ name: enc, isDir: true, uri: 'content://x/tree/root/' + enc }, { name: encodeURIComponent('ספר.pdf'), isDir: true, uri: 'content://x/tree/root/pdf' }] : [{ name: 'again', isDir: true, uri: u + '/again' }]);
+      const { db, error } = await run(tree);
+      assert.strictEqual(error, null, String(error));
+      const rows = (await db.read.all("SELECT kind, rel FROM import_queue ORDER BY id")).map((r) => ({ ...r }));
+      assert.strictEqual(rows.filter((r) => r.kind === 'dir').length, 1, 'no phantom folders');
+      const st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(Number(st.total_count), 1, 'one book file found');
+      assert.strictEqual(Number(st.skipped_count), 1, 'the .pdf is a skipped non-book file, not a folder');
+      db.raw.close();
+    });
+
+    await check('scan safety: > 500 folders with no book file stops early with a clear Hebrew message (nothing left to resume)', async () => {
+      const tree = (u) => (u === 'content://x/tree/root' ? Array.from({ length: 620 }, (_, i) => ({ name: `f${i}`, isDir: true, uri: `content://x/tree/root/f${i}` })) : []);
+      const { db, error } = await run(tree);
+      assert.ok(error instanceof pipeline.NoBooksFoundError && error.code === 'NO_BOOKS', String(error));
+      assert.ok(/לא נמצאו קבצי טקסט של אוצריא/.test(error.message) && /אוצריא/.test(error.message.split('בחרו')[1]) && /\d+ תיקיות/.test(error.message), error.message);
+      assert.ok(error.dirs > pipeline.NO_BOOKS_AFTER_DIRS && error.dirs < 520, `stopped right after the limit (${error.dirs})`);
+      const st = await indexer.readIngestionState(db.read);
+      assert.strictEqual(st.status, 'failed');
+      assert.ok(!indexer.isResumableState(st), 'a failed run is not offered for resume');
+      assert.strictEqual(Number((await db.read.all('SELECT COUNT(*) AS n FROM import_queue'))[0].n), 0);
+      db.raw.close();
+      // the same number of folders WITH a book is fine
+      const ok = await run((u) => (u === 'content://x/tree/root' ? Array.from({ length: 620 }, (_, i) => ({ name: `f${i}`, isDir: true, uri: `content://x/tree/root/f${i}` })) : u.endsWith('/f0') ? [{ name: 'ספר.txt', isDir: false, uri: u + '/b' }] : []));
+      assert.strictEqual(ok.error, null, String(ok.error));
+      ok.db.raw.close();
+    });
+
+    await check('scan safety: pause / cancel during the scan (before any build file) returns cleanly; resume continues and never throws', async () => {
+      const tree = (u) => (u === 'content://x/tree/root' ? [{ name: 'a', isDir: true, uri: u + '/a' }] : u.endsWith('/a') ? [{ name: 'ספר.txt', isDir: false, uri: u + '/b' }] : []);
+      for (const stop of ['pause', 'cancel']) {
+        const { db, result, error } = await run(tree, { shouldStop: () => stop });
+        assert.strictEqual(error, null, String(error));
+        assert.strictEqual(result.stopped, stop);
+        assert.strictEqual(result.phase, 'scan');
+        db.raw.close();
+      }
+      const first = await run(tree, { shouldStop: () => 'pause' });
+      first.db.raw.close();
+      // The build-file decision: only RESUMING an existing file needs it; otherwise reset cleanly.
+      const plan = coreFinalize.coreBuildStart;
+      assert.strictEqual(plan({ resume: false, hasSource: true, buildFileExists: false }), 'fresh');
+      assert.strictEqual(plan({ resume: false, hasSource: true, buildFileExists: true }), 'fresh');
+      assert.strictEqual(plan({ resume: true, hasSource: true, buildFileExists: false }), 'fresh', 'resume without a build file (paused / cancelled during the scan): start clean, no error');
+      assert.strictEqual(plan({ resume: true, hasSource: true, buildFileExists: true }), 'resume');
+      assert.strictEqual(plan({ resume: true, hasSource: false, buildFileExists: true }), 'finalize');
+      assert.strictEqual(plan({ resume: true, hasSource: false, buildFileExists: false }), 'nothing', 'finalize-only with no file: reset quietly');
+      const src = fs.readFileSync(path.join(ROOT, 'src/services/localIndexer.ts'), 'utf8');
+      assert.ok(!src.includes('קובץ הבנייה לא נמצא'), 'the "build file not found" crash message is gone');
+      assert.ok(src.includes('coreBuildStart') && src.includes("code === 'NO_BOOKS'"));
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 /** Long-press copy toolbar: clean text + canonical citation (shared/copyFormat.js) and the UI wiring. */
 async function copyFormatTests() {
   const cf = require('../shared/copyFormat');

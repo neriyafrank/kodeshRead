@@ -19,6 +19,7 @@ export const STEPS: {
   swapFile: 'finalize:swap_file';
   reopenDb: 'finalize:reopen_db';
 };
+export function coreBuildStart(a: { resume: boolean; hasSource: boolean; buildFileExists: boolean }): 'fresh' | 'resume' | 'finalize' | 'nothing';
 export const FINALIZE_INDEX_DONE: 'index';
 export const FINALIZE_READY: 'meta';
 export const SIDE_SUFFIXES: string[];

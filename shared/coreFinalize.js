@@ -341,7 +341,22 @@ async function installFile(env, o) {
   return step(STEPS.reopenDb, () => env.reopenCore());
 }
 
+/**
+ * What a core build does when it starts, from what exists on disk (pure; src/services/localIndexer.ts):
+ *   fresh     start from the source (a new build, or a "resume" whose build file never got created / was removed:
+ *             a pause or cancel during the scan, before the file existed, must never be an error)
+ *   resume    the build file exists: continue its checkpoint
+ *   finalize  only the end is left (no source): needs the file
+ *   nothing   finalize-only without a build file: nothing to do, reset quietly (no crash message)
+ */
+function coreBuildStart({ resume, hasSource, buildFileExists }) {
+  if (!resume) return 'fresh';
+  if (buildFileExists) return hasSource ? 'resume' : 'finalize';
+  return hasSource ? 'fresh' : 'nothing';
+}
+
 module.exports = {
+  coreBuildStart,
   STEPS,
   FINALIZE_INDEX_DONE,
   FINALIZE_READY,

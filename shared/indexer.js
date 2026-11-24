@@ -536,7 +536,28 @@ function isIgnoredEntry(e) {
 
 /** True for the files scanBooks() indexes as books. */
 function isBookFileName(name) {
-  return /\.txt$/i.test(name) && !String(name).startsWith('.');
+  const n = decodeUriName(name);
+  return /\.txt$/i.test(n) && !n.startsWith('.');
+}
+
+/** URL-decoded name (SAF content:// names can arrive as "%D7%91...txt"); the input when it is not valid. */
+function decodeUriName(name) {
+  const n = String(name == null ? '' : name);
+  if (!/%[0-9A-F]{2}/i.test(n)) return n;
+  try {
+    return decodeURIComponent(n);
+  } catch {
+    return n;
+  }
+}
+
+/**
+ * True for a name that is clearly a FILE (an extension of a known file type), even when the platform
+ * reported it as a folder: on Android SAF a document of an unknown MIME type can come back as a directory,
+ * and scanning it as one never ends. Decodes URL-encoded names first.
+ */
+function looksLikeFileName(name) {
+  return /\.(txt|docx?|pdf|rtf|odt|epub|mobi|html?|xml|json|csv|md|zip|7z|rar|gz|jpe?g|png|gif|webp|bmp|svg|mp3|mp4|m4a|wav|apk|db|sqlite|log|ini)$/i.test(decodeUriName(name));
 }
 
 /**
@@ -1485,6 +1506,8 @@ module.exports = {
   isResumableState,
   isIgnoredEntry,
   isBookFileName,
+  looksLikeFileName,
+  decodeUriName,
   SCHEMA_VERSION,
   USER_ID_BASE,
   USER_ROOT_NAME,

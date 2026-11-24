@@ -49,6 +49,42 @@ const METADATA_FILES = new Set(['order.json', 'aliases.json', 'manifest.json', '
 
 const PHASES = ['scan', 'books', 'links', 'finalize'];
 
+/** Otzaria is ~4-6 levels deep (אוצריא / category / sub-category / ... / book): deeper folders are never scanned. */
+const MAX_SCAN_DEPTH = 12;
+/** More folders than this scanned with no book file found = the wrong folder (or a runaway listing): stop. */
+const NO_BOOKS_AFTER_DIRS = 500;
+/** Folders never entered at any depth: hidden ("." prefix) and Android's own data / system folders. */
+const isSkippedScanDir = (name) => {
+  const n = String(name || '');
+  return n.startsWith('.') || /^(android|\$recycle\.bin|lost\+found|system volume information)$/i.test(n);
+};
+const NO_BOOKS_MESSAGE = (dirs) => `לא נמצאו קבצי טקסט של אוצריא בתיקייה שנבחרה (נסרקו ${dirs} תיקיות ללא אף קובץ ‎.txt). בחרו ישירות את התיקייה ״אוצריא״ שמכילה את הספרים.`;
+
+/** Thrown by the scan when it gives up on a folder that holds no book files. */
+class NoBooksFoundError extends Error {
+  constructor(dirs) {
+    super(NO_BOOKS_MESSAGE(dirs));
+    this.name = 'NoBooksFoundError';
+    this.code = 'NO_BOOKS';
+    this.dirs = dirs;
+  }
+}
+
+/** A folder URI in one canonical spelling (decoded up to 3 times, no trailing slash): the "visited" key. */
+function canonicalUri(uri) {
+  let u = String(uri || '');
+  for (let i = 0; i < 3 && /%[0-9A-F]{2}/i.test(u); i++) {
+    try {
+      const d = decodeURIComponent(u);
+      if (d === u) break;
+      u = d;
+    } catch {
+      break;
+    }
+  }
+  return u.replace(/\/+$/, '');
+}
+
 /** Runs that may die on the same book / links job before it is skipped. */
 const MAX_ATTEMPTS = 2;
 const CRASH_MESSAGE = 'הייבוא נעצר באמצע קובץ זה פעמיים (קריסה או סגירת האפליקציה) — הקובץ דולג';
@@ -151,6 +187,11 @@ async function scanPhase(db, fsa, o, report) {
   const uriOf = fsa.uriOf || ((h) => String(h));
   const fromUri = fsa.fromUri || ((u) => u);
   const skipRootDirs = o.skipRootDirs || SKIPPED_ROOT_DIRS;
+  const maxDepth = o.maxScanDepth || MAX_SCAN_DEPTH;
+  const noBooksAfter = o.noBooksAfterDirs || NO_BOOKS_AFTER_DIRS;
+  // A folder is scanned once: every queued folder (also after a resume) is remembered by its canonical URI,
+  // so a provider that lists a folder inside itself can never grow the queue without end.
+  const visited = new Set((await db.all("SELECT uri FROM import_queue WHERE kind = 'dir'", [])).map((r) => canonicalUri(r.uri)));
   for (;;) {
     const stop = o.shouldStop ? o.shouldStop() : null;
     if (stop) return stop;
@@ -186,9 +227,16 @@ async function scanPhase(db, fsa, o, report) {
         indexer.sortEntries(entries, order).forEach((e, i) => {
           const rel = parts.concat(e.name).join('/');
           const key = (dir.sort_key ? dir.sort_key + '.' : '') + pad(i);
-          if (e.isDir) {
+          // A name with a file extension is a file whatever the platform called it (SAF).
+          if (e.isDir && !indexer.looksLikeFileName(e.name)) {
             if (!parts.length && skipRootDirs.has(e.name.toLowerCase())) return;
-            rows.push(['dir', uriOf(e.handle), rel, key]);
+            if (isSkippedScanDir(e.name)) return;
+            if (parts.length + 1 > maxDepth) return; // too deep to be Otzaria: never entered
+            const uri = uriOf(e.handle);
+            const canon = canonicalUri(uri);
+            if (visited.has(canon)) return; // already queued / scanned under another path
+            visited.add(canon);
+            rows.push(['dir', uri, rel, key]);
           } else if (indexer.isBookFileName(e.name)) {
             rows.push(['file', uriOf(e.handle), rel, key]);
             filesFound++;
@@ -213,6 +261,15 @@ async function scanPhase(db, fsa, o, report) {
     entries = null;
     // current = folders scanned, total = book files found so far.
     report('scan', progress.dirs, progress.files, parts.join('/'));
+    if (progress.dirs > noBooksAfter && progress.files === 0) {
+      // Nothing to resume: drop the queue and mark the run failed (not paused), then explain.
+      const err = new NoBooksFoundError(progress.dirs);
+      await tx(db, async () => {
+        await db.run('DELETE FROM import_queue', []);
+        await indexer.writeIngestionState(db, { status: 'failed', last_error: err.message });
+      });
+      throw err;
+    }
     await o.yieldToUI();
   }
 }
@@ -497,4 +554,4 @@ async function completeImport(db) {
   });
 }
 
-module.exports = { runImport, completeImport, queueCounts, PHASES, SKIPPED_ROOT_DIRS, MAX_ATTEMPTS, CRASH_MESSAGE };
+module.exports = { runImport, completeImport, queueCounts, PHASES, SKIPPED_ROOT_DIRS, MAX_ATTEMPTS, CRASH_MESSAGE, MAX_SCAN_DEPTH, NO_BOOKS_AFTER_DIRS, NoBooksFoundError, canonicalUri, isSkippedScanDir };

@@ -231,6 +231,8 @@ export function readIngestionErrors(db: { all: WriterDb['all'] }, limit?: number
 export function isResumableState(st: IngestionState | null | undefined): st is IngestionState;
 export function isIgnoredEntry(e: { name: string; isDir: boolean }): boolean;
 export function isBookFileName(name: string): boolean;
+export function looksLikeFileName(name: string): boolean;
+export function decodeUriName(name: string): string;
 export const SCHEMA_VERSION: number;
 export const USER_ID_BASE: number;
 export const USER_ROOT_NAME: string;

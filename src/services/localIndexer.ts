@@ -73,7 +73,14 @@ function byteSource(file: File) {
 }
 
 const deviceFs: PipelineFs<Entry> = {
-  list: async (dir) => (dir as Directory).list().map((e) => ({ name: entryName(e), isDir: e instanceof Directory, handle: e })),
+  list: async (dir) =>
+    (dir as Directory).list().map((e) => {
+      const name = entryName(e);
+      // Android SAF can report a document of an unknown type as a Directory: a name with a file extension
+      // (also URL-encoded, "%D7%91...txt") is a file, never a folder to descend into.
+      if (e instanceof Directory && indexer.looksLikeFileName(name)) return { name, isDir: false, handle: new File(e.uri) as Entry };
+      return { name, isDir: e instanceof Directory, handle: e };
+    }),
   readText: (file) => (file as File).text(),
   // Streamed reads: the book is never one string in memory.
   open: (file) => openTextReader(() => byteSource(file as File)),
@@ -455,10 +462,21 @@ export async function recordCoreBuildError(e: unknown, open?: SQLiteDatabase | n
  * the checkpoint is at the finalize phase (or the build is complete and waits for its install),
  * so the source folder is not needed and no book is read again.
  */
-async function runCoreBuild(src: { root: Directory; books: Directory } | null, resume: boolean): Promise<CoreBuildResult> {
+async function runCoreBuild(src: { root: Directory; books: Directory } | null, resumeRequested: boolean): Promise<CoreBuildResult> {
+  let resume = resumeRequested;
   ensureNative();
-  if (!resume) removeDbFiles(CORE_BUILD_DB);
-  else if (!dbFile(CORE_BUILD_DB).exists) throw new Error('קובץ הבנייה לא נמצא — יש לבנות את הספרייה מחדש');
+  // The build file is only required to RESUME one that already exists. A "resume" without it (a pause / cancel
+  // during the folder scan, before the file was created, or a stale card) starts clean from the source; with no
+  // source either there is nothing to do, and that is not an error.
+  const start = coreFinalize.coreBuildStart({ resume, hasSource: !!src, buildFileExists: dbFile(CORE_BUILD_DB).exists });
+  if (start === 'nothing') {
+    useLibraryJobs.getState().bumpCheckpoint();
+    return { version: null, summary: { stopped: 'cancel', books: 0, paragraphs: 0, refLinks: null, skippedFiles: 0, skipped: 0, errors: [] }, counts: null };
+  }
+  if (start === 'fresh') {
+    removeDbFiles(CORE_BUILD_DB);
+    resume = false;
+  }
   let db: SQLiteDatabase | null = await openBuildDb();
   try {
     const w = toWriter(db);
@@ -499,6 +517,14 @@ async function runCoreBuild(src: { root: Directory; books: Directory } | null, r
     useLibraryJobs.getState().bumpCheckpoint();
     return { version: meta.version, summary, counts: { books: meta.counts.books, paragraphs: meta.counts.paragraphs } };
   } catch (e) {
+    // A folder without any book file: nothing to resume, drop the (empty) build and explain.
+    if ((e as { code?: string })?.code === 'NO_BOOKS') {
+      await closeQuietly(db);
+      db = null;
+      removeDbFiles(CORE_BUILD_DB);
+      useLibraryJobs.getState().bumpCheckpoint();
+      throw e;
+    }
     // The build file and its checkpoint are kept: the next attempt resumes from here (a build
     // that reached the finalize phase retries only that).
     if (db) {
