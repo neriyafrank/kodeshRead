@@ -215,6 +215,12 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > (`formatCloudNotification`: "מוריד ספרייה מהענן… 42%"); assembly + extraction (`keepAwake` option) and the DB swap run under
 > `withKeepAwake` (`src/services/keepAwake.ts`, released in `finally`). Self-tested (section 12, "resilient download").
 
+> **APK on GitHub Actions:** `.github/workflows/build-android-apk.yml` (workflow_dispatch, `publish_release` input) builds the
+> arm64 APK on `ubuntu-latest` without EAS (`db:ensure` -> `expo prebuild` -> `assembleRelease` -> `kodeshRead-<short-sha>.apk`,
+> uploaded as an artifact; with `publish_release` also attached to the non-"latest" `app-latest` release). Optional secrets
+> `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` switch release signing from the debug
+> keystore to a real one via `plugins/withAndroidReleaseSigning.js` (env-driven, no-op without them). See README "GitHub Actions build".
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

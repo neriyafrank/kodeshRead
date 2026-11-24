@@ -69,6 +69,7 @@
           ]
         }
       ],
+      "./plugins/withAndroidReleaseSigning",
       "./plugins/withImportForegroundService",
       [
         "expo-font",

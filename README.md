@@ -615,6 +615,23 @@ git-ignored, so never edit it by hand) and `./gradlew assembleRelease`. The APK 
 phone. The generated project signs release builds with the debug keystore, which is fine for
 side-loading; for a store release use EAS, which manages a real keystore.
 
+### GitHub Actions build (no EAS queue)
+
+`.github/workflows/build-android-apk.yml` builds the same APK on a GitHub runner (Node 22, Java 17,
+Gradle cache; `npm ci` -> `npm run db:ensure` -> `expo prebuild` -> `assembleRelease`).
+
+1. GitHub -> **Actions** -> **Build Android APK** -> **Run workflow**.
+2. `publish_release` off (default): download `kodeshRead-<short-sha>.apk` from the run's **Artifacts**.
+   On: the APK is also attached to the `app-latest` release (`kodeshRead-latest.apk` = stable link for the
+   phone). That release is never marked "latest", so the library manifest URL is unaffected.
+
+Signing: with no secrets the release APK is signed with the debug keystore (installs fine, but a later
+build signed with a different key cannot upgrade it in place). For persistent upgrades add four repository
+secrets (Settings -> Secrets and variables -> Actions): `ANDROID_KEYSTORE_BASE64` (`base64 -w0 my.keystore`),
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. The workflow then decodes the
+keystore and `plugins/withAndroidReleaseSigning.js` signs `assembleRelease` with it (passwords are read from
+the environment by Gradle, never written to disk). Keep the same keystore for every build.
+
 ### EAS build
 
 ```bash
