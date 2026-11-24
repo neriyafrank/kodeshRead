@@ -1228,6 +1228,11 @@ async function corporaTests() {
   };
   const setOf = (lib, ids, opts) => new Set(corpora.resolveCorpusBooks(lib.books, ids, opts).map((id) => lib.books[id - 1].categoryPath + '/' + lib.books[id - 1].title));
 
+  await check('corpora: the טעמים switch is for Tanakh base books only (inCorpus tanach)', () => {
+    const is = (title, categoryPath) => corpora.inCorpus({ id: 1, title, categoryPath }, 'tanach');
+    for (const [title, cat] of [['בראשית', 'אוצריא/תנך/תורה'], ['שמואל א', 'תנך/נביאים'], ['תהילים', 'תנ"ך/כתובים']]) assert.ok(is(title, cat), `${title} is Tanakh`);
+    for (const [title, cat] of [['שבת', 'משנה/סדר מועד'], ['שבת', 'תלמוד בבלי/סדר מועד'], ['רשי על בראשית', 'תנך/מפרשים'], ['תרגום אונקלוס על בראשית', 'תנך/תרגומים'], ['שולחן ערוך אורח חיים', 'הלכה/שולחן ערוך']]) assert.ok(!is(title, cat), `${title} is not Tanakh`);
+  });
   await check('corpora: תנ"ך = canonical Torah / Neviim / Ketuvim only, on messy folders', () => {
     const lib = library([
       'אוצריא/תנך/תורה/בראשית',

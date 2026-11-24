@@ -6,6 +6,7 @@
  */
 import { Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
+import { useIsTanakhBook } from '../../db/useIsTanakhBook';
 import { READER_FONTS, readerFont } from '../../fonts';
 import { FONT_SIZE, LINE_HEIGHT, effectiveLineHeight, useSettings, type ThemeName } from '../../state/settingsStore';
 import { palettes, radius, spacing, useThemedStyles, type Palette } from '../../theme';
@@ -27,9 +28,12 @@ const THEMES: { name: ThemeName; label: string }[] = [
 interface Props {
   visible: boolean;
   onClose: () => void;
+  /** The open book: the טעמים switch is shown only for Tanakh books (the saved preference is kept for them). */
+  bookId?: number | null;
 }
 
-export function AppearanceSheet({ visible, onClose }: Props) {
+export function AppearanceSheet({ visible, onClose, bookId }: Props) {
+  const isTanakh = useIsTanakhBook(bookId, visible) === true;
   const s = useThemedStyles(createStyles);
   const fontFamily = useSettings((x) => x.fontFamily);
   const fontSize = useSettings((x) => x.fontSize);
@@ -160,7 +164,7 @@ export function AppearanceSheet({ visible, onClose }: Props) {
         <View style={s.switchRow}>
           <View style={{ flex: 1 }}>
             <Text style={s.label}>ניקוד</Text>
-            <Text style={s.hint}>הצגת נקודות התנועה (כיבוי מסתיר גם את הטעמים)</Text>
+            <Text style={s.hint}>{isTanakh ? 'הצגת נקודות התנועה (כיבוי מסתיר גם את הטעמים)' : 'הצגת נקודות התנועה'}</Text>
           </View>
           <Switch
             value={showNikkud}
@@ -171,20 +175,22 @@ export function AppearanceSheet({ visible, onClose }: Props) {
           />
         </View>
 
-        <View style={[s.switchRow, !showNikkud && { opacity: 0.45 }]}>
-          <View style={{ flex: 1 }}>
-            <Text style={s.label}>טעמים</Text>
-            <Text style={s.hint}>הסתרת הטעמים בלבד (הניקוד נשאר) — גם בחלונית המפרשים</Text>
+        {isTanakh ? (
+          <View style={[s.switchRow, !showNikkud && { opacity: 0.45 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.label}>טעמים</Text>
+              <Text style={s.hint}>הסתרת הטעמים בלבד (הניקוד נשאר) — גם בחלונית המפרשים</Text>
+            </View>
+            <Switch
+              value={showNikkud && showCantillation}
+              disabled={!showNikkud}
+              onValueChange={(v) => set({ showCantillation: v })}
+              accessibilityLabel="טעמי המקרא"
+              testID="cantillation-switch"
+              {...switchColors(s.palette)}
+            />
           </View>
-          <Switch
-            value={showNikkud && showCantillation}
-            disabled={!showNikkud}
-            onValueChange={(v) => set({ showCantillation: v })}
-            accessibilityLabel="טעמי המקרא"
-            testID="cantillation-switch"
-            {...switchColors(s.palette)}
-          />
-        </View>
+        ) : null}
       </ScrollView>
     </BottomSheet>
   );

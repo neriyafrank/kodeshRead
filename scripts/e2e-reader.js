@@ -370,6 +370,16 @@ try {
     await assertNoDailyInToc('שבת TOC');
     assert.strictEqual(await all('torah-divider-').count(), 0, 'no dividers outside the Chumash');
     await tid('toc-close').click();
+    // Display sheet: the טעמים switch exists only for Tanakh books (שבת has none; ניקוד stays).
+    if (!(await visible('aa-button'))) await openTools();
+    await tid('aa-button').click();
+    await tid('appearance-sheet').waitFor();
+    await tid('niqqud-switch').waitFor();
+    assert.strictEqual(await all('cantillation-switch').count(), 0, 'no טעמים switch in a non-Tanakh book');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('[data-testid="appearance-sheet"]'), null, { timeout: 5000 }).catch(() => undefined);
+    if (await page.locator('[data-testid="appearance-sheet"]').count()) await page.mouse.click(200, 60);
+    await page.waitForTimeout(300);
     await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
     step(`Chumash TOC: פרקים | פרשות (פינחס › רביעי pre-selected, ${pn} labels flush right); בלק › שלישי and לתחילת פרשת בלק land on their verses under inline dividers; none in שבת`);
 
@@ -595,6 +605,7 @@ try {
     // Aa: font picker + 3-way theme switcher, persisted across a reload.
     await tid('aa-button').click();
     await tid('appearance-sheet').waitFor();
+    await tid('cantillation-switch').waitFor(); // a Tanakh book: the טעמים switch is there
     for (const id of ['theme-light', 'theme-sepia', 'theme-dark', 'font-taameyFrank', 'font-system']) assert.ok(await visible(id), `${id} in the Aa panel`);
     assert.strictEqual(await tid('font-taameyFrank').getAttribute('aria-checked'), 'true', 'טעמי פרנק is the default');
     assert.ok((await tid('font-taameyFrank').innerText()).includes('טעמי פרנק') && (await tid('font-system').innerText()).includes('מערכת'));

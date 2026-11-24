@@ -143,7 +143,7 @@ export default function ReaderWorkspace() {
           }}
         />
       ) : null}
-      <AppearanceSheet visible={appearanceOpen} onClose={() => setAppearanceOpen(false)} />
+      <AppearanceSheet visible={appearanceOpen} onClose={() => setAppearanceOpen(false)} bookId={activeTab?.bookId} />
       <TabSwitcher visible={switcherOpen} onClose={() => setSwitcherOpen(false)} />
     </View>
   );
