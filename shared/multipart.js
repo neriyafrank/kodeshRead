@@ -488,6 +488,65 @@ async function stageCloudLibrary(io, manifest, opts) {
   });
 }
 
+/** Fixed size of one Range request on the phone: a hard network drop loses at most this much. */
+const RANGE_CHUNK_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Downloads a part in fixed-size `Range` chunks (Android-safe resume). Each chunk is fetched into a separate
+ * temp chunk file and only a COMPLETE chunk (exactly the requested length) is appended to `<part>.partial`;
+ * a short / failed chunk is discarded, so the partial only ever grows by whole chunks and a drop loses at most
+ * one chunk. The final URL is resolved per chunk (a redirect that strips `Range` is detected by the probe
+ * answering 200 instead of 206). `env`:
+ *   partialSize() -> bytes already flushed, resolve(start, end) -> { url, status } (final URL after redirects),
+ *   fetchChunk(url, rangeOrNull, onBytes) writes the temp chunk file, chunkSize() -> bytes | null,
+ *   discardChunk(), appendChunk() (append + delete temp), adoptChunk() (temp becomes the whole partial),
+ *   resetPartial().
+ * @returns {Promise<void>}
+ */
+async function downloadRangeChunks(env, opts) {
+  const o = opts || {};
+  const expected = o.expectedBytes;
+  const chunkBytes = o.chunkBytes || RANGE_CHUNK_BYTES;
+  const cancelled = () => !!(o.isCancelled && o.isCancelled());
+  let have = await env.partialSize();
+  let ignored = 0;
+  while (have < expected) {
+    if (cancelled()) throw cancelledError();
+    const end = Math.min(have + chunkBytes, expected) - 1;
+    const want = end - have + 1;
+    await env.discardChunk(); // a chunk left by a process death is never trusted
+    const r = await env.resolve(have, end);
+    if (r.status === 200) {
+      // Range was ignored (or stripped by a redirect): the body is the whole part, nothing can be resumed.
+      if (ignored++ > 0) throw new Error('השרת אינו תומך בהורדה חלקית (Range)');
+      if (have > 0) await env.resetPartial();
+      have = 0;
+      await env.fetchChunk(r.url, null, (n) => o.onProgress && o.onProgress(n, expected));
+      if ((await env.chunkSize()) !== expected) {
+        await env.discardChunk();
+        throw new Error('Unexpected end of download (short body)');
+      }
+      await env.adoptChunk();
+      have = await env.partialSize();
+      continue;
+    }
+    if (r.status !== 206) throw new Error(`HTTP ${r.status}`);
+    try {
+      await env.fetchChunk(r.url, `bytes=${have}-${end}`, (n) => o.onProgress && o.onProgress(have + n, expected));
+    } catch (e) {
+      await env.discardChunk();
+      throw e;
+    }
+    if ((await env.chunkSize()) !== want) {
+      await env.discardChunk();
+      throw new Error(`Unexpected end of download (expected ${want} bytes)`);
+    }
+    await env.appendChunk();
+    have = await env.partialSize();
+    if (o.onProgress) o.onProgress(have, expected);
+  }
+}
+
 /**
  * In-memory PartsIO (browser e2e preview, self-tests). Parts are fetched with `fetch`, hashed with
  * WebCrypto. Only meant for small fixtures: the phone uses expo-file-system (src/services/cloudLibrary.ts).
@@ -593,6 +652,8 @@ module.exports = {
   backoffDelayMs,
   formatCloudNotification,
   downloadParts,
+  downloadRangeChunks,
+  RANGE_CHUNK_BYTES,
   assembleParts,
   extractZip,
   stageCloudLibrary,

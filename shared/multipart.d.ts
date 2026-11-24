@@ -135,3 +135,19 @@ export function stageCloudLibrary(
     report?: (p: { stage: string; fraction: number | null; detail: string | null }) => void;
   },
 ): Promise<void>;
+
+export const RANGE_CHUNK_BYTES: number;
+export interface RangeChunkEnv {
+  partialSize(): number | Promise<number>;
+  resolve(start: number, end: number): Promise<{ url: string; status: number }>;
+  fetchChunk(url: string, range: string | null, onBytes: (n: number) => void): Promise<void>;
+  chunkSize(): number | null | Promise<number | null>;
+  discardChunk(): void | Promise<void>;
+  appendChunk(): void | Promise<void>;
+  adoptChunk(): void | Promise<void>;
+  resetPartial(): void | Promise<void>;
+}
+export function downloadRangeChunks(
+  env: RangeChunkEnv,
+  opts: { expectedBytes: number; chunkBytes?: number; isCancelled?: () => boolean; onProgress?: (written: number, total: number) => void },
+): Promise<void>;

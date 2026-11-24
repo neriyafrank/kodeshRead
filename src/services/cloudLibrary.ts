@@ -26,7 +26,7 @@ import { AppState } from 'react-native';
 
 import type { Edition } from '../../shared/editions';
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
-import { checkFreeSpace, cloudManifestUrl, createMemoryIO, existingBytes, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
+import { checkFreeSpace, cloudManifestUrl, createMemoryIO, downloadRangeChunks, existingBytes, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
 import { coreInfoFromMeta, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toAdapter } from '../db/library';
 import { CancelledError, useLibraryJobs } from '../state/libraryJobs';
@@ -94,23 +94,6 @@ function partsDir(): Directory {
   return dir;
 }
 
-/**
- * Whether the host honours Range. Only a definitive 200 (Range ignored) answers "no" (the partial is then
- * useless); anything else that is not a 206 is a transient failure and throws, so a flaky link can never
- * make the app throw away a half-finished download.
- */
-async function supportsRange(url: string): Promise<boolean> {
-  const res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
-  try {
-    void res.body?.cancel?.();
-  } catch {
-    // body already consumed / unsupported
-  }
-  if (res.status === 206) return true;
-  if (res.status === 200) return false;
-  throw new Error(`HTTP ${res.status}`);
-}
-
 /** Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes it. */
 async function absorbChunk(chunk: File, target: File): Promise<void> {
   if (!chunk.exists) return;
@@ -173,34 +156,54 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
       await file(from).move(dst, { overwrite: true }); // File.move() is async: always awaited
     },
     download: async (url, name, onProgress, _isCancelled, resume) => {
+      // Chunked Range download: each <= 4 MB chunk goes to its own temp file and is appended to the .partial only
+      // when complete, so a hard network drop on Android loses at most one chunk. downloadAsync never targets
+      // the .partial itself.
       const target = file(name);
       const chunk = new File(dir, `${name}.chunk`);
       const expected = resume?.expectedBytes ?? 0;
-      // A chunk left by a process death continues exactly where the target ends.
-      await absorbChunk(chunk, target);
-      let from = target.exists ? target.size : 0;
-      if (from > 0 && !(await supportsRange(url))) {
-        target.delete();
-        from = 0;
-      }
-      if (from > 0 && expected > 0 && from >= expected) return; // already complete
-      const task = File.createDownloadTask(url, chunk, {
-        headers: from > 0 ? { Range: `bytes=${from}-` } : undefined,
-        onProgress: ({ bytesWritten, totalBytes }) => {
-          if (isCancelled()) task.cancel();
-          onProgress(from + bytesWritten, expected || from + totalBytes);
+      if (!expected) throw new Error('גודל החלק לא ידוע');
+      await absorbChunk(chunk, target); // legacy chunk from an older build / process death: a valid prefix
+      await downloadRangeChunks(
+        {
+          partialSize: () => (target.exists ? target.size : 0),
+          // Resolve the final CDN URL ourselves (fetch follows the 302 keeping Range): the native downloader
+          // then talks to the CDN directly and cannot lose the header on the redirect.
+          resolve: async (start: number, end: number) => {
+            const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, cache: 'no-store' });
+            try {
+              void res.body?.cancel?.();
+            } catch {
+              // body already consumed / unsupported
+            }
+            return { url: res.url || url, status: res.status };
+          },
+          fetchChunk: async (finalUrl: string, range: string | null, onBytes: (n: number) => void) => {
+            const task = File.createDownloadTask(finalUrl, chunk, {
+              headers: range ? { Range: range } : undefined,
+              onProgress: ({ bytesWritten }) => {
+                if (isCancelled()) task.cancel();
+                onBytes(bytesWritten);
+              },
+            });
+            const got = await task.downloadAsync();
+            if (!got) throw new Error('ההורדה נכשלה');
+          },
+          chunkSize: () => (chunk.exists ? chunk.size : null),
+          discardChunk: () => {
+            if (chunk.exists) chunk.delete();
+          },
+          appendChunk: () => absorbChunk(chunk, target),
+          adoptChunk: async () => {
+            if (target.exists) target.delete();
+            await chunk.move(target, { overwrite: true });
+          },
+          resetPartial: () => {
+            if (target.exists) target.delete();
+          },
         },
-      });
-      let got: File | null = null;
-      try {
-        got = await task.downloadAsync();
-      } finally {
-        // Whatever arrived before an error is a valid prefix: keep it, the retry continues after it.
-        // A chunk longer than what is still missing is an error page / full body, never a prefix: drop it.
-        if (expected > 0 && chunk.exists && chunk.size > expected - from) chunk.delete();
-        await absorbChunk(chunk, target).catch((e) => console.warn('could not keep the partial download', e));
-      }
-      if (!got) throw new Error('ההורדה נכשלה');
+        { expectedBytes: expected, isCancelled, onProgress },
+      );
     },
     openRead: (name) => {
       const f = file(name);

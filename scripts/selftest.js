@@ -4153,6 +4153,58 @@ async function cloudLibraryTests() {
         assert.deepStrictEqual(fs.readdirSync(f.dir).sort(), manifest.parts.map((q) => q.name).sort(), 'clean state after recovery');
         for (const [i, q] of manifest.parts.entries()) assert.ok(fs.readFileSync(path.join(f.dir, q.name)).equals(slices[i]));
       });
+      await check('resilient download: chunked Range appends whole chunks; a mid-chunk failure keeps earlier chunks and resumes at the exact offset', async () => {
+        const data = Buffer.from(Array.from({ length: 1000 }, (_, i) => (i * 7) % 251));
+        const mk = (opts) => {
+          const st = { partial: Buffer.alloc(0), chunk: null, calls: [], failAt: opts.failAt || [], rangeIgnored: !!opts.rangeIgnored };
+          const env = {
+            partialSize: () => st.partial.length,
+            resolve: async (a, b) => ({ url: `final?${a}-${b}`, status: st.rangeIgnored ? 200 : 206 }),
+            fetchChunk: async (url, range) => {
+              st.calls.push(range);
+              if (!range) return void (st.chunk = Buffer.from(data));
+              const [a, b] = /bytes=(\d+)-(\d+)/.exec(range).slice(1).map(Number);
+              if (st.failAt.length && st.failAt[0] === a) {
+                st.failAt.shift();
+                st.chunk = data.subarray(a, a + 10); // a few bytes landed, then the network died
+                throw new Error('Unable to resolve host');
+              }
+              st.chunk = Buffer.from(data.subarray(a, b + 1));
+            },
+            chunkSize: () => (st.chunk ? st.chunk.length : null),
+            discardChunk: () => void (st.chunk = null),
+            appendChunk: () => {
+              st.partial = Buffer.concat([st.partial, st.chunk]);
+              st.chunk = null;
+            },
+            adoptChunk: () => {
+              st.partial = st.chunk;
+              st.chunk = null;
+            },
+            resetPartial: () => void (st.partial = Buffer.alloc(0)),
+          };
+          return { st, env };
+        };
+        const ok = mk({});
+        await mp.downloadRangeChunks(ok.env, { expectedBytes: 1000, chunkBytes: 300 });
+        assert.ok(ok.st.partial.equals(data));
+        assert.deepStrictEqual(ok.st.calls, ['bytes=0-299', 'bytes=300-599', 'bytes=600-899', 'bytes=900-999']);
+        // chunk 3 (offset 600) dies mid-way: chunks 1-2 survive byte-exact, the partial never holds the torn chunk
+        const bad = mk({ failAt: [600] });
+        await assert.rejects(() => mp.downloadRangeChunks(bad.env, { expectedBytes: 1000, chunkBytes: 300 }), /resolve host/);
+        assert.strictEqual(bad.st.partial.length, 600);
+        assert.ok(bad.st.partial.equals(data.subarray(0, 600)));
+        assert.strictEqual(bad.st.chunk, null, 'the torn temp chunk is discarded');
+        await mp.downloadRangeChunks(bad.env, { expectedBytes: 1000, chunkBytes: 300 });
+        assert.ok(bad.st.partial.equals(data));
+        assert.deepStrictEqual(bad.st.calls.slice(-2), ['bytes=600-899', 'bytes=900-999'], 'resumed at the saved offset');
+        // a redirect that drops Range (probe answers 200): the partial is reset and the whole body is adopted
+        const ign = mk({ rangeIgnored: true });
+        ign.st.partial = Buffer.from(data.subarray(0, 300));
+        await mp.downloadRangeChunks(ign.env, { expectedBytes: 1000, chunkBytes: 300 });
+        assert.ok(ign.st.partial.equals(data));
+        assert.deepStrictEqual(ign.st.calls, [null]);
+      });
       await check('resilient download: automatic retry resumes mid-part (server drop, no manual restart) and the budget refills on progress', async () => {
         const f = fresh('run-r5');
         behaviour.dropOnce.add(manifest.parts[0].name);
