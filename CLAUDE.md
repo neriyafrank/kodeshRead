@@ -107,8 +107,9 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > **Simple vs Advanced Search:** `shared/hebrewSearch.js` builds every query plan (pure JS, over the existing
 > `paragraphs_fts`, no schema change). Simple Search (`src/app/search.tsx`) is literal (`SIMPLE_DEFAULTS`:
 > no expansion, no operators) with a "חיפוש מתקדם" button; Advanced Search (`src/app/advanced-search.tsx`)
-> has main / אחת מהמילים / ללא המילים fields, inline `a|b`, `-word`, `word*`, `"exact"`, toggles
-> (`ADVANCED_DEFAULTS`: prefixesAndSuffixes on; pleneDefective, acronyms, aramaicEquiv off), proximity
+> has ONE query input (inline `a|b`, `-word`, `word*`, `"exact"`; a `?` next to its label opens / dismisses the operators guide;
+> header = ← + title only), toggles
+> (`ADVANCED_DEFAULTS`: prefixesAndSuffixes on; pleneDefective, acronyms off; the Hebrew <-> Aramaic expansion and the old "any of" / "exclude" fields were removed), proximity
 > (פסקה / ביטוי מדויק / קרבה 3·5·10 + order) and corpus chips (`search.CORPORA`). `shared/search.js`
 > `searchPlan` / `countPlan` run plans: FTS5 candidates, `hebrewSearch.evaluate()` for exactness, exact
 > matches first (`{ phase, afterId }` cursor); the no-FTS5 web fallback returns identical results.

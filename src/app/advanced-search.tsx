@@ -2,9 +2,9 @@
  * Advanced Search ("חיפוש מתקדם"): a Responsa-Project-style search form over the same offline
  * FTS5 index as Simple Search (shared/hebrewSearch.js + shared/search.js searchPlan).
  *
- *  - structured fields: מילות החיפוש / ביטוי (inline a|b, -word, word*, "exact"),
- *    אחת מהמילים (OR) and ללא המילים (NOT);
- *  - linguistic toggles: תחיליות וסופיות (on), כתיב מלא/חסר, ראשי תיבות, עברית ↔ ארמית (off);
+ *  - one query field: מילות החיפוש / ביטוי with inline operators (a|b, -word, word*, "exact"); a `?` button next
+ *    to its label opens / dismisses the operators guide. Header: just ← and the title;
+ *  - linguistic toggles: תחיליות וסופיות (on), כתיב מלא/חסר, ראשי תיבות (off);
  *  - קרבת מילים: פסקה | ביטוי מדויק | קרבה 3 / 5 / 10 (+ שמור על סדר המילים);
  *  - סינון לפי מדור: הכל, הספר הנוכחי, תנ"ך, משנה, בבלי, רמב"ם, שולחן ערוך, מפרשים;
  *  - "חפש" runs the query (exact matches first, then expanded variants, all highlighted);
@@ -14,6 +14,7 @@
  */
 import { FlashList } from '@shopify/flash-list';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useMemo, useState } from 'react';
 import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
@@ -36,7 +37,14 @@ const TOGGLES: { key: keyof LinguisticOptions; label: string; hint: string }[] =
   { key: 'prefixesAndSuffixes', label: 'תחיליות וסופיות', hint: 'ושבת, בשבת, שבתות, שבתו · תפילה → לתפילתו' },
   { key: 'pleneDefective', label: 'כתיב מלא/חסר', hint: 'מצווה ↔ מצוה · שולחן ↔ שלחן · תפילה ↔ תפלה' },
   { key: 'acronyms', label: 'ראשי תיבות', hint: 'שו"ע ↔ שולחן ערוך · ק"ו ↔ קל וחומר' },
-  { key: 'aramaicEquiv', label: 'עברית ↔ ארמית', hint: 'מותר ↔ שרי · הלכה ↔ הלכתא · ספק ↔ ספיקא' },
+];
+
+/** Operators of the main input (the `?` guide). */
+const OPERATORS: { op: string; text: string }[] = [
+  { op: 'א|ב', text: 'אחת מהמילים (או)' },
+  { op: '-מילה', text: 'ללא המילה (שלילה)' },
+  { op: 'מיל*', text: 'תחילת מילה' },
+  { op: '"ביטוי מדויק"', text: 'חיפוש ביטוי רצוף' },
 ];
 
 const PROXIMITY: { mode: ProximityMode; label: string }[] = [
@@ -67,6 +75,8 @@ export default function AdvancedSearchScreen() {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const [helpOpen, setHelpOpen] = useState(false);
   const params = useLocalSearchParams<{ bookId?: string; title?: string }>();
   const advanced = useSearch((x) => x.advanced);
   const setAdvanced = useSearch((x) => x.setAdvanced);
@@ -113,7 +123,7 @@ export default function AdvancedSearchScreen() {
     Keyboard.dismiss();
     const plan = planOf(advanced);
     if (plan.empty) return;
-    remember(advanced.fields.query || advanced.fields.anyOf);
+    remember(advanced.fields.query);
     setSubmitted({ plan, scope: scopeOf(corpora, book, picked, presets.scopeFor) });
     setFormOpen(false);
   }, [advanced, book, corpora, picked, presets.scopeFor, remember]);
@@ -156,12 +166,27 @@ export default function AdvancedSearchScreen() {
     [onOpen, rows, s.divider, s.dividerText, shown?.terms],
   );
 
-  const summary = [advanced.fields.query, advanced.fields.anyOf && `או: ${advanced.fields.anyOf}`, advanced.fields.exclude && `ללא: ${advanced.fields.exclude}`].filter(Boolean).join(' · ');
+  const summary = advanced.fields.query;
   const isDefault = JSON.stringify(advanced) === JSON.stringify(advancedDefaults());
 
   const form = (
     <View style={s.form} testID="adv-form">
-      <Field label="מילות החיפוש / ביטוי" hint='אופרטורים: א|ב (או) · ‎-מילה (ללא) · מיל* (התחלה) · "ביטוי מדויק"'>
+      <View style={s.field}>
+        <View style={s.labelRow}>
+          <Text style={s.label}>מילות החיפוש / ביטוי</Text>
+          <Pressable
+            onPress={() => setHelpOpen((v) => !v)}
+            hitSlop={8}
+            style={[s.helpBtn, helpOpen && { backgroundColor: c.accentSoft, borderColor: c.accent }]}
+            accessibilityRole="button"
+            aria-expanded={helpOpen}
+            accessibilityState={{ expanded: helpOpen }}
+            accessibilityLabel="עזרה: אופרטורים בחיפוש"
+            testID="adv-help"
+          >
+            <Text style={s.helpText}>?</Text>
+          </Pressable>
+        </View>
         <TextInput
           value={advanced.fields.query}
           onChangeText={(v) => setField('query', v)}
@@ -175,38 +200,16 @@ export default function AdvancedSearchScreen() {
           accessibilityLabel="מילות החיפוש"
           testID="adv-query"
         />
-      </Field>
-      <View style={s.pair}>
-        <Field label="אחת מהמילים · או" style={s.flex}>
-          <TextInput
-            value={advanced.fields.anyOf}
-            onChangeText={(v) => setField('anyOf', v)}
-            placeholder="רבא, אביי"
-            placeholderTextColor={c.textMuted}
-            style={s.input}
-            autoCorrect={false}
-            autoCapitalize="none"
-            returnKeyType="search"
-            onSubmitEditing={onSearch}
-            accessibilityLabel="אחת מהמילים"
-            testID="adv-any"
-          />
-        </Field>
-        <Field label="ללא המילים · שלילה" style={s.flex}>
-          <TextInput
-            value={advanced.fields.exclude}
-            onChangeText={(v) => setField('exclude', v)}
-            placeholder="מילים שלא יופיעו"
-            placeholderTextColor={c.textMuted}
-            style={s.input}
-            autoCorrect={false}
-            autoCapitalize="none"
-            returnKeyType="search"
-            onSubmitEditing={onSearch}
-            accessibilityLabel="ללא המילים"
-            testID="adv-exclude"
-          />
-        </Field>
+        {helpOpen ? (
+          <Pressable onPress={() => setHelpOpen(false)} style={s.helpBox} accessibilityRole="button" accessibilityLabel="סגור את ההסבר" testID="adv-help-box">
+            {OPERATORS.map((o) => (
+              <View key={o.op} style={s.opRow}>
+                <Text style={s.opCode}>{`\u2066${o.op}\u2069`}</Text>
+                <Text style={s.opText}>{o.text}</Text>
+              </View>
+            ))}
+          </Pressable>
+        ) : null}
       </View>
 
       <Text style={s.section}>אפשרויות לשוניות</Text>
@@ -304,14 +307,14 @@ export default function AdvancedSearchScreen() {
 
   return (
     <View style={s.screen} testID="advanced-search">
-      <Stack.Screen options={{ title: 'חיפוש מתקדם' }} />
-      <View style={s.topBar}>
-        <Text style={s.heading} numberOfLines={1}>
-          לא מקוון
-        </Text>
-        <Pressable onPress={back} style={({ pressed }) => [s.backBtn, pressed && s.pressed]} accessibilityRole="button" testID="adv-back">
-          <Text style={s.backText}>חזרה לחיפוש רגיל</Text>
+      <Stack.Screen options={{ headerShown: false }} />
+      <View style={[s.topBar, { paddingTop: insets.top + spacing.sm }]}>
+        <Pressable onPress={back} hitSlop={10} style={({ pressed }) => [s.backBtn, pressed && s.pressed]} accessibilityRole="button" accessibilityLabel="חזרה" testID="adv-back">
+          <Text style={s.backText}>←</Text>
         </Pressable>
+        <Text style={s.heading} numberOfLines={1} accessibilityRole="header" testID="adv-title">
+          חיפוש מתקדם
+        </Text>
       </View>
 
       {formOpen || !submitted ? (
@@ -376,17 +379,6 @@ export default function AdvancedSearchScreen() {
   );
 }
 
-function Field({ label, hint, style, children }: { label: string; hint?: string; style?: object; children: React.ReactNode }) {
-  const s = useThemedStyles(createStyles);
-  return (
-    <View style={[s.field, style]}>
-      <Text style={s.label}>{label}</Text>
-      {children}
-      {hint ? <Text style={s.hint}>{hint}</Text> : null}
-    </View>
-  );
-}
-
 function Toggle({ label, hint, value, onPress, testID, last }: { label: string; hint: string; value: boolean; onPress: () => void; testID: string; last?: boolean }) {
   const s = useThemedStyles(createStyles);
   return (
@@ -423,9 +415,16 @@ const createStyles = (c: Palette) =>
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: c.border,
     },
-    heading: { flex: 1, fontSize: 13, color: c.textMuted, ...alignRight },
-    backBtn: { paddingHorizontal: spacing.md, paddingVertical: 7, borderRadius: 999, borderWidth: 1, borderColor: c.accent },
-    backText: { fontSize: 13, fontWeight: '700', color: c.accent, ...alignRight },
+    heading: { flex: 1, fontSize: 18, fontWeight: '800', color: c.text, ...alignRight },
+    backBtn: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', borderRadius: 18 },
+    backText: { fontSize: 24, fontWeight: '700', color: c.accent },
+    labelRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+    helpBtn: { width: 22, height: 22, borderRadius: 11, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
+    helpText: { fontSize: 12, fontWeight: '700', color: c.textMuted },
+    helpBox: { gap: 6, padding: spacing.md, borderRadius: radius.md, backgroundColor: c.accentSoft, borderWidth: 1, borderColor: c.border },
+    opRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+    opCode: { minWidth: 96, fontSize: 15, fontWeight: '700', color: c.accent, textAlign: 'center' },
+    opText: { flex: 1, fontSize: 14, color: c.text, ...alignRight },
     formScroll: { paddingBottom: spacing.xl },
     form: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.sm },
     field: { gap: 4 },
@@ -444,7 +443,6 @@ const createStyles = (c: Palette) =>
       ...inputAlignRight,
     },
     mainInput: { fontSize: 18, borderWidth: 1.5, borderColor: c.accent, minHeight: 50 },
-    pair: { flexDirection: 'row', gap: spacing.sm },
     section: { fontSize: 15, fontWeight: '800', color: c.accent, marginTop: spacing.md, ...alignRight },
     card: { backgroundColor: c.surface, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: 'hidden' },
     toggleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, minHeight: 52 },

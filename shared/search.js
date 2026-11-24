@@ -529,7 +529,6 @@ function planLike(plan, params) {
     return parts.length === 1 ? parts[0] : '(' + parts.join(' OR ') + ')';
   };
   const parts = lg.must.map(orLike);
-  if (lg.any) parts.push(orLike(lg.any));
   return parts.join(' AND ');
 }
 
@@ -746,7 +745,7 @@ function makeTermMatcher(terms) {
   const prefixes = [];
   const patterns = [];
   const phrases = [];
-  // "~x" (inflected), "^x" / "%x" (prefixed) come from shared/hebrewSearch.js (Advanced Search).
+  // "~x" (inflected), "^x" (prefixed) come from shared/hebrewSearch.js (Advanced Search).
   const parse = (w) => (/^[~^%]/.test(w) ? { fn: hs.compilePattern(w), text: w.slice(1) } : w.endsWith('*') ? { text: w.slice(0, -1), prefix: true } : { text: w, prefix: false });
   for (const t of terms || []) {
     const words = String(t || '').split(' ').filter(Boolean);

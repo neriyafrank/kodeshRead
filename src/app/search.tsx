@@ -2,7 +2,7 @@
  * Simple Search ("חיפוש רגיל"): one search bar, results, and the "חיפוש מתקדם" button.
  *
  *  - literal FTS5 matching (shared/hebrewSearch.js SIMPLE_DEFAULTS): every word is matched as
- *    typed — no prefixes / suffixes, no plene / defective spelling, no acronyms, no Aramaic;
+ *    typed — no prefixes / suffixes, no plene / defective spelling, no acronyms;
  *    words are AND-ed and "quoted text" is an exact phrase. Punctuation never breaks a query;
  *  - scope: Entire Library / folder / book (ScopeSheet), or a preset base-book corpus strip (הכל, תנ"ך, משנה,
  *    בבלי, ... with the matched book count; shared/corpora.js, the same presets as Advanced Search);
@@ -176,7 +176,7 @@ export default function SearchScreen() {
           <Text style={s.helpText}>• כמה מילים — יימצאו פסקאות שמכילות את כולן, בדיוק כפי שהוקלדו.</Text>
           <Text style={s.helpText}>• ביטוי במירכאות — התאמה מדויקת: &quot;שני כחות&quot;</Text>
           <Text style={s.helpText}>• ניקוד, טעמים, אותיות סופיות וגרשיים אינם משנים את החיפוש.</Text>
-          <Text style={s.helpText}>• תחיליות וסופיות, כתיב מלא/חסר, ראשי תיבות, ארמית, קרבת מילים וסינון לפי מדור — בחיפוש המתקדם.</Text>
+          <Text style={s.helpText}>• תחיליות וסופיות, כתיב מלא/חסר, ראשי תיבות, קרבת מילים וסינון לפי מדור — בחיפוש המתקדם.</Text>
           {recent.length ? (
             <>
               <View style={s.recentHeader}>

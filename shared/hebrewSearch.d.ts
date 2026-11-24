@@ -9,8 +9,6 @@ export interface SearchOptions {
   pleneDefective: boolean;
   /** ראשי תיבות */
   acronyms: boolean;
-  /** עברית <-> ארמית */
-  aramaicEquiv: boolean;
   /** Inline operators a|b, -word, word*, "exact" (Advanced only). */
   operators: boolean;
   proximity: { mode: ProximityMode; distance: number; ordered: boolean };
@@ -32,7 +30,6 @@ export interface PlanGroup {
 export interface SearchPlan {
   kind: 'hebrewSearch';
   must: PlanGroup[];
-  any: PlanGroup[];
   not: PlanGroup[];
   options: SearchOptions;
   proximity: SearchOptions['proximity'];
@@ -51,7 +48,6 @@ export interface SearchPlan {
 }
 
 export const PREFIXES: string[];
-export const ARAMAIC_PREFIXES: string[];
 export const SUFFIXES: string[];
 export const SIMPLE_DEFAULTS: Readonly<SearchOptions>;
 export const ADVANCED_DEFAULTS: Readonly<SearchOptions>;
@@ -64,18 +60,17 @@ export function isValidPrefix(p: string): boolean;
 export function inflections(word: string): Set<string>;
 export function morphRoots(word: string): { text: string; star: boolean }[];
 export function matchesMorph(token: string, lemma: string): boolean;
-export function matchesPrefixed(token: string, word: string, aramaic?: boolean): boolean;
+export function matchesPrefixed(token: string, word: string): boolean;
 export function pleneVariants(word: string, max?: number): string[];
-export function aramaicEquivalents(word: string): string[];
 export function acronymExpansions(raw: string): string[];
 export function acronymsFor(phrase: string): string[];
 export function parseAtoms(input: string, withOperators: boolean): { tokens: string[]; raw: string; phrase: boolean; wildcard: boolean; neg: boolean; orNext?: boolean }[];
-/** Simple Search: buildQuery(text). Advanced: buildQuery({ query, anyOf, exclude }, { ...ADVANCED_DEFAULTS, ... }). */
-export function buildQuery(fields: string | { query?: string; anyOf?: string; exclude?: string }, options?: SearchOptionsInput): SearchPlan;
+/** Simple Search: buildQuery(text). Advanced: buildQuery({ query }, { ...ADVANCED_DEFAULTS, ... }). */
+export function buildQuery(fields: string | { query?: string }, options?: SearchOptionsInput): SearchPlan;
 export function compilePattern(pattern: string): (token: string) => boolean;
 export function patternFts(pattern: string): { terms: string[]; superset: boolean };
 export function evaluate(plan: SearchPlan, tokens: string[]): boolean;
 export function matchesText(plan: SearchPlan, cleanText: string): boolean;
-export function likeGroups(plan: SearchPlan): { must: string[][]; any: string[] | null };
+export function likeGroups(plan: SearchPlan): { must: string[][] };
 export function resolveOptions(opts: SearchOptionsInput | null | undefined, base?: SearchOptions): SearchOptions;
 export function optionsEqual(a: SearchOptionsInput, b: SearchOptionsInput): boolean;

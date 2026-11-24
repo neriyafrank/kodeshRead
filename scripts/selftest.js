@@ -31,7 +31,7 @@
  *    variants) over a full five-book Chumash fixture, without changing book lookups.
  * 10. Simple vs Advanced Search (shared/hebrewSearch.js): literal Simple Search, Advanced defaults,
  *    prefixes / suffixes, smart plene / defective (with strict negatives), acronyms, Hebrew <->
- *    Aramaic, structured fields + inline operators, ordered / unordered proximity, exact-first
+ *    inline operators (one query field), ordered / unordered proximity, exact-first
  *    ranking + cursor paging, corpus chips, FTS5 == web fallback, fuzzing and latency.
  * 11. Canonical library catalog (shared/libraryCatalog.js): Rashi on every real Bavli tractate is a
  *    commentary linked to its daf / amud and ranked #1; traditional Jewish ordering (Tanach, Mishna
@@ -1500,7 +1500,7 @@ async function searchProgressTests() {
     const db = openDb(dbFile);
     try {
       await check('searchPlan / countPlan: abort stops the run; verification reports real progress', async () => {
-        const plan = hs.buildQuery({ query: 'שבת', anyOf: '', exclude: '' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'phrase', distance: 3, ordered: true } });
+        const plan = hs.buildQuery({ query: 'שבת' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'phrase', distance: 3, ordered: true } });
         const base = await search.searchPlan(db, plan, { fts: true, limit: 5 });
         assert.ok(base.rows.length > 0);
         const ctl = new AbortController();
@@ -1508,7 +1508,7 @@ async function searchProgressTests() {
         await assert.rejects(search.searchPlan(db, plan, { fts: true, signal: ctl.signal }), { name: 'AbortError' });
         await assert.rejects(search.countPlan(db, plan, { fts: true, signal: ctl.signal }), { name: 'AbortError' });
         // Aborting from a progress callback (a user pressing ביטול mid-run) stops the loop.
-        const verifying = hs.buildQuery({ query: 'אמר בשבת', anyOf: '', exclude: '' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'near', distance: 3, ordered: false } });
+        const verifying = hs.buildQuery({ query: 'אמר בשבת' }, { ...hs.ADVANCED_DEFAULTS, proximity: { mode: 'near', distance: 3, ordered: false } });
         const events = [];
         const ctl2 = new AbortController();
         const r = search.countPlan(db, verifying, { fts: true, signal: ctl2.signal, onProgress: (p) => (events.push(p), ctl2.abort()) });
@@ -2092,12 +2092,13 @@ async function advancedSearchTests() {
   const toks = (s) => hs.toTokens(s);
 
   await check('search modes: Simple Search is literal, Advanced Search has the exact defaults', () => {
-    for (const k of ['prefixesAndSuffixes', 'pleneDefective', 'acronyms', 'aramaicEquiv', 'operators']) assert.strictEqual(hs.SIMPLE_DEFAULTS[k], false, `simple ${k}`);
+    for (const k of ['prefixesAndSuffixes', 'pleneDefective', 'acronyms', 'operators']) assert.strictEqual(hs.SIMPLE_DEFAULTS[k], false, `simple ${k}`);
     assert.strictEqual(hs.SIMPLE_DEFAULTS.proximity.mode, 'paragraph');
     assert.deepStrictEqual(
-      { p: A.prefixesAndSuffixes, k: A.pleneDefective, r: A.acronyms, a: A.aramaicEquiv, prox: A.proximity.mode },
-      { p: true, k: false, r: false, a: false, prox: 'paragraph' },
+      { p: A.prefixesAndSuffixes, k: A.pleneDefective, r: A.acronyms, prox: A.proximity.mode },
+      { p: true, k: false, r: false, prox: 'paragraph' },
     );
+    assert.ok(!('aramaicEquiv' in A) && !('aramaicEquiv' in hs.SIMPLE_DEFAULTS), 'no Hebrew <-> Aramaic option');
     // Simple: every word as typed, no expansion, no operators (punctuation is sanitized away).
     const s = hs.buildQuery('שבת');
     assert.strictEqual(s.match, '"שבת"');
@@ -2115,8 +2116,11 @@ async function advancedSearchTests() {
     const simple = fs.readFileSync(path.join(ROOT, 'src/app/search.tsx'), 'utf8');
     assert.ok(simple.includes('buildQuery(query)') && simple.includes('testID="open-advanced-search"') && !simple.includes('search-mode-smart'));
     const advSrc = fs.readFileSync(path.join(ROOT, 'src/app/advanced-search.tsx'), 'utf8');
-    for (const id of ['adv-query', 'adv-any', 'adv-exclude', 'adv-submit', 'adv-reset', 'adv-back', 'adv-ordered']) assert.ok(advSrc.includes(id), id);
-    for (const label of ['חיפוש מתקדם', 'חזרה לחיפוש רגיל', 'מילות החיפוש / ביטוי', 'אחת מהמילים · או', 'ללא המילים · שלילה', 'תחיליות וסופיות', 'כתיב מלא/חסר', 'ראשי תיבות', 'עברית ↔ ארמית', 'קרבת מילים', 'שמור על סדר המילים', 'סינון לפי מדור', 'נקה הכל', 'הספר הנוכחי']) assert.ok(advSrc.includes(label), label);
+    for (const id of ['adv-query', 'adv-help', 'adv-help-box', 'adv-submit', 'adv-reset', 'adv-back', 'adv-title', 'adv-ordered']) assert.ok(advSrc.includes(id), id);
+    for (const gone of ['adv-any', 'adv-exclude', 'חזרה לחיפוש רגיל', 'לא מקוון', 'אחת מהמילים · או', 'ללא המילים · שלילה', 'עברית ↔ ארמית', 'aramaicEquiv', 'anyOf', 'האופרטורים:', 'אופרטורים: א|ב']) assert.ok(!advSrc.includes(gone), `removed: ${gone}`);
+    for (const op of ["op: 'א|ב'", "op: '-מילה'", "op: 'מיל*'", `op: '"ביטוי מדויק"'`, 'אחת מהמילים (או)', 'ללא המילה (שלילה)', 'תחילת מילה', 'חיפוש ביטוי רצוף']) assert.ok(advSrc.includes(op), op);
+    assert.ok(advSrc.includes('לדוגמה: שבת | יום טוב -מוקצה'), 'short placeholder');
+    for (const label of ['חיפוש מתקדם', 'מילות החיפוש / ביטוי', 'תחיליות וסופיות', 'כתיב מלא/חסר', 'ראשי תיבות', 'קרבת מילים', 'שמור על סדר המילים', 'סינון לפי מדור', 'נקה הכל', 'הספר הנוכחי']) assert.ok(advSrc.includes(label), label);
     assert.ok(/input: \{[^}]*\.\.\.inputAlignRight/.test(advSrc) && /label: \{[^}]*\.\.\.alignRight/.test(advSrc), 'RTL alignment helpers');
     assert.deepStrictEqual(require('../shared/corpora').CORPORA.map((c) => c.label), ['תנ"ך', 'משנה', 'בבלי', 'ירושלמי', 'משנה תורה', 'שולחן ערוך', 'מפרשים']);
   });
@@ -2197,28 +2201,29 @@ async function advancedSearchTests() {
     assert.ok(search.markTerms('ואמרו קל וחומר', adv('ק"ו', R).terms).includes('<mark>קל</mark> <mark>וחומר</mark>'));
   });
 
-  await check('hebrewSearch: Hebrew <-> Aramaic pairs', () => {
-    const pairs = [['מותר', 'שרי'], ['אסור', 'אסיר'], ['קושיה', 'קשיא'], ['תירוץ', 'תרוצא'], ['ספק', 'ספיקא'], ['הלכה', 'הלכתא'], ['טעם', 'טעמא'], ['ראיה', 'ראייתא'], ['מים', 'מיא'], ['שבת', 'שבתא'], ['דין', 'דינא'], ['כסף', 'ממונא'], ['כסף', 'כספא'], ['עדים', 'סהדי'], ['אדם', 'איניש'], ['אדם', 'גברא'], ['אשה', 'אתתא'], ['בית', 'ביתא'], ['שנה', 'שתא'], ['יום', 'יומא']];
-    for (const [he, ar] of pairs) {
-      assert.ok(hs.aramaicEquivalents(n(he)).includes(n(ar)), `${he} -> ${ar}`);
-      assert.ok(hs.aramaicEquivalents(n(ar)).includes(n(he)), `${ar} -> ${he}`);
-    }
-    const m = adv('מותר', { aramaicEquiv: true });
-    assert.ok(hs.evaluate(m, toks('הכא שרי')) && hs.evaluate(m, toks('ודשרי')), 'Aramaic ד-prefix on the equivalent');
-    assert.ok(!hs.evaluate(adv('מותר'), toks('שרי')), 'Aramaic is off by default');
-    assert.ok(hs.evaluate(adv('ספיקא', { aramaicEquiv: true }), toks('מספק')));
+  await check('hebrewSearch: the Hebrew <-> Aramaic expansion is gone (no option, no pairs, no ד-prefix patterns)', () => {
+    assert.strictEqual(hs.aramaicEquivalents, undefined);
+    assert.strictEqual(hs.ARAMAIC_PREFIXES, undefined);
+    // Even a stray option does nothing: מותר never matches שרי.
+    assert.ok(!hs.evaluate(adv('מותר', { aramaicEquiv: true }), toks('הכא שרי')));
+    assert.ok(!adv('מותר').hasExpansions || !adv('מותר').terms.some((t) => /שרי/.test(t)));
+    assert.ok(hs.evaluate(adv('מותר'), toks('ומותר')), 'prefix handling is unchanged');
+    assert.ok(!hs.evaluate(adv('שרי'), toks('ודשרי')), 'no Aramaic ד-prefix');
   });
 
-  await check('hebrewSearch: structured fields (main + any of + exclude) and inline operators', () => {
-    const f = adv({ query: 'שבת', anyOf: 'רבא, אביי', exclude: 'מוקצה' }, { prefixesAndSuffixes: false });
+  await check('hebrewSearch: one query field with inline operators (a|b, -word, word*, "exact"); no secondary fields', () => {
+    const f = adv('שבת רבא|אביי -מוקצה', { prefixesAndSuffixes: false });
     assert.strictEqual(f.match, '("שבת" AND ("רבא" OR "אביי")) NOT "מוקצה"');
     assert.ok(hs.evaluate(f, toks('אמר רבא שבת')) && hs.evaluate(f, toks('אביי שבת')));
-    assert.ok(!hs.evaluate(f, toks('אמר שבת')), 'needs one of the "any" words');
+    assert.ok(!hs.evaluate(f, toks('אמר שבת')), 'needs one of the OR words');
     assert.ok(!hs.evaluate(f, toks('רבא שבת מוקצה')), 'excluded word');
-    assert.ok(!hs.buildQuery({ exclude: 'מוקצה' }, A).match, 'exclusions alone are no query');
-    assert.ok(hs.buildQuery({ anyOf: 'רבא אביי' }, A).match.includes(' OR '));
+    assert.ok(!hs.buildQuery('-מוקצה', A).match, 'exclusions alone are no query');
+    // The removed "אחת מהמילים" / "ללא המילים" fields are not read any more.
+    const old = adv({ query: 'שבת', anyOf: 'רבא אביי', exclude: 'מוקצה' }, { prefixesAndSuffixes: false });
+    assert.strictEqual(old.match, '"שבת"');
+    assert.ok(!('any' in old), 'no "any" group in a plan');
     // Exclusions take the same morphology: -מוקצה also excludes והמוקצה.
-    assert.ok(!hs.evaluate(adv({ query: 'שבת', exclude: 'מוקצה' }), toks('שבת והמוקצה')));
+    assert.ok(!hs.evaluate(adv('שבת -מוקצה'), toks('שבת והמוקצה')));
     // Inline: | (OR), -word (NOT), word* (prefix), "exact" (literal token / phrase).
     const P = { prefixesAndSuffixes: false };
     assert.strictEqual(adv('שבת | חג', P).match, '("שבת" OR "חג")');
@@ -2260,12 +2265,12 @@ async function advancedSearchTests() {
   });
 
   await check('hebrewSearch: query budgets stay bounded', () => {
-    const big = adv('שולחן ערוך קידושין תפילה ציצית דיבור כותל אלוקים מצוות שבתות ובשבת הלכות ברכות תורה משנה גמרא נוסף', { pleneDefective: true, acronyms: true, aramaicEquiv: true });
+    const big = adv('שולחן ערוך קידושין תפילה ציצית דיבור כותל אלוקים מצוות שבתות ובשבת הלכות ברכות תורה משנה גמרא נוסף', { pleneDefective: true, acronyms: true });
     assert.ok(big.variantCount <= hs.MAX_QUERY_TERMS, `terms ${big.variantCount}`);
     assert.ok(big.must.length <= 16);
     const outside = big.match.replace(/"[^"]*"/g, '');
     assert.ok(/^[\s()*ANDORNT]*$/.test(outside), `only operators outside quotes: ${outside}`);
-    for (const w of ['שבת', 'תפילה', 'מצווה', 'שו"ע']) assert.ok(adv(w, { pleneDefective: true, acronyms: true, aramaicEquiv: true }).variantCount <= 220, w);
+    for (const w of ['שבת', 'תפילה', 'מצווה', 'שו"ע']) assert.ok(adv(w, { pleneDefective: true, acronyms: true }).variantCount <= 220, w);
   });
 
   const dbFile = path.join(ROOT, 'assets/db/library.db');
@@ -2296,7 +2301,7 @@ async function advancedSearchTests() {
     });
 
     await check('sample: exact matches are ranked ahead of expanded variants; paging covers every hit once', async () => {
-      for (const [q, o] of [['שבת', {}], ['תפילה', {}], ['שולחן', { pleneDefective: true }], ['ב"ד', { acronyms: true }], ['מותר', { aramaicEquiv: true }], ['רב אמר', { proximity: { mode: 'near', distance: 3, ordered: true } }]]) {
+      for (const [q, o] of [['שבת', {}], ['תפילה', {}], ['שולחן', { pleneDefective: true }], ['ב"ד', { acronyms: true }], ['רב אמר', { proximity: { mode: 'near', distance: 3, ordered: true } }]]) {
         const plan = adv(q, o);
         const rows = await all(plan);
         const count = await search.countPlan(db, plan, { cap: 100000 });
@@ -2323,14 +2328,13 @@ async function advancedSearchTests() {
         hs.buildQuery('"שני כחות" באדם'),
         adv('שבת'),
         adv('תפילה'),
-        adv({ query: 'שבת', anyOf: 'רבא אביי', exclude: 'יהודה' }),
+        adv('שבת רבא|אביי -יהודה'),
         adv('אמר רב|רבא -חסדא'),
         adv('ויאמר אלהים', { proximity: { mode: 'phrase' } }),
         adv('רב אמר', { proximity: { mode: 'near', distance: 3, ordered: false } }),
         adv('רב אמר', { proximity: { mode: 'near', distance: 5, ordered: true } }),
         adv('ב"ד', { acronyms: true }),
         adv('שולחן', { pleneDefective: true }),
-        adv('מותר', { aramaicEquiv: true }),
         adv('ספר*'),
       ];
       for (const plan of cases) {
@@ -2375,14 +2379,14 @@ async function advancedSearchTests() {
           for (let j = rnd(8) + 1; j > 0; j--) s += junk[rnd(junk.length)] + (rnd(2) ? ' ' : '');
           return s;
         };
-        const plan = hs.buildQuery({ query: q(), anyOf: rnd(3) ? '' : q(), exclude: rnd(3) ? '' : q() }, { ...A, pleneDefective: !!rnd(2), acronyms: !!rnd(2), aramaicEquiv: !!rnd(2), proximity: { mode: modes[rnd(3)], distance: [3, 5, 10][rnd(3)], ordered: !!rnd(2) } });
+        const plan = hs.buildQuery({ query: q() + (rnd(3) ? '' : ' ' + q().split(' ').join('|')) + (rnd(3) ? '' : ' -' + q().trim()) }, { ...A, pleneDefective: !!rnd(2), acronyms: !!rnd(2), proximity: { mode: modes[rnd(3)], distance: [3, 5, 10][rnd(3)], ordered: !!rnd(2) } });
         await search.searchPlan(db, plan, { limit: 5 });
         await search.countPlan(db, plan, { cap: 10, fts: false });
       }
     });
 
     await check('sample: advanced search latency', async () => {
-      const plans = [adv('שבת'), adv('ויאמר אלהים'), adv('אמר רב', { proximity: { mode: 'near', distance: 5, ordered: true } }), adv('שו"ע', { acronyms: true, pleneDefective: true }), adv({ query: 'אמר', anyOf: 'רבא אביי', exclude: 'חסדא' })];
+      const plans = [adv('שבת'), adv('ויאמר אלהים'), adv('אמר רב', { proximity: { mode: 'near', distance: 5, ordered: true } }), adv('שו"ע', { acronyms: true, pleneDefective: true }), adv('אמר רבא|אביי -חסדא')];
       const t = process.hrtime.bigint();
       for (let i = 0; i < 10; i++) for (const p of plans) await search.searchPlan(db, p, { limit: 40 });
       const ms = Number(process.hrtime.bigint() - t) / 1e6 / (10 * plans.length);

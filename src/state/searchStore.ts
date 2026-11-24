@@ -1,7 +1,7 @@
 /**
  * Full-text search sessions (persisted so each screen reopens where the user left it):
  *  - Simple Search ("חיפוש רגיל"): one query + scope, literal matching only;
- *  - Advanced Search ("חיפוש מתקדם"): structured fields, linguistic toggles, proximity and
+ *  - Advanced Search ("חיפוש מתקדם"): one query field (inline operators), linguistic toggles, proximity and
  *    corpus chips (defaults: shared/hebrewSearch.js ADVANCED_DEFAULTS);
  * plus a short recent-queries list shared by both.
  */
@@ -17,17 +17,12 @@ const MAX_RECENT = 8;
 export interface AdvancedFields {
   /** מילות החיפוש / ביטוי (inline operators: a|b, -word, word*, "exact"). */
   query: string;
-  /** אחת מהמילים · או */
-  anyOf: string;
-  /** ללא המילים · שלילה */
-  exclude: string;
 }
 
 export interface LinguisticOptions {
   prefixesAndSuffixes: boolean;
   pleneDefective: boolean;
   acronyms: boolean;
-  aramaicEquiv: boolean;
 }
 
 export interface ProximityOptions {
@@ -46,7 +41,7 @@ export interface AdvancedState {
   corpora: CorpusSelection;
 }
 
-export const EMPTY_FIELDS: AdvancedFields = { query: '', anyOf: '', exclude: '' };
+export const EMPTY_FIELDS: AdvancedFields = { query: '' };
 
 export function advancedDefaults(): AdvancedState {
   return {
@@ -55,7 +50,6 @@ export function advancedDefaults(): AdvancedState {
       prefixesAndSuffixes: ADVANCED_DEFAULTS.prefixesAndSuffixes,
       pleneDefective: ADVANCED_DEFAULTS.pleneDefective,
       acronyms: ADVANCED_DEFAULTS.acronyms,
-      aramaicEquiv: ADVANCED_DEFAULTS.aramaicEquiv,
     },
     proximity: { ...ADVANCED_DEFAULTS.proximity },
     corpora: ['all'],
@@ -111,7 +105,7 @@ export const useSearch = create<SearchState>()(
           ...current,
           ...p,
           advanced: a
-            ? { fields: { ...d.fields, ...a.fields }, options: { ...d.options, ...a.options }, proximity: { ...d.proximity, ...a.proximity }, corpora: Array.isArray(a.corpora) && a.corpora.length ? a.corpora : d.corpora }
+            ? { fields: { query: legacyQuery(a.fields as unknown as Record<string, string> | undefined) }, options: { prefixesAndSuffixes: a.options?.prefixesAndSuffixes ?? d.options.prefixesAndSuffixes, pleneDefective: a.options?.pleneDefective ?? d.options.pleneDefective, acronyms: a.options?.acronyms ?? d.options.acronyms }, proximity: { ...d.proximity, ...a.proximity }, corpora: Array.isArray(a.corpora) && a.corpora.length ? a.corpora : d.corpora }
             : d,
         };
       },
@@ -119,6 +113,18 @@ export const useSearch = create<SearchState>()(
     },
   ),
 );
+
+/**
+ * The single query of a persisted form. Older versions had two more fields: "אחת מהמילים" (-> `a|b`) and
+ * "ללא המילים" (-> `-word`); they are folded into the main query so a saved search keeps its meaning.
+ */
+function legacyQuery(f: Record<string, string> | undefined): string {
+  if (!f) return '';
+  const words = (t: string | undefined) => String(t ?? '').split(/[\s,|]+/).filter(Boolean);
+  const any = words(f.anyOf);
+  const not = words(f.exclude).map((w) => (w.startsWith('-') ? w : '-' + w));
+  return [String(f.query ?? '').trim(), any.length ? any.join('|') : '', ...not].filter(Boolean).join(' ');
+}
 
 export function scopeLabel(scope: SearchScope): string {
   if (scope.kind === 'category' || scope.kind === 'books') return scope.name;

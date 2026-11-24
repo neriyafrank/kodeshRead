@@ -4,9 +4,8 @@
  * One builder serves both search experiences:
  *   - Simple Search ("חיפוש רגיל", SIMPLE_DEFAULTS): literal FTS5 — every word is matched as
  *     typed (whole token), quoted text is an exact phrase, no operators, no expansion.
- *   - Advanced Search ("חיפוש מתקדם", ADVANCED_DEFAULTS): structured fields (main query + "any of"
- *     + "exclude"), inline operators (a|b, -word, word*, "exact"), linguistic toggles and word
- *     proximity / order.
+ *   - Advanced Search ("חיפוש מתקדם", ADVANCED_DEFAULTS): one query with inline operators
+ *     (a|b, -word, word*, "exact"), linguistic toggles and word proximity / order.
  *
  * Linguistic toggles (all work at query time on the normalized index form: no niqqud, no
  * gershayim / geresh, final letters folded — "שלום" is the token "שלומ"):
@@ -18,7 +17,6 @@
  *     medial mater (ו / י) that never drop an initial ו / י or a final letter, never touch the
  *     final syllable (שלום != שלם) and never touch words of 3 letters (שיר != שר / שור).
  *   - acronyms (ראשי תיבות): bidirectional via shared/hebrewTorahDict.js (שו"ע <-> שולחן ערוך).
- *   - aramaicEquiv (עברית <-> ארמית): curated Talmudic pairs (מותר <-> שרי, הלכה <-> הלכתא ...).
  *
  * buildQuery() returns a plan: FTS5 MATCH expressions (a candidate superset when needed), the
  * exact-only sub-plan (exact matches are ranked first), highlight patterns, and evaluate()
@@ -27,7 +25,7 @@
  *
  * Highlight / word patterns (strings, so they can travel to the reader with the tab):
  *   "x"   the token x          "x*"  any token starting with x (FTS5 prefix query)
- *   "^x"  prefix? + x          "%x"  (prefix | Aramaic ד-prefix)? + x
+ *   "^x"  prefix? + x
  *   "~x"  prefix? + inflections(x) (morphological)
  *   "a b" consecutive words, each one of the above.
  */
@@ -95,10 +93,7 @@ const uniq = (list) => [...new Set(list.filter(Boolean))];
 
 /** Proclitics מש"ה וכל"ב and their legal compounds (never "הב", "בה", "לב" ...). */
 const PREFIXES = ['ו', 'ש', 'ה', 'ב', 'כ', 'ל', 'מ', 'וב', 'וכ', 'ול', 'ומ', 'וה', 'וש', 'שב', 'שכ', 'של', 'שמ', 'שה', 'כש', 'לכ', 'מב', 'מה', 'ושב', 'ושל', 'וכש'];
-/** Aramaic genitive ד and its compounds (for Aramaic equivalents only). */
-const ARAMAIC_PREFIXES = ['ד', 'וד', 'בד', 'דב', 'דל', 'דמ'];
 const PREFIX_SET = new Set(PREFIXES);
-const ARAMAIC_PREFIX_SET = new Set([...PREFIXES, ...ARAMAIC_PREFIXES]);
 
 /** Hebrew & Rabbinic noun suffixes (index form: ים -> ימ, ך -> כ, ...). */
 const SUFFIXES = ['ימ', 'ינ', 'ות', 'י', 'ו', 'ה', 'כ', 'נו', 'כמ', 'המ', 'הנ', 'יו', 'יה', 'יהמ'];
@@ -183,18 +178,17 @@ function matchesMorph(token, lemma) {
   return false;
 }
 
-/** True when `token` = legal prefix? + `word` (Aramaic ד-prefixes too when `aramaic`). */
-function matchesPrefixed(token, word, aramaic) {
+/** True when `token` = legal prefix? + `word`. */
+function matchesPrefixed(token, word) {
   if (token === word) return true;
-  const set = aramaic ? ARAMAIC_PREFIX_SET : PREFIX_SET;
-  for (let n = 1; n <= 3 && n < token.length; n++) if (token.slice(n) === word && set.has(token.slice(0, n))) return true;
+  for (let n = 1; n <= 3 && n < token.length; n++) if (token.slice(n) === word && PREFIX_SET.has(token.slice(0, n))) return true;
   return false;
 }
 
 /** Prefixed spellings of a word ("שבת" -> ["שבת", "ושבת", "בשבת", ...]); none for short words. */
-function prefixedForms(word, aramaic) {
+function prefixedForms(word) {
   if (word.length <= SHORT_WORD) return [word];
-  return [word, ...(aramaic ? [...PREFIXES, ...ARAMAIC_PREFIXES] : PREFIXES).map((p) => p + word)];
+  return [word, ...PREFIXES.map((p) => p + word)];
 }
 
 // ---------------------------------------------------------------------------
@@ -266,25 +260,6 @@ function pleneVariants(word, max) {
 }
 
 // ---------------------------------------------------------------------------
-// Hebrew <-> Aramaic (עברית <-> ארמית)
-// ---------------------------------------------------------------------------
-
-const ARAMAIC_GROUPS = [
-  ['מותר', 'שרי'], ['אסור', 'אסיר'], ['קושיה', 'קשיא', 'קושיא'], ['תירוץ', 'תרוצא', 'תירוצא'], ['ספק', 'ספיקא', 'ספקא'],
-  ['הלכה', 'הלכתא'], ['טעם', 'טעמא'], ['ראיה', 'ראייתא', 'ראיתא'], ['מים', 'מיא'], ['שבת', 'שבתא'], ['דין', 'דינא'],
-  ['כסף', 'כספא', 'ממונא'], ['ממון', 'ממונא'], ['עדים', 'סהדי'], ['עד', 'סהדא'], ['אדם', 'איניש', 'גברא'], ['אשה', 'אתתא'],
-  ['בית', 'ביתא'], ['שנה', 'שתא'], ['יום', 'יומא'], ['דבר', 'מילתא', 'מלתא'], ['למה', 'אמאי'], ['כאן', 'הכא'], ['שם', 'התם'],
-  ['יש', 'איכא'], ['אין', 'ליכא'], ['גדול', 'רבה'], ['קטן', 'זוטא'], ['לילה', 'ליליא'], ['אמת', 'קושטא'],
-].map((g) => g.map(norm));
-const ARAMAIC_MAP = new Map();
-for (const g of ARAMAIC_GROUPS) for (const w of g) ARAMAIC_MAP.set(w, uniq([...(ARAMAIC_MAP.get(w) || []), ...g.filter((x) => x !== w)]));
-
-/** Hebrew <-> Aramaic equivalents of a normalized word: aramaicEquivalents('מותר') -> ['שרי']. */
-function aramaicEquivalents(word) {
-  return (ARAMAIC_MAP.get(String(word || '')) || []).slice();
-}
-
-// ---------------------------------------------------------------------------
 // Torah acronyms (ראשי תיבות)
 // ---------------------------------------------------------------------------
 
@@ -307,7 +282,6 @@ const SIMPLE_DEFAULTS = Object.freeze({
   prefixesAndSuffixes: false,
   pleneDefective: false,
   acronyms: false,
-  aramaicEquiv: false,
   operators: false,
   proximity: Object.freeze({ mode: 'paragraph', distance: 5, ordered: false }),
 });
@@ -317,7 +291,6 @@ const ADVANCED_DEFAULTS = Object.freeze({
   prefixesAndSuffixes: true,
   pleneDefective: false,
   acronyms: false,
-  aramaicEquiv: false,
   operators: true,
   proximity: Object.freeze({ mode: 'paragraph', distance: 5, ordered: false }),
 });
@@ -463,12 +436,6 @@ function expandAtom(atom, o, budget) {
       if (!(ps && add(wordAlt('~' + v)))) add(wordAlt(v));
     }
   }
-  // 4. Hebrew <-> Aramaic.
-  if (o.aramaicEquiv) {
-    for (const e of aramaicEquivalents(tok)) {
-      if (!(ps && e.length > SHORT_WORD && add(wordAlt('%' + e)))) add(wordAlt(e));
-    }
-  }
   return alts;
 }
 
@@ -489,7 +456,6 @@ function parsePattern(p) {
   const c = p[0];
   if (c === '~') return { type: 'morph', text: p.slice(1) };
   if (c === '^') return { type: 'pre', text: p.slice(1) };
-  if (c === '%') return { type: 'aram', text: p.slice(1) };
   if (p.endsWith('*')) return { type: 'star', text: p.slice(0, -1) };
   return { type: 'exact', text: p };
 }
@@ -502,8 +468,7 @@ function compilePattern(p) {
   const { type, text } = parsePattern(p);
   if (!text) fn = () => false;
   else if (type === 'morph') fn = (t) => matchesMorph(t, text);
-  else if (type === 'pre') fn = (t) => matchesPrefixed(t, text, false);
-  else if (type === 'aram') fn = (t) => matchesPrefixed(t, text, true);
+  else if (type === 'pre') fn = (t) => matchesPrefixed(t, text);
   else if (type === 'star') fn = (t) => t.startsWith(text);
   else fn = (t) => t === text;
   if (matcherCache.size > 4000) matcherCache.clear();
@@ -516,7 +481,7 @@ function patternFts(p) {
   const { type, text } = parsePattern(p);
   if (type === 'exact') return { terms: [`"${text}"`], superset: false };
   if (type === 'star') return { terms: [`"${text}"*`], superset: false };
-  if (type === 'pre' || type === 'aram') return { terms: prefixedForms(text, type === 'aram').map((f) => `"${f}"`), superset: false };
+  if (type === 'pre') return { terms: prefixedForms(text).map((f) => `"${f}"`), superset: false };
   const terms = [];
   const roots = morphRoots(text);
   const pres = text.length <= SHORT_WORD ? [''] : ['', ...PREFIXES];
@@ -528,8 +493,8 @@ function patternFts(p) {
 function seqFts(pats) {
   const first = parsePattern(pats[0]);
   const rest = pats.slice(1).map((x) => parsePattern(x).text);
-  const heads = first.type === 'pre' || first.type === 'aram' ? prefixedForms(first.text, first.type === 'aram') : [first.text];
-  const superset = pats.slice(1).some((x) => parsePattern(x).type !== 'exact') || !['exact', 'pre', 'aram'].includes(first.type);
+  const heads = first.type === 'pre' ? prefixedForms(first.text) : [first.text];
+  const superset = pats.slice(1).some((x) => parsePattern(x).type !== 'exact') || !['exact', 'pre'].includes(first.type);
   return { terms: heads.map((h) => `"${[h, ...rest].join(' ')}"`), superset };
 }
 
@@ -580,12 +545,11 @@ const nativeWord = (g) => g.alts.length === 1 && ((g.alts[0].kind === 'word' && 
 const groupTokens = (g) => (g.alts[0].kind === 'word' ? [g.alts[0].pat] : g.alts[0].pats);
 
 /** Compiles groups + proximity into FTS5 expressions. */
-function compile(must, any, not, prox) {
+function compile(must, not, prox) {
   let variantCount = 0;
   let superset = false;
   const mustFts = must.map(groupFts);
-  const anyFts = any.map(groupFts);
-  for (const f of [...mustFts, ...anyFts]) {
+  for (const f of mustFts) {
     variantCount += f.count;
     superset = superset || f.superset;
   }
@@ -599,8 +563,7 @@ function compile(must, any, not, prox) {
       proxVerify = prox.ordered;
     } else proxVerify = true;
   }
-  const positive = [mustExpr, anyFts.length ? orExpr(anyFts.map((f) => f.expr)) : ''].filter(Boolean).map((e, i, arr) => (arr.length > 1 && / OR | AND /.test(e) && !e.startsWith('(') ? `(${e})` : e));
-  const positiveMatch = positive.join(' AND ');
+  const positiveMatch = mustExpr;
   const notTerms = uniq(not.flatMap(notGroupFts));
   const notSuperset = not.some((g) => g.alts.some((a) => altFts(a).superset));
   const lhs = / (AND|OR) /.test(positiveMatch.replace(/"[^"]*"/g, '""')) ? `(${positiveMatch})` : positiveMatch;
@@ -617,7 +580,7 @@ function groupTerms(groups) {
 
 /**
  * Build a search plan.
- * @param {string | { query?: string, anyOf?: string, exclude?: string }} fields
+ * @param {string | { query?: string }} fields  the one query (inline operators in Advanced Search)
  * @param {object} [options]  SIMPLE_DEFAULTS when omitted; pass ADVANCED_DEFAULTS (or a merge) for advanced.
  */
 function buildQuery(fields, options) {
@@ -625,11 +588,10 @@ function buildQuery(fields, options) {
   const o = resolveOptions(options, options && options.operators ? ADVANCED_DEFAULTS : SIMPLE_DEFAULTS);
   const main = parseAtoms(f.query, o.operators);
   const { chains, negs } = chainAtoms(main);
-  const anyAtoms = parseAtoms(f.anyOf, false);
-  const exclAtoms = [...negs, ...parseAtoms(f.exclude, false)];
+  const exclAtoms = negs;
 
   // Budgets: per-word terms shrink as the query grows.
-  const atomCount = Math.max(1, chains.reduce((n, c) => n + c.length, 0) + anyAtoms.length + exclAtoms.length);
+  const atomCount = Math.max(1, chains.reduce((n, c) => n + c.length, 0) + exclAtoms.length);
   const budget = Math.max(26, Math.min(MAX_TERMS_PER_WORD, Math.floor(MAX_QUERY_TERMS / atomCount)));
   let atomsLeft = MAX_ATOMS;
   const take = () => atomsLeft-- > 0;
@@ -641,29 +603,26 @@ function buildQuery(fields, options) {
     if (alts.length) must.push({ alts, atoms: chain });
   }
   if (o.acronyms) mergeDictionaryPhrases(must, o);
-  const any = [];
-  for (const a of anyAtoms) if (take()) any.push({ alts: expandAtom(a, o, budget), atoms: [a] });
   const not = [];
   for (const a of exclAtoms) if (take()) not.push({ alts: expandAtom({ ...a, neg: false }, o, budget), atoms: [a] });
 
-  const plan = finish(must, any, not, o);
+  const plan = finish(must, not, o);
   const exactOf = (gs) => gs.map((g) => ({ alts: g.alts.filter((a) => a.exact), atoms: g.atoms }));
-  const hasExpansions = [...must, ...any].some((g) => g.alts.some((a) => !a.exact));
+  const hasExpansions = must.some((g) => g.alts.some((a) => !a.exact));
   if (hasExpansions && !plan.empty) {
-    plan.exact = finish(exactOf(must), exactOf(any), not, o);
+    plan.exact = finish(exactOf(must), not, o);
     plan.exactTerms = plan.exact.terms;
   } else plan.exact = null;
   plan.hasExpansions = hasExpansions;
   return plan;
 }
 
-function finish(must, any, not, o) {
-  const empty = must.length === 0 && any.length === 0;
-  const c = empty ? { match: '', positiveMatch: '', variantCount: 0, needsVerify: false } : compile(must, any, not, o.proximity);
+function finish(must, not, o) {
+  const empty = must.length === 0;
+  const c = empty ? { match: '', positiveMatch: '', variantCount: 0, needsVerify: false } : compile(must, not, o.proximity);
   return {
     kind: 'hebrewSearch',
     must,
-    any,
     not,
     options: o,
     proximity: o.proximity,
@@ -671,7 +630,7 @@ function finish(must, any, not, o) {
     positiveMatch: c.positiveMatch,
     variantCount: c.variantCount,
     needsVerify: c.needsVerify,
-    terms: groupTerms([...must, ...any]),
+    terms: groupTerms(must),
     empty,
   };
 }
@@ -764,7 +723,6 @@ function evaluate(plan, tokens) {
     if (!s.length) return false;
     lists.push(s);
   }
-  if (plan.any.length && !plan.any.some((g) => groupSpans(g, tokens).length)) return false;
   for (const g of plan.not) if (groupSpans(g, tokens).length) return false;
   return proximityOk(lists, plan.proximity);
 }
@@ -778,7 +736,6 @@ function matchesText(plan, cleanText) {
 function likeGroups(plan) {
   return {
     must: plan.must.map((g) => uniq(g.alts.flatMap(altLike))),
-    any: plan.any.length ? uniq(plan.any.flatMap((g) => g.alts.flatMap(altLike))) : null,
   };
 }
 
@@ -786,12 +743,11 @@ function likeGroups(plan) {
 function optionsEqual(a, b) {
   const x = resolveOptions(a, ADVANCED_DEFAULTS);
   const y = resolveOptions(b, ADVANCED_DEFAULTS);
-  return ['prefixesAndSuffixes', 'pleneDefective', 'acronyms', 'aramaicEquiv'].every((k) => x[k] === y[k]) && x.proximity.mode === y.proximity.mode && x.proximity.distance === y.proximity.distance && x.proximity.ordered === y.proximity.ordered;
+  return ['prefixesAndSuffixes', 'pleneDefective', 'acronyms'].every((k) => x[k] === y[k]) && x.proximity.mode === y.proximity.mode && x.proximity.distance === y.proximity.distance && x.proximity.ordered === y.proximity.ordered;
 }
 
 module.exports = {
   PREFIXES,
-  ARAMAIC_PREFIXES,
   SUFFIXES,
   SIMPLE_DEFAULTS,
   ADVANCED_DEFAULTS,
@@ -805,7 +761,6 @@ module.exports = {
   matchesMorph,
   matchesPrefixed,
   pleneVariants,
-  aramaicEquivalents,
   acronymExpansions,
   acronymsFor,
   parseAtoms,
