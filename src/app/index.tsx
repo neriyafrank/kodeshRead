@@ -8,6 +8,7 @@ import { DailyLearningCard } from '../components/learning/DailyLearning';
 import { JobStatus } from '../components/library/JobStatus';
 import { OnboardingCard } from '../components/library/OnboardingCard';
 import { ResumeCards } from '../components/library/ResumeCard';
+import { StarterBooks } from '../components/library/StarterBooks';
 import { LibraryColumns } from '../components/LibraryColumns';
 import { QuickJumpBar } from '../components/QuickJumpBar';
 import { useLibrary } from '../db/LibraryContext';
@@ -21,11 +22,13 @@ export default function LibraryScreen() {
   const router = useRouter();
   const openBookInTab = useTabs((x) => x.openBook);
   const tabCount = useTabs((x) => x.tabs.length);
-  const { core, userBookCount } = useLibrary();
+  const { core, starter, userBookCount } = useLibrary();
   const onboardingDismissed = useLibrarySettings((x) => x.onboardingDismissed);
   // First launch: no core library yet. Stays until a library exists (or, once personal
   // books were imported, until the user hides it).
   const showOnboarding = !core && !(userBookCount > 0 && onboardingDismissed);
+  // No full library yet: the cloud starter books are the instant first-launch library.
+  const starterMode = !core && !!starter;
 
   const openBook = useCallback(
     (bookId: number, bookTitle: string, line?: number, highlight = false) => {
@@ -76,13 +79,23 @@ export default function LibraryScreen() {
       <QuickJumpBar onJump={onJump} />
       {core || userBookCount > 0 ? <DailyLearningCard onOpen={(t) => openLearningTarget(t) && router.navigate('/reader')} /> : null}
       <View style={s.divider} />
-      <View style={s.tree}>
-        <LibraryColumns
+      {starterMode ? (
+        // The onboarding card (import / full download) closes the starter list.
+        <StarterBooks
           onOpenBook={(id, title) => openBook(id, title)}
-          header={showOnboarding ? <OnboardingCard hasUserBooks={userBookCount > 0} /> : undefined}
-          emptyText={showOnboarding ? '' : undefined}
+          footer={showOnboarding ? <OnboardingCard hasUserBooks={userBookCount > 0} starter /> : null}
+          compact={userBookCount > 0}
         />
-      </View>
+      ) : null}
+      {!starterMode || userBookCount > 0 ? (
+        <View style={s.tree}>
+          <LibraryColumns
+            onOpenBook={(id, title) => openBook(id, title)}
+            header={showOnboarding && !starterMode ? <OnboardingCard hasUserBooks={userBookCount > 0} /> : undefined}
+            emptyText={showOnboarding ? '' : undefined}
+          />
+        </View>
+      ) : null}
     </View>
   );
 }

@@ -235,7 +235,7 @@ export const SCHEMA_VERSION: number;
 export const USER_ID_BASE: number;
 export const USER_ROOT_NAME: string;
 export const CANONICAL_ORDER: string[];
-export function ensureSchema(db: WriterDb, opts?: { kind?: 'core' | 'user' }): Promise<boolean>;
+export function ensureSchema(db: WriterDb, opts?: { kind?: 'core' | 'user' | 'starter' }): Promise<boolean>;
 export function readMeta(db: WriterDb | { all: WriterDb['all'] }): Promise<Record<string, string> | null>;
 export function writeMeta(db: WriterDb, entries: Record<string, string | number>): Promise<void>;
 export function sanitizeDisplay(html: string): string;

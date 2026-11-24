@@ -9,7 +9,7 @@ import { useLibraryJobs } from '../../state/libraryJobs';
 import { useLibrarySettings } from '../../state/libraryStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
 
-export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
+export function OnboardingCard({ hasUserBooks, starter }: { hasUserBooks: boolean; starter?: boolean }) {
   const s = useThemedStyles(createStyles);
   const router = useRouter();
   const busy = useLibraryJobs((x) => !!x.job);
@@ -20,9 +20,9 @@ export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
   const download = () => router.navigate('/library-manager');
 
   return (
-    <View style={s.card} testID="onboarding-card">
+    <View style={[s.card, starter && s.cardInList]} testID="onboarding-card">
       <View style={s.headRow}>
-        <Text style={s.title}>ברוכים הבאים!</Text>
+        <Text style={s.title}>{starter ? 'רוצים את כל הספרייה?' : 'ברוכים הבאים!'}</Text>
         {hasUserBooks ? (
           <Pressable onPress={() => dismiss()} hitSlop={10} accessibilityRole="button" accessibilityLabel="הסתר">
             <Text style={s.close}>✕</Text>
@@ -30,7 +30,9 @@ export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
         ) : null}
       </View>
       <Text style={s.body}>
-        הספרייה אינה כלולה בהתקנה כדי שהאפליקציה תישאר קלה. בחרו איך להביא ספרים — אפשר תמיד לשנות בהמשך ממסך ״ניהול ספרייה ועדכונים״.
+        {starter
+          ? 'ספרי ההתחלה למעלה נטענים מהענן בלחיצה. לספרייה המלאה (חיפוש בכל הספרים, כל המפרשים, בלי חיבור) בחרו אחת מהדרכים — אפשר תמיד לשנות בהמשך ממסך ״ניהול ספרייה ועדכונים״.'
+          : 'הספרייה אינה כלולה בהתקנה כדי שהאפליקציה תישאר קלה. בחרו איך להביא ספרים — אפשר תמיד לשנות בהמשך ממסך ״ניהול ספרייה ועדכונים״.'}
       </Text>
       <Pressable onPress={download} disabled={busy} style={({ pressed }) => [s.primary, busy && s.disabled, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-download">
         <Text style={s.primaryText}>☁︎  הורד ספרייה מוכנה מהענן</Text>
@@ -48,6 +50,7 @@ export function OnboardingCard({ hasUserBooks }: { hasUserBooks: boolean }) {
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     card: { margin: spacing.lg, padding: spacing.lg, borderRadius: radius.lg, backgroundColor: c.surface, borderWidth: 1, borderColor: c.border, gap: spacing.md },
+    cardInList: { marginHorizontal: 0, marginTop: spacing.md, marginBottom: 0 },
     headRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
     title: { fontSize: 20, fontWeight: '800', color: c.text, writingDirection: 'rtl' },
     close: { color: c.textMuted, fontSize: 16 },

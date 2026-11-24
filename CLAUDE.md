@@ -123,6 +123,17 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > external-content table (no duplicated text). Scope filter: `shared/libraryScope.js`. Self-tested (section 12) and
 > covered by `e2e:library` (mocked 2-chunk release over in-memory storage).
 
+> **Instant cloud starter (no download wall):** while no full `core_library.db` is installed the app runs on
+> `starter_library.db` (same schema, `ensureSchema(kind: 'starter')`, one more `shared/sources.js` router source with
+> core ids). `shared/starterPacks.js` = curated list (`STARTER_BOOKS`), selection in canonical `libraryCatalog` order,
+> pack build/validate/decode, pure-JS SHA-256 fallback and `importStarterPack` (one transaction: categories by path,
+> books by `file_path`, ids preserved or shifted on collision, FTS rows, `ref_links` of new books only; idempotent).
+> `scripts/export-starter-packs.js` runs in `build-library.yml` before the DB is deleted and publishes
+> `starter-catalog.json` + `starter-<slug>.json.gz` to the separate `starter-latest` release. App: `src/services/starterLibrary.ts`
+> (catalog cache, download -> verify -> import), `src/state/starterStore.ts`, `StarterBooks.tsx` (+ upgrade banner,
+> `OnboardingCard starter`). `LibraryContext` installs the full core via the unchanged `installCore`, then deletes the starter
+> DB and remaps tabs by title + folder (`remapTabs`); `removeCore` goes back to starter mode. Self-tested (section 14), `e2e:library`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

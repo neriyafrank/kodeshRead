@@ -338,6 +338,7 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
 | --- | --- | --- |
 | `core_library.db` | the main (Otzaria) library | downloaded from a GitHub Release, **or** built on the device from an Otzaria folder |
 | `user_library.db` | personal books | imported on the device (`.txt` files or whole folders) |
+| `starter_library.db` | cloud starter books (only until the full library is installed) | opened one book at a time from the `starter-latest` release |
 
 * **One library in the UI.** `shared/sources.js` routes every per-book query (reader window,
   TOC, Quick Jump traversal, commentaries) to the database that owns the book, and merges
@@ -351,8 +352,25 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
   `shared/indexer.js`. `scripts/build-db.js` and the on-device indexer
   (`src/services/localIndexer.ts`) both call it, so a book indexed on the phone behaves exactly
   like one from a release.
-* **First launch** (no `core_library.db`): the Library screen shows a welcome card with
-  **הורד ספרייה מוכנה מהענן** (download) and **ייבא ספרים מהמכשיר** (import).
+* **First launch** (no `core_library.db`): no download wall. The Library screen lists the cloud
+  starter books (below) and closes with a card offering **הורד ספרייה מוכנה מהענן** (download) and
+  **ייבא ספרים מהמכשיר** (import).
+* **Instant cloud starter** (`shared/starterPacks.js`, `src/services/starterLibrary.ts`,
+  `StarterBooks.tsx`). The "Build cloud library" workflow runs `scripts/export-starter-packs.js` on the
+  fresh `core_library.db` (before it is deleted) and publishes `starter-catalog.json` plus one
+  `starter-<slug>.json.gz` per curated book (בראשית ... דברים, תהילים, משנה אבות / ברכות, ברכות,
+  שבת, שולחן ערוך אורח חיים, מסילת ישרים, הכוזרי, רמב"ם הלכות דעות / תשובה; books missing from a library
+  are skipped) to their own release `starter-latest`, so the `library-latest` asset cleanup never touches
+  them. A pack holds the base book (TOC + paragraphs), its bundled רש"י / אונקלוס / תוספות and the exact
+  `ref_links` between them (Bavli `שורה N` paragraph links included), typically 100 KB - 800 KB.
+  The app lists the catalog in canonical order (cached in AsyncStorage for offline / retry), and a tap
+  downloads the pack, checks size + SHA-256, and writes book + commentaries + `ref_links` + FTS rows into
+  `starter_library.db` (same schema as the core DB) in **one transaction**: ids are kept when free and
+  remapped when they collide, re-opening a loaded book is a no-op, and the database is one more source of
+  the router, so Reader, Commentary Drawer, TOC / parsha navigation, Quick Jump and search work exactly as
+  on the full library. A banner offers the full download. Installing the full library swaps `core_library.db`
+  as before, then drops `starter_library.db` (open tabs follow their books; settings, tabs and personal
+  books never lived in it). Self-tested (section 14) and in `e2e:library`.
 * **ניהול ספרייה ועדכונים** (the **ניהול** button in the Library header):
   * *Core library*: installed version, build date, source, books / paragraphs / links / size.
     **בדוק עדכונים** reads the release manifest and shows whether a newer version exists;

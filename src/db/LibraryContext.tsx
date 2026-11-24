@@ -13,7 +13,7 @@ import { useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { closeQuietly } from './dbUtils';
 import { readMeta } from '../../shared/indexer';
-import { installStagedCore, isWeb, openCoreDatabase, openUserDatabase, deleteCoreDatabase, toAdapter, type CoreInfo } from './library';
+import { deleteStarterDatabase, installStagedCore, isWeb, openCoreDatabase, openStarterDatabase, openUserDatabase, deleteCoreDatabase, starterDbExists, toAdapter, type CoreInfo } from './library';
 
 export interface Library {
   /** Routes per-book queries to the owning DB and merges library-wide ones. */
@@ -26,6 +26,11 @@ export interface Library {
   core: { db: SQLiteDatabase; info: CoreInfo } | null;
   /** user_library.db (always open, read-write for the local indexer). */
   user: SQLiteDatabase;
+  /**
+   * starter_library.db: cloud starter books loaded on demand. Open (and queried as a source, ids as in
+   * the core library) only while there is no core library; null once the full library is installed.
+   */
+  starter: SQLiteDatabase | null;
   coreBookCount: number;
   userBookCount: number;
   /** Bumped on every refresh, so screens re-fetch the tree etc. */
@@ -110,9 +115,11 @@ function coreGate(db: SQLiteDatabase): CoreGate {
   return gate;
 }
 
-async function buildLibrary(core: Library['core'], user: SQLiteDatabase, generation: number): Promise<Library> {
+async function buildLibrary(core: Library['core'], user: SQLiteDatabase, starter: SQLiteDatabase | null, generation: number): Promise<Library> {
   const sources: LibrarySource[] = [];
   if (core) sources.push({ name: 'core', adapter: coreGate(core.db).adapter, idBase: 0 });
+  // Starter mode: the books opened from the cloud stand in for the core library (same ids as in it).
+  else if (starter) sources.push({ name: 'starter', adapter: toAdapter(starter), idBase: 0 });
   // Web preview only: after a page reload expo-sqlite's web storage can hand back the seeded
   // core database under the user database's name; querying it as "user" would list every
   // core book twice. A personal library always says kind = user.
@@ -128,7 +135,27 @@ async function buildLibrary(core: Library['core'], user: SQLiteDatabase, generat
     if (id >= USER_ID_BASE) userBookCount++;
     else coreBookCount++;
   }
-  return { adapter, bookIndex, fts, core, user, coreBookCount, userBookCount, generation };
+  return { adapter, bookIndex, fts, core, user, starter: core ? null : starter, coreBookCount, userBookCount, generation };
+}
+
+/**
+ * After the full library replaced the cloud starter books: a tab keeps working when the book has a
+ * different id in the new library (another release) but the same title in the same folder.
+ */
+function remapTabs(prev: BookIndex, next: BookIndex) {
+  const byKey = new Map<string, number | null>();
+  for (const b of next.books.values()) {
+    const key = `${b.title}\u0000${b.categoryPath}`;
+    byKey.set(key, byKey.has(key) ? null : b.id);
+  }
+  useTabs.setState((s) => ({
+    tabs: s.tabs.map((t) => {
+      if (next.books.get(t.bookId)?.title === t.bookTitle) return t;
+      const old = prev.books.get(t.bookId);
+      const id = old ? byKey.get(`${old.title}\u0000${old.categoryPath}`) : null;
+      return id != null ? { ...t, bookId: id } : t;
+    }),
+  }));
 }
 
 /** Drops tabs / search scopes whose book disappeared or changed (core swapped, book deleted). */
@@ -173,7 +200,12 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
     (async () => {
       try {
         const [core, user] = await Promise.all([openCoreDatabase(), openUserDatabase()]);
-        const lib = await buildLibrary(core, user, ++generation.current);
+        // No full library yet: the cloud starter database is the instant first-launch library.
+        // (A starter DB left behind next to an installed core library is stale: removed.)
+        let starter: SQLiteDatabase | null = null;
+        if (!core) starter = await openStarterDatabase().catch((e) => (console.warn('starter library unavailable', e), null));
+        else if (starterDbExists()) await deleteStarterDatabase().catch(() => undefined);
+        const lib = await buildLibrary(core, user, starter, ++generation.current);
         if (alive) publish(lib);
       } catch (e) {
         console.error(e);
@@ -191,7 +223,7 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
         serial(async () => {
           const lib = current.current;
           if (!lib) return;
-          publish(await buildLibrary(lib.core, lib.user, ++generation.current));
+          publish(await buildLibrary(lib.core, lib.user, lib.starter, ++generation.current));
         }),
       installCore: (from?: string) =>
         serial(async () => {
@@ -211,10 +243,19 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
               reopenCore: async () => {
                 const core = await openCoreDatabase({ strict: true });
                 if (!core) throw new Error('core_library.db is not a valid library after the swap');
-                publish(await buildLibrary(core, lib.user, ++generation.current));
+                const next = await buildLibrary(core, lib.user, null, ++generation.current);
+                // Starter books -> the same books of the full library: open tabs follow them.
+                if (lib.starter) remapTabs(lib.bookIndex, next.bookIndex);
+                publish(next);
               },
               warn: (w) => console.warn(`library install: ${w.step} failed (ignored)`, w.message),
             });
+            // The full library replaced the cloud starter books: drop that database. Nothing else
+            // lives in it (tabs / settings are in AsyncStorage, personal books in user_library.db).
+            if (lib.starter) {
+              await closeQuietly(lib.starter);
+              await deleteStarterDatabase().catch((err) => console.warn('starter library could not be removed', err));
+            }
           } catch (e) {
             // Republish whatever is installed now (the old library if the swap did not happen).
             // A failed close left the old connection open: keep serving it through a new gate.
@@ -225,7 +266,7 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
               core = lib.core;
             }
             try {
-              publish(await buildLibrary(core, lib.user, ++generation.current));
+              publish(await buildLibrary(core, lib.user, lib.starter, ++generation.current));
             } catch (again) {
               console.warn('library could not be republished after a failed install', again);
             }
@@ -241,7 +282,9 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
             await closeQuietly(lib.core.db);
           }
           await deleteCoreDatabase();
-          publish(await buildLibrary(null, lib.user, ++generation.current));
+          // Back to the instant cloud starter (a fresh, empty starter database).
+          const starter = lib.starter ?? (await openStarterDatabase().catch(() => null));
+          publish(await buildLibrary(null, lib.user, starter, ++generation.current));
         }),
     }),
     [publish, serial],

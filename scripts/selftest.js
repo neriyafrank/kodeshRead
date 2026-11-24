@@ -766,11 +766,384 @@ async function main() {
   await libraryCatalogTests();
   // 13. Search progress UI: lifecycle state machine, cancellation, elapsed formatting.
   await searchProgressTests();
+  // 14. Instant cloud starter: starter pack export / import round trip, idempotence, upgrade.
+  await starterPackTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
 }
 
+/**
+ * Instant cloud starter (section 14): scripts/export-starter-packs.js on the sample library (pack export,
+ * gzip integrity, starter-catalog.json), the app's import code (shared/starterPacks.js importStarterPack)
+ * into an empty starter database (Rashi `שורה N` ref_links, FTS5 search), idempotent re-import, id
+ * collisions, atomic rollback, the starter -> full library transition and the workflow wiring.
+ */
+async function starterPackTests() {
+  const sp = require('../shared/starterPacks');
+  const { exportStarterPacks } = require('./export-starter-packs');
+  const { gunzipSync } = require('fflate');
+  const SAMPLE_DB = path.join(ROOT, 'assets/db/library.db');
+  if (!fs.existsSync(SAMPLE_DB)) return;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'starter-'));
+  const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+  const newStarterDb = async (name) => {
+    const w = openWritable(path.join(tmp, name));
+    await indexer.ensureSchema(w.w, { kind: 'starter' });
+    const all = w.read.all;
+    w.read.all = async (sql, params) => plain(await all(sql, params)); // plain objects: deepStrictEqual compares prototypes
+    return w;
+  };
+  const count = async (r, sql, params) => Number(Object.values((await r.read.all(sql, params || []))[0])[0]);
+  const core = openDb(SAMPLE_DB);
+  const plain = (rows) => rows.map((r) => ({ ...r }));
+  const coreAll = async (sql, params) => plain(await core.all(sql, params));
+  const idOf = async (title) => (await coreAll('SELECT id FROM books WHERE title = ?', [title]))[0].id;
+  try {
+    const out = path.join(tmp, 'out');
+    const exp = await exportStarterPacks({ dbFile: SAMPLE_DB, outDir: out });
+
+    await check('starter export: curated books found in the sample, the rest skipped gracefully', () => {
+      assert.deepStrictEqual(exp.packs.map((p) => p.slug), ['genesis', 'numbers', 'bavli-shabbat'], 'canonical catalog order: תנ"ך (Torah order) before תלמוד בבלי');
+      for (const missing of ['exodus', 'psalms', 'bavli-berachot', 'shulchan-aruch-orach-chaim', 'kuzari']) assert.ok(exp.skipped.includes(missing), missing);
+      assert.strictEqual(exp.packs.length + exp.skipped.length, sp.STARTER_BOOKS.length);
+    });
+
+    await check('starter export: files, gzip integrity, SHA-256 and starter-catalog.json', () => {
+      const catalog = JSON.parse(fs.readFileSync(path.join(out, 'starter-catalog.json'), 'utf8'));
+      assert.deepStrictEqual(Object.keys(catalog).sort(), ['books', 'builtAt', 'formatVersion', 'version']);
+      assert.ok(catalog.version && catalog.builtAt);
+      assert.deepStrictEqual(catalog.books.map((b) => b.slug), ['genesis', 'numbers', 'bavli-shabbat']);
+      assert.deepStrictEqual(fs.readdirSync(out).sort(), ['starter-bavli-shabbat.json.gz', 'starter-catalog.json', 'starter-genesis.json.gz', 'starter-numbers.json.gz']);
+      for (const b of catalog.books) {
+        const bytes = fs.readFileSync(path.join(out, b.packFile));
+        assert.strictEqual(bytes.length, b.sizeBytes);
+        assert.strictEqual(sha(bytes), b.sha256);
+        assert.ok(bytes.length < 2 * 1024 * 1024, `${b.packFile} is compact (${bytes.length})`);
+        assert.strictEqual(bytes[0], 0x1f);
+        assert.strictEqual(bytes[1], 0x8b); // gzip magic
+        const pack = JSON.parse(Buffer.from(gunzipSync(new Uint8Array(bytes))).toString('utf8'));
+        assert.strictEqual(pack.slug, b.slug);
+        assert.strictEqual(pack.books.find((x) => x[0] === pack.baseBookId)[4], b.filePath);
+        for (const k of ['slug', 'title', 'category', 'author', 'packFile', 'sizeBytes', 'sha256', 'bundledCommentaries']) assert.ok(k in b, `catalog entry has ${k}`);
+      }
+      const byslug = Object.fromEntries(catalog.books.map((b) => [b.slug, b]));
+      assert.deepStrictEqual(byslug.genesis.bundledCommentaries.map((c) => c.name), ['רש"י', 'אונקלוס']);
+      assert.deepStrictEqual(byslug['bavli-shabbat'].bundledCommentaries.map((c) => c.name), ['רש"י', 'תוספות']);
+      assert.deepStrictEqual(byslug.numbers.bundledCommentaries, [], 'no Rashi / Onkelos of Numbers in the sample: nothing is bundled');
+      assert.deepStrictEqual([byslug.genesis.category, byslug['bavli-shabbat'].category], ['תנ"ך', 'תלמוד בבלי']);
+      // Deterministic: exporting again yields byte-identical packs (stable hashes between builds of one library).
+      return exportStarterPacks({ dbFile: SAMPLE_DB, outDir: path.join(tmp, 'out2') }).then((again) => {
+        assert.deepStrictEqual(again.packs.map((p) => p.sha256), exp.packs.map((p) => p.sha256));
+      });
+    });
+
+    await check('starter catalog: validation rejects unsafe or malformed entries', () => {
+      const good = JSON.parse(fs.readFileSync(path.join(out, 'starter-catalog.json'), 'utf8'));
+      assert.strictEqual(sp.validateStarterCatalog(good).books.length, 3);
+      const mutate = (fn) => {
+        const c = JSON.parse(JSON.stringify(good));
+        fn(c);
+        return c;
+      };
+      assert.throws(() => sp.validateStarterCatalog(mutate((c) => (c.books[0].packFile = '../../evil.json.gz'))), /unsafe packFile/);
+      assert.throws(() => sp.validateStarterCatalog(mutate((c) => (c.books[0].packFile = 'https://evil/x.json.gz'))), /unsafe packFile/);
+      assert.throws(() => sp.validateStarterCatalog(mutate((c) => (c.books[0].sha256 = 'abc'))), /sha256/);
+      assert.throws(() => sp.validateStarterCatalog(mutate((c) => c.books.push({ ...c.books[0] }))), /duplicate slug/);
+      assert.throws(() => sp.validateStarterCatalog(mutate((c) => (c.formatVersion = 99))), /newer app/);
+      assert.throws(() => sp.validateStarterCatalog({}), /books is missing/);
+      assert.strictEqual(sp.packUrl('https://github.com/o/r/releases/download/starter-latest/starter-catalog.json?x=1', good.books[0]), 'https://github.com/o/r/releases/download/starter-latest/starter-genesis.json.gz');
+    });
+
+    await check('starter: pure-JS SHA-256 (Hermes has no WebCrypto) equals node crypto', async () => {
+      for (const n of [0, 1, 3, 55, 56, 57, 63, 64, 65, 119, 120, 1000, 70000]) {
+        const buf = crypto.randomBytes(n);
+        assert.strictEqual(sp.sha256Js(new Uint8Array(buf)), sha(buf), `${n} bytes`);
+      }
+      const real = fs.readFileSync(path.join(out, 'starter-genesis.json.gz'));
+      assert.strictEqual(await sp.sha256Hex(new Uint8Array(real)), sha(real));
+    });
+
+    await check('starter pack: tampered, truncated or foreign downloads are rejected before anything is written', async () => {
+      const entry = exp.catalog.books.find((b) => b.slug === 'genesis');
+      const real = new Uint8Array(fs.readFileSync(path.join(out, entry.packFile)));
+      await sp.verifyPackBytes(real, entry);
+      const flipped = real.slice();
+      flipped[Math.floor(flipped.length / 2)] ^= 0xff;
+      await assert.rejects(sp.verifyPackBytes(flipped, entry), /SHA-256/);
+      await assert.rejects(sp.verifyPackBytes(real.slice(0, real.length - 10), entry), /גודל/);
+      assert.throws(() => sp.decodePack(real.slice(0, 40)), /פגומה/);
+      assert.throws(() => sp.decodePack(new Uint8Array(Buffer.from('not gzip at all'))), /פגומה/);
+      assert.throws(() => sp.validatePack({ format: 'something-else' }), /not a kodeshRead starter pack/);
+    });
+
+    // --- round trip into an empty starter database ------------------------------------------------
+    const packOf = (slug) => sp.decodePack(new Uint8Array(fs.readFileSync(path.join(out, sp.packFileName(slug)))));
+    const s1 = await newStarterDb('starter1.db');
+    await check('starter DB: same schema as the core library (paragraphs_fts, ref_links, view, TOC)', async () => {
+      const names = (await s1.read.all("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")).map((r) => r.name);
+      const coreNames = (await coreAll("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name", [])).map((r) => r.name);
+      for (const n of ['paragraphs_fts', 'paragraphs_fts_source', 'ref_links', 'toc_nodes', 'books', 'categories', 'paragraphs', 'meta', 'links']) assert.ok(names.includes(n), n);
+      assert.deepStrictEqual(names.filter((n) => coreNames.includes(n)).length, coreNames.filter((n) => names.includes(n)).length);
+      assert.strictEqual((await indexer.readMeta(s1.w)).kind, 'starter');
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM books'), 0, 'empty until a book is opened');
+    });
+
+    await check('starter import: genesis + Rashi + Onkelos in one transaction; ids, text, TOC and ref_links match the source', async () => {
+      const res = await sp.importStarterPack(s1.w, packOf('genesis'));
+      assert.deepStrictEqual([res.added, res.skipped, res.title], [3, 0, 'בראשית']);
+      const base = await idOf('בראשית');
+      assert.strictEqual(res.bookId, base, 'ids are preserved (the full library of this release has the very same ids)');
+      const bookIds = [base, await idOf('רש"י על בראשית'), await idOf('אונקלוס על בראשית')];
+      for (const id of bookIds) {
+        const a = await coreAll('SELECT line_index, display_text, clean_text, is_heading, toc_path FROM paragraphs WHERE book_id = ? ORDER BY line_index', [id]);
+        const b = await s1.read.all('SELECT line_index, display_text, clean_text, is_heading, toc_path FROM paragraphs WHERE book_id = ? ORDER BY line_index', [id]);
+        assert.deepStrictEqual(b, a.map((r) => ({ ...r })), `paragraphs of book ${id}`);
+        const ta = await coreAll('SELECT level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ? ORDER BY id', [id]);
+        const tb = await s1.read.all('SELECT level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ? ORDER BY id', [id]);
+        assert.deepStrictEqual(tb, ta.map((r) => ({ ...r })), `TOC of book ${id}`);
+        const [src] = await coreAll('SELECT title, aliases, file_path, total_lines FROM books WHERE id = ?', [id]);
+        assert.deepStrictEqual((await s1.read.all('SELECT title, aliases, file_path, total_lines FROM books WHERE id = ?', [id]))[0], { ...src });
+      }
+      const rl = 'base_book_id, base_start, base_end, comm_book_id, comm_start, comm_end, ref_key, link_type';
+      const rows = (r, extra) => r.all(`SELECT ${rl} FROM ref_links WHERE base_book_id = ? AND comm_book_id IN (?, ?) ORDER BY comm_book_id, base_start, comm_start`, [base, bookIds[1], bookIds[2]]).then((x) => x.map((y) => ({ ...y })));
+      assert.deepStrictEqual(await rows(s1.read), await rows({ all: (q, p) => coreAll(q, p) }));
+      assert.ok(res.refLinks > 0);
+      // TOC parent links point at nodes of the same book.
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM toc_nodes t JOIN toc_nodes p ON p.id = t.parent_id WHERE p.book_id <> t.book_id'), 0);
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM toc_nodes WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM toc_nodes)'), 0);
+      assert.strictEqual(JSON.parse((await s1.read.all("SELECT value FROM meta WHERE key = 'starter_loaded'"))[0].value).genesis.dbVersion, exp.catalog.version);
+    });
+
+    await check('starter import: Quick Jump, reader window, FTS5 search and the commentary drawer work like the full library', async () => {
+      const router = sources.createRouter([{ name: 'starter', adapter: s1.read, idBase: 0 }]);
+      const index = await loadBookIndex(router);
+      const jump = async (r, i) => (await resolveReference(r, i, 'בראשית ב'))[0];
+      const [js, jc] = [await jump(router, index), await jump(core, await loadBookIndex(core))];
+      assert.ok(js.complete && js.bookTitle === 'בראשית', JSON.stringify(js));
+      assert.deepStrictEqual([js.bookId, js.targetLine, js.path], [jc.bookId, jc.targetLine, jc.path], 'Quick Jump resolves to the same line as the full library');
+      const base = await idOf('בראשית');
+      const win = await reader.fetchRange(router, base, 1, 12);
+      assert.ok(win.length >= 10 && win.every((r) => r.book_id === base || r.book_id === undefined || true));
+      const hit = await search.searchParagraphs(router, 'בראשית ברא', { limit: 5, fts: true });
+      assert.ok(hit.rows.length >= 1 && hit.rows.every((r) => r.book_id != null), 'FTS5 over the starter database finds the verse');
+      const ftsHits = await s1.read.all('SELECT rowid FROM paragraphs_fts WHERE paragraphs_fts MATCH ? LIMIT 3', ['"ברא אלהימ"']);
+      assert.ok(ftsHits.length >= 1);
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(router, base, 3));
+      const names = groups.map((g) => g.name);
+      assert.ok(names.includes('רש"י') && names.includes('אונקלוס'), names.join(','));
+      assert.ok(!names.includes('רמב"ן'), 'only the bundled commentaries are there');
+      const rashi = groups.find((g) => g.name === 'רש"י');
+      const ref = await commentary.fetchLinkedEntries(core, base, 3);
+      assert.deepStrictEqual(rashi.entries.map((e) => e.display_text), commentary.groupLinkedEntries(ref).find((g) => g.name === 'רש"י').entries.map((e) => e.display_text));
+      // The search scope picker / library catalog builds over the starter source (commentaries nested under their base).
+      const cat = libraryCatalogOf(await sources.loadCatalog(router));
+      assert.deepStrictEqual(cat.commentariesOf(base).map((c) => c.name).sort(), ['אונקלוס', 'רש"י']);
+    });
+
+    await check('starter import: Bavli רש"י שורה N <-> Gemara paragraph links are exact, both directions (and Tosafot)', async () => {
+      const res = await sp.importStarterPack(s1.w, packOf('bavli-shabbat'));
+      assert.deepStrictEqual([res.added, res.skipped], [3, 0]);
+      const router = sources.createRouter([{ name: 'starter', adapter: s1.read, idBase: 0 }]);
+      const shabbat = await idOf('שבת');
+      assert.strictEqual(res.bookId, shabbat);
+      const [fromStarter, fromCore] = [router, core].map((r) => commentary.fetchLinkedEntries(r, shabbat, 3));
+      const [a, b] = [commentary.groupLinkedEntries(await fromStarter), commentary.groupLinkedEntries(await fromCore)];
+      assert.deepStrictEqual(a.map((g) => [g.name, g.entries.length, g.block]), b.map((g) => [g.name, g.entries.length, g.block]));
+      assert.deepStrictEqual(a.map((g) => g.name), ['רש"י', 'תוספות']);
+      assert.deepStrictEqual(a[0].block, { refKey: 'דף ב|עמוד א|שורה א', start: 3, end: 5 });
+      assert.ok(a[0].entries.every((e) => e.toc_path === 'דף ב. > שורה א'));
+      const rashi = a[0].bookId;
+      const back = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(router, rashi, a[0].entries[0].line));
+      assert.deepStrictEqual(back.map((g) => [g.bookTitle, g.entries[0].line]), [['שבת', 3]]);
+      // Every ref_link row of the three Bavli books is identical to the source.
+      const q = 'SELECT base_start, base_end, comm_book_id, comm_start, comm_end, ref_key FROM ref_links WHERE base_book_id = ? ORDER BY comm_book_id, base_start, comm_start';
+      assert.deepStrictEqual(await s1.read.all(q, [shabbat]), (await coreAll(q, [shabbat])).map((r) => ({ ...r })));
+    });
+
+    await check('starter import: opening an already loaded book is a no-op (no duplicate rows, FTS or ref_links)', async () => {
+      const snapshot = async () => ({
+        books: await count(s1, 'SELECT COUNT(*) FROM books'),
+        paragraphs: await count(s1, 'SELECT COUNT(*) FROM paragraphs'),
+        toc: await count(s1, 'SELECT COUNT(*) FROM toc_nodes'),
+        refs: await count(s1, 'SELECT COUNT(*) FROM ref_links'),
+        cats: await count(s1, 'SELECT COUNT(*) FROM categories'),
+        fts: await count(s1, 'SELECT COUNT(*) FROM paragraphs_fts_docsize'),
+        maxPara: await count(s1, 'SELECT MAX(id) FROM paragraphs'),
+      });
+      const before = await snapshot();
+      for (const slug of ['genesis', 'bavli-shabbat']) {
+        const again = await sp.importStarterPack(s1.w, packOf(slug));
+        assert.deepStrictEqual([again.added, again.skipped, again.paragraphs, again.refLinks], [0, 3, 0, 0], slug);
+      }
+      assert.deepStrictEqual(await snapshot(), before);
+      assert.strictEqual(before.fts, before.paragraphs, 'one FTS row per paragraph');
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM (SELECT file_path FROM books GROUP BY file_path HAVING COUNT(*) > 1)'), 0);
+      const six = (await coreAll("SELECT file_path FROM books WHERE title IN ('בראשית', 'רש\"י על בראשית', 'אונקלוס על בראשית', 'שבת', 'רש\"י על שבת', 'תוספות על שבת')", [])).map((r) => r.file_path);
+      assert.strictEqual(six.length, 6);
+      assert.deepStrictEqual([...(await loadedPathsOf(s1))].sort(), six.sort());
+    });
+
+    await check('starter import: a second pack of the same folders reuses categories (no duplicate paths)', async () => {
+      await sp.importStarterPack(s1.w, packOf('numbers'));
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM (SELECT path FROM categories GROUP BY path HAVING COUNT(*) > 1)'), 0);
+      assert.strictEqual(await count(s1, 'SELECT COUNT(*) FROM books'), 7);
+      const orphan = await count(s1, 'SELECT COUNT(*) FROM books WHERE category_id IS NOT NULL AND category_id NOT IN (SELECT id FROM categories)');
+      assert.strictEqual(orphan, 0);
+    });
+
+    await check('starter import: ids that collide with another release are remapped cleanly (text, TOC, ref_links, FTS follow)', async () => {
+      const s2 = await newStarterDb('starter2.db');
+      // A different release already used book id 1, category id 1, TOC / paragraph ids 1..N for other books.
+      s2.raw.exec(`INSERT INTO categories (id, parent_id, name, path) VALUES (1, NULL, 'אחר', 'אחר');
+        INSERT INTO books (id, category_id, title, aliases, file_path, total_lines) VALUES (1, 1, 'ספר אחר', '', 'אחר/ספר אחר.txt', 3), (4, 1, 'ספר שני', '', 'אחר/ספר שני.txt', 1);
+        INSERT INTO paragraphs (id, book_id, line_index, toc_path, display_text, clean_text, is_heading) VALUES (1, 1, 1, '', 'א', 'א', 0), (2, 1, 2, '', 'ב', 'ב', 0), (3, 1, 3, '', 'ג', 'ג', 0), (4000, 4, 1, '', 'ד', 'ד', 0);
+        INSERT INTO toc_nodes (id, book_id, parent_id, level, title, ref_key, start_line) VALUES (1, 1, NULL, 1, 'פרק', 'א', 1);`);
+      const res = await sp.importStarterPack(s2.w, packOf('genesis'));
+      const base = await idOf('בראשית');
+      assert.notStrictEqual(res.bookId, 1);
+      assert.strictEqual(res.title, 'בראשית');
+      assert.strictEqual(res.idMap[base], res.bookId);
+      const src = await coreAll('SELECT line_index, display_text FROM paragraphs WHERE book_id = ? ORDER BY line_index', [base]);
+      const got = await s2.read.all('SELECT line_index, display_text FROM paragraphs WHERE book_id = ? ORDER BY line_index', [res.bookId]);
+      assert.deepStrictEqual(got, src.map((r) => ({ ...r })));
+      // The other release's rows are untouched.
+      assert.strictEqual(await count(s2, "SELECT COUNT(*) FROM paragraphs WHERE book_id IN (1, 4) AND display_text IN ('א','ב','ג','ד')"), 4);
+      assert.strictEqual(await count(s2, 'SELECT COUNT(*) FROM toc_nodes WHERE book_id = 1'), 1);
+      assert.strictEqual(await count(s2, 'SELECT COUNT(*) FROM toc_nodes t LEFT JOIN toc_nodes p ON p.id = t.parent_id WHERE t.parent_id IS NOT NULL AND (p.id IS NULL OR p.book_id <> t.book_id)'), 0);
+      // FTS rowids are the shifted paragraph ids: search resolves to the right book.
+      const router = sources.createRouter([{ name: 'starter', adapter: s2.read, idBase: 0 }]);
+      const hit = await search.searchParagraphs(router, 'בראשית ברא', { limit: 5, fts: true });
+      const mine = new Set(Object.values(res.idMap));
+      assert.ok(hit.rows.length && hit.rows.every((r) => mine.has(r.book_id)) && hit.rows.some((r) => r.book_id === res.bookId), JSON.stringify(hit.rows.map((r) => r.book_id)));
+      // The commentary drawer follows the remapped ids.
+      const groups = commentary.groupLinkedEntries(await commentary.fetchLinkedEntries(router, res.bookId, 3));
+      assert.deepStrictEqual(groups.map((g) => g.name).sort(), ['אונקלוס', 'רש"י']);
+      assert.ok(groups.every((g) => mine.has(g.bookId) && g.bookId !== 1 && g.bookId !== 4));
+      assert.strictEqual(await count(s2, 'SELECT COUNT(*) FROM ref_links WHERE base_book_id <> ?', [res.bookId]), 0);
+      s2.raw.close();
+    });
+
+    await check('starter import: a failing pack rolls back completely (nothing half-written)', async () => {
+      const s3 = await newStarterDb('starter3.db');
+      const bad = packOf('genesis');
+      bad.paragraphs[bad.paragraphs.length - 1][4] = null; // display_text NOT NULL
+      await assert.rejects(sp.importStarterPack(s3.w, bad));
+      for (const t of ['books', 'paragraphs', 'toc_nodes', 'ref_links', 'categories', 'paragraphs_fts_docsize']) assert.strictEqual(await count(s3, `SELECT COUNT(*) FROM ${t}`), 0, t);
+      assert.strictEqual((await s3.read.all("SELECT 1 FROM meta WHERE key = 'starter_loaded'")).length, 0);
+      // ... and the same database then imports the good pack fine.
+      const ok = await sp.importStarterPack(s3.w, packOf('genesis'));
+      assert.strictEqual(ok.added, 3);
+      s3.raw.close();
+    });
+
+    await check('starter import: one transaction is fast (genesis + commentaries, 1.6k paragraphs)', async () => {
+      const s4 = await newStarterDb('starter4.db');
+      const t = process.hrtime.bigint();
+      await sp.importStarterPack(s4.w, packOf('genesis'));
+      const ms = Number(process.hrtime.bigint() - t) / 1e6;
+      console.log(`  starter import of genesis: ${ms.toFixed(0)}ms`);
+      assert.ok(ms < 1500, `${ms}ms`);
+      s4.raw.close();
+    });
+
+    await check('starter -> full library: same release keeps every id (tabs survive), router drops the starter source', async () => {
+      const starterRouter = sources.createRouter([{ name: 'starter', adapter: s1.read, idBase: 0 }]);
+      const fullRouter = sources.createRouter([{ name: 'core', adapter: core, idBase: 0 }, { name: 'user', adapter: s1.read, idBase: sources.USER_ID_BASE, categoryRoot: sources.USER_ROOT_NAME }]);
+      const a = await loadBookIndex(starterRouter);
+      const b = await loadBookIndex(fullRouter);
+      for (const [id, book] of a.books) {
+        assert.strictEqual(b.books.get(id)?.title, book.title, `book ${id} keeps its id and title`);
+        assert.strictEqual(b.books.get(id)?.categoryPath, book.categoryPath);
+      }
+      // The reader of a starter book works unchanged on the full library: same window, same drawer.
+      const shabbat = await idOf('שבת');
+      assert.deepStrictEqual((await reader.fetchRange(starterRouter, shabbat, 1, 20)).map((r) => r.display_text), (await reader.fetchRange(fullRouter, shabbat, 1, 20)).map((r) => r.display_text));
+    });
+
+    await check('starter -> full library: LibraryContext swaps the source, deletes the starter DB, keeps tabs / user data', () => {
+      const ctx = fs.readFileSync(path.join(ROOT, 'src/db/LibraryContext.tsx'), 'utf8');
+      const lib = fs.readFileSync(path.join(ROOT, 'src/db/library.ts'), 'utf8');
+      assert.ok(/else if \(starter\) sources\.push\(\{ name: 'starter'/.test(ctx), 'the starter is a router source only while there is no core');
+      assert.ok(/starter: core \? null : starter/.test(ctx));
+      const from = ctx.indexOf('installCore: (from?: string) =>', ctx.indexOf('const controller'));
+      const install = ctx.slice(from, ctx.indexOf('removeCore: () =>', from));
+      assert.ok(install.indexOf('installStagedCore') < install.indexOf('deleteStarterDatabase'), 'the starter DB is deleted only after the swap succeeded');
+      assert.ok(install.includes('remapTabs(lib.bookIndex, next.bookIndex)') && install.includes('buildLibrary(core, lib.user, null,'));
+      assert.ok(!/removeDbFiles\(USER_DB|deleteUserDatabase/.test(ctx + lib), 'user_library.db is never touched by the upgrade');
+      assert.ok(/export const STARTER_DB = 'starter_library.db'/.test(lib));
+      assert.ok(ctx.includes('removeCore') && ctx.includes('lib.starter ?? (await openStarterDatabase()'), 'removing the core goes back to starter mode');
+      assert.ok(ctx.includes('if (!core) starter = await openStarterDatabase()') && ctx.includes('else if (starterDbExists()) await deleteStarterDatabase()'), 'a stale starter DB next to a core library is removed on launch');
+      // Tabs / settings / bookmarks live in AsyncStorage (zustand persist), personal books in user_library.db: neither is in the starter DB.
+      const tabs = fs.readFileSync(path.join(ROOT, 'src/state/tabsStore.ts'), 'utf8');
+      assert.ok(tabs.includes('AsyncStorage') && !tabs.includes('starter'));
+    });
+
+    await check('starter UI: Library screen shows the catalog, cloud / offline badges, loading text and the upgrade banner', () => {
+      const ui = fs.readFileSync(path.join(ROOT, 'src/components/library/StarterBooks.tsx'), 'utf8');
+      const home = fs.readFileSync(path.join(ROOT, 'src/app/index.tsx'), 'utf8');
+      assert.ok(ui.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין וחיפוש מלא') && ui.includes('testID="starter-upgrade-banner"'));
+      assert.ok(ui.includes("router.navigate('/library-manager')"), 'the banner leads to the manager with the cloud library card');
+      assert.ok(ui.includes('טוען את ${t} מהענן…') && ui.includes('☁ · ${formatBytes(b.sizeBytes)}') && ui.includes('✓ זמין לא מקוון'));
+      assert.ok(/const starterMode = !core && !!starter/.test(home) && home.includes('<StarterBooks'));
+      const svc = fs.readFileSync(path.join(ROOT, 'src/services/starterLibrary.ts'), 'utf8');
+      assert.ok(svc.includes('starter-latest/starter-catalog.json') && svc.includes('CACHE_KEY') && svc.includes('verifyPackBytes') && svc.includes('importStarterPack'));
+      assert.ok(svc.includes('FROM books WHERE file_path = ? AND is_complete = 1'), 'an already loaded book opens without a download');
+    });
+
+    await check('starter selection: every curated book resolves in the real Otzaria folder map, Rashi / Onkelos / Tosafot bundled, canonical order', () => {
+      const lines = fs.readFileSync(path.join(ROOT, 'otzaria_index_only.txt'), 'utf8').split('\n').map((l) => l.trim().replace(/^\.\//, '')).filter((l) => l.endsWith('.txt'));
+      const cats = new Map();
+      const books = [];
+      for (const l of lines) {
+        const parts = l.split('/');
+        const file = parts.pop();
+        const p = parts.join('/');
+        if (!cats.has(p)) cats.set(p, { id: cats.size + 1, parent_id: null, name: parts[parts.length - 1] || '', path: p });
+        books.push({ id: books.length + 1, category_id: cats.get(p).id, title: file.replace(/\.txt$/, '').replace(/^[‏]+/, ''), aliases: '', total_lines: 1 });
+      }
+      const sel = sp.selectStarterBooks({ categories: [...cats.values()], books });
+      const bySlug = Object.fromEntries(sel.map((x) => [x.spec.slug, x]));
+      assert.deepStrictEqual(sp.STARTER_BOOKS.map((b) => b.slug).filter((s) => !bySlug[s]), [], 'every curated book exists in the full library');
+      for (const s of ['genesis', 'exodus', 'leviticus', 'numbers', 'deuteronomy']) assert.deepStrictEqual(bySlug[s].commentaries.map((c) => c.key), ['רשי', 'אונקלוס'], s);
+      assert.deepStrictEqual(bySlug.psalms.commentaries.map((c) => c.key), ['רשי']);
+      for (const s of ['bavli-berachot', 'bavli-shabbat']) assert.deepStrictEqual(bySlug[s].commentaries.map((c) => c.key), ['רשי', 'תוספות'], s);
+      assert.ok(/ברכות/.test(bySlug['bavli-berachot'].commentaries[0].title) && /תלמוד בבלי/.test(bySlug['bavli-berachot'].categoryPath));
+      assert.ok(/^משנה\//.test(bySlug['mishna-berachot'].categoryPath) && !/תלמוד/.test(bySlug['mishna-berachot'].categoryPath), 'משנה ברכות is not the Bavli tractate');
+      assert.ok(/הלכה\/שולחן ערוך/.test(bySlug['shulchan-aruch-orach-chaim'].categoryPath));
+      const order = sel.map((x) => x.spec.slug);
+      assert.deepStrictEqual(order.slice(0, 6), ['genesis', 'exodus', 'leviticus', 'numbers', 'deuteronomy', 'psalms'], 'Torah order, then Ketuvim');
+      assert.ok(order.indexOf('mishna-avot') > order.indexOf('psalms') && order.indexOf('bavli-berachot') < order.indexOf('bavli-shabbat') && order.indexOf('bavli-shabbat') < order.indexOf('shulchan-aruch-orach-chaim'));
+    });
+
+    await check('workflow: starter packs are exported before the DB is deleted and published to their own release', () => {
+      const text = fs.readFileSync(path.join(ROOT, '.github/workflows/build-library.yml'), 'utf8');
+      const at = (needle) => {
+        const i = text.indexOf(needle);
+        assert.ok(i >= 0, `workflow lacks: ${needle}`);
+        return i;
+      };
+      const order = ['cloud-release.js validate', 'export-starter-packs.js --db="$WORK/core_library.db"', 'zip -9', 'rm -f core_library.db core_library.db-journal', 'gh release upload "$RELEASE_TAG" library-manifest.json', 'name: Publish starter packs'].map(at);
+      assert.deepStrictEqual(order, [...order].sort((x, y) => x - y));
+      assert.ok(text.includes('STARTER_TAG: starter-latest') && text.includes('starter-catalog.json'));
+      const pub = text.slice(at('name: Publish starter packs'), at('name: Summary'));
+      assert.ok(!pub.includes('RELEASE_TAG') && !pub.includes('core_library.db.zip.part'), 'never touches the library-latest assets');
+      assert.ok(pub.indexOf('gh release delete-asset "$STARTER_TAG" starter-catalog.json') < pub.indexOf('gh release upload "$STARTER_TAG" "$f"') && pub.lastIndexOf('starter-catalog.json') > pub.lastIndexOf('gh release upload "$STARTER_TAG" "$f"'), 'catalog hidden first, published last');
+      const lib = text.slice(at('name: Publish release ${{ env.RELEASE_TAG }}'), at('name: Publish starter packs'));
+      assert.ok(!lib.includes('starter'), 'the library-latest cleanup never mentions the starter packs');
+    });
+  } finally {
+    core.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  async function loadedPathsOf(w) {
+    return sp.loadedFilePaths(w.read);
+  }
+  function libraryCatalogOf(data) {
+    return require('../shared/libraryCatalog').buildLibraryCatalog(data);
+  }
+}
 /**
  * Search progress (section 13): shared/searchLifecycle.js state machine, request-id race safety,
  * abort + real progress in shared/search.js, Hebrew/RTL elapsed formatting, UI wiring.

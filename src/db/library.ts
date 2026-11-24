@@ -27,6 +27,12 @@ import { webSeed } from './webSeed';
 
 export const CORE_DB = 'core_library.db';
 export const USER_DB = 'user_library.db';
+/**
+ * Cloud starter books (src/services/starterLibrary.ts): a small writable library with the exact
+ * schema of the core DB, filled one book at a time from GitHub Releases. Exists only until the full
+ * core library is installed (it is deleted then; settings, tabs and personal books live elsewhere).
+ */
+export const STARTER_DB = 'starter_library.db';
 /** Staging name for a downloaded core DB before the atomic swap. */
 export const CORE_TMP_DB = 'core_library.db.tmp';
 /**
@@ -263,6 +269,45 @@ export async function deleteCoreDatabase(): Promise<void> {
     return;
   }
   removeDbFiles(CORE_DB);
+}
+
+// --- starter -------------------------------------------------------------------
+
+/**
+ * Opens (creating on first launch) the cloud starter database: the same schema as core_library.db
+ * (paragraphs_fts, ref_links, ...), empty until the user opens a starter book. Returns null when
+ * the storage hands back a database of another kind (web preview only, see LibraryContext).
+ */
+export async function openStarterDatabase(): Promise<SQLiteDatabase | null> {
+  if (!isWeb) {
+    const dir = sqliteDir();
+    if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
+  }
+  const db = await openDatabaseAsync(STARTER_DB);
+  if (!isWeb) await db.execAsync('PRAGMA journal_mode = WAL;');
+  await db.execAsync('PRAGMA temp_store = MEMORY; PRAGMA foreign_keys = OFF;');
+  await ensureSchema(toWriter(db), { kind: 'starter' });
+  const kind = (await readMeta(toAdapter(db)).catch(() => null))?.kind;
+  if (kind !== 'starter') {
+    console.warn(`starter library storage returned a "${kind}" database; starter books unavailable`);
+    await closeQuietly(db);
+    return null;
+  }
+  return db;
+}
+
+/** Deletes the starter database (after the full library replaced it). Close its connection first. */
+export async function deleteStarterDatabase(): Promise<void> {
+  if (isWeb) {
+    await deleteDatabaseAsync(STARTER_DB).catch(() => undefined);
+    return;
+  }
+  removeDbFiles(STARTER_DB);
+}
+
+/** Is there a starter database on disk? (native only: the browser preview checks nothing) */
+export function starterDbExists(): boolean {
+  return !isWeb && dbFile(STARTER_DB).exists;
 }
 
 // --- user ----------------------------------------------------------------------

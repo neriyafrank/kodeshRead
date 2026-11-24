@@ -16,6 +16,13 @@
  * in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): the "הורד ספרייה מוכנה מהענן" card, the
  * low-storage warning, "חלק 2 מתוך 2 · … · 50%" progress while part 2 is in flight, and the install.
  *
+ * Instant cloud starter: with no full library (core removed) a fresh user sees the starter catalog
+ * (starter-catalog.json + starter-*.json.gz are mocked with page.route from REAL packs exported out of the
+ * sample library), taps בראשית (inline "טוען את בראשית מהענן…", download -> verify -> one SQLite
+ * transaction into the starter DB), reads it with רש"י / אונקלוס in the commentary drawer, opens the Bavli
+ * שבת (רש"י שורה א + תוספות), searches the loaded books locally, re-opens a loaded book without any download,
+ * sees the cached catalog when the network is gone, and still sees the upgrade banner.
+ *
  * Also the Library screen's "לימוד יומי" bar ("today" pinned to 2026-05-25, the week after a
  * Shabbat Shavuot: ארץ ישראל reads בהעלותך, חו"ל still נשא): Hebrew date, the persisted ארץ
  * ישראל / חו"ל switch changing the parsha, missing books greyed, and a tap opening the aliyah.
@@ -25,6 +32,10 @@
 const assert = require('assert');
 const crypto = require('crypto');
 const { zipSync } = require('fflate');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { exportStarterPacks } = require('./export-starter-packs');
 
 const BASE = process.env.E2E_URL || 'http://localhost:8081';
 const shotsArg = process.argv.find((a) => a.startsWith('--shots='));
@@ -79,6 +90,27 @@ try {
     cloudRequests.push(name);
     if (i === 1) await new Promise((r) => setTimeout(r, 2500)); // part 2 is "in flight" while the test reads the progress
     return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body: chunks[i] });
+  });
+  // --- mocked starter release (real packs exported from the sample library) --------------------------
+  const starterDir = fs.mkdtempSync(path.join(os.tmpdir(), 'e2e-starter-'));
+  const starter = await exportStarterPacks({ dbFile: path.join(__dirname, '..', 'assets', 'db', 'library.db'), outDir: starterDir });
+  const starterRequests = [];
+  const starterNet = { failCatalog: 1, offline: false };
+  await page.route('**/releases/download/starter-latest/**', async (route) => {
+    const name = decodeURIComponent(route.request().url().split('/').pop().split('?')[0]);
+    const cors = { 'access-control-allow-origin': '*' };
+    if (name === 'starter-catalog.json') {
+      starterRequests.push(name);
+      if (starterNet.offline || starterNet.failCatalog > 0) {
+        starterNet.failCatalog = Math.max(0, starterNet.failCatalog - 1);
+        return route.fulfill({ status: 503, headers: cors, body: 'unavailable' });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(starter.catalog) });
+    }
+    if (!starter.catalog.books.some((b) => b.packFile === name)) return route.fulfill({ status: 404, headers: cors, body: '' });
+    starterRequests.push(name);
+    if (name === 'starter-genesis.json.gz') await new Promise((r) => setTimeout(r, 1500)); // "טוען את בראשית מהענן…" stays visible
+    return route.fulfill({ status: 200, contentType: 'application/gzip', headers: cors, body: fs.readFileSync(path.join(starterDir, name)) });
   });
   const tid = (id) => page.locator(`[data-testid="${id}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
@@ -190,6 +222,114 @@ try {
     await shot('onboarding');
     step('onboarding card offers download / import');
 
+
+    // --- Instant cloud starter: no full library -> the starter catalog, not a download wall -----------
+    const bidi = (t) => t.replace(/[⁦-⁩]/g, ''); // bidi isolates are invisible
+    await tid('starter-upgrade-banner').waitFor();
+    await tid('starter-catalog-error').waitFor();
+    assert.ok((await tid('starter-catalog-error').innerText()).includes('503'), 'a clear error state while the catalog is unreachable');
+    await shot('starter-error');
+    await tid('starter-retry').click();
+    await tid('starter-book-genesis').waitFor();
+    assert.deepStrictEqual(starterRequests.slice(0, 2), ['starter-catalog.json', 'starter-catalog.json']);
+    const slugs = await page.locator('[data-testid^="starter-book-"]').evaluateAll((els) => els.map((e) => e.dataset.testid.replace('starter-book-', '')));
+    assert.deepStrictEqual(slugs, ['genesis', 'numbers', 'bavli-shabbat'], 'canonical catalog order (the books missing from the sample are skipped)');
+    const sections = (await page.locator('[data-testid^="starter-section-"]').evaluateAll((els) => els.map((e) => e.innerText.split('\n')[0])));
+    assert.deepStrictEqual(sections, ['תנ"ך', 'תלמוד בבלי']);
+    const bannerText = (await tid('starter-upgrade-banner').innerText()).replace(/\s+/g, ' ');
+    assert.ok(bannerText.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין וחיפוש מלא'), bannerText);
+    assert.ok(bannerText.includes('הורד ספרייה מלאה'));
+    for (const b of starter.catalog.books) {
+      const badge = bidi(await tid(`starter-badge-${b.slug}`).innerText());
+      assert.strictEqual(badge, `☁ · ${Math.max(1, Math.round(b.sizeBytes / 1024))} KB`, 'cloud badge with the pack size');
+    }
+    const genesisRow = await tid('starter-book-genesis').innerText();
+    assert.ok(genesisRow.includes('בראשית') && genesisRow.includes('עם רש"י, אונקלוס'), genesisRow);
+    assert.ok((await tid('starter-book-bavli-shabbat').innerText()).includes('עם רש"י, תוספות'));
+    const starterAlign = await page.evaluate(() => {
+      const box = document.querySelector('[data-testid="starter-books"]').getBoundingClientRect();
+      return [...document.querySelectorAll('[data-testid^="starter-book-"]')].map((row) => {
+        const t = [...row.querySelectorAll('div')].find((e) => !e.children.length && /[א-ת]/.test(e.innerText));
+        const rr = document.createRange();
+        rr.selectNodeContents(t);
+        return { text: t.innerText.trim(), align: getComputedStyle(t).textAlign, gapRight: box.right - rr.getBoundingClientRect().right, gapLeft: rr.getBoundingClientRect().left - box.left };
+      });
+    });
+    for (const t of starterAlign) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft, `starter title "${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
+    await shot('starter-catalog');
+    step('fresh user: starter catalog in canonical order with ☁ · size badges, upgrade banner, error -> retry (no download wall)');
+
+    // Tap-to-open: inline loading text, then the Reader with the book + Rashi / Onkelos.
+    await tid('starter-book-genesis').click();
+    await tid('starter-loading-genesis').waitFor({ timeout: 5000 });
+    assert.strictEqual((await tid('starter-loading-genesis').innerText()).trim(), 'טוען את בראשית מהענן…');
+    await shot('starter-loading');
+    await tid('reader-breadcrumb').waitFor({ timeout: 30000 });
+    await tid('para-3').waitFor({ timeout: 20000 });
+    assert.ok(starterRequests.includes('starter-genesis.json.gz'));
+    assert.ok((await tid('para-3').innerText()).length > 5, 'verse text rendered from the starter database');
+    await tid('links-badge-3').waitFor();
+    await tid('para-3').click();
+    await tid('commentary-group').first().waitFor({ timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    assert.deepStrictEqual((await tid('commentary-group-name').allInnerTexts()).sort(), ['אונקלוס', 'רש"י']);
+    assert.ok((await tid('commentary-entry').first().innerText()).length > 3);
+    await shot('starter-reader-rashi');
+    step('tap בראשית: "טוען את בראשית מהענן…" -> Reader opens, Commentary Drawer has רש"י + אונקלוס (bundled ref_links)');
+
+    // Bavli: Rashi on the exact paragraph (שורה N) + Tosafot.
+    await page.goBack();
+    await tid('starter-book-bavli-shabbat').waitFor();
+    assert.strictEqual(bidi(await tid('starter-badge-genesis').innerText()), '✓ זמין לא מקוון', 'a loaded book is marked as available offline');
+    assert.ok(/^☁/.test(bidi(await tid('starter-badge-bavli-shabbat').innerText())));
+    await tid('starter-book-bavli-shabbat').click();
+    await tid('para-3').waitFor({ timeout: 30000 });
+    await tid('para-3').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    assert.deepStrictEqual(await tid('commentary-group-name').allInnerTexts(), ['רש"י', 'תוספות']);
+    assert.ok((await tid('commentary-block').first().innerText()).includes('דף ב. · שורה א'), await tid('commentary-block').first().innerText());
+    await shot('starter-reader-bavli');
+    step('Bavli שבת from the cloud: Rashi on its שורה א block + Tosafot, like the full library');
+
+    // Loaded books: no second download; the packs of books never opened were never requested.
+    await page.goBack();
+    await tid('starter-book-genesis').waitFor();
+    const requestsBefore = starterRequests.length;
+    await tid('starter-book-genesis').click();
+    await tid('para-3').waitFor({ timeout: 10000 });
+    assert.strictEqual(await tid('starter-loading-genesis').count(), 0);
+    assert.strictEqual(starterRequests.length, requestsBefore, 'a loaded book opens without a download');
+    assert.deepStrictEqual(starterRequests.filter((n) => n.endsWith('.json.gz')).sort(), ['starter-bavli-shabbat.json.gz', 'starter-genesis.json.gz']);
+    await page.goBack();
+    step('re-opening a loaded book is instant and downloads nothing (numbers was never fetched)');
+
+    // Local search over the loaded starter books.
+    await tid('open-search').click();
+    await tid('search-input').fill('בראשית ברא');
+    await tid('search-result').first().waitFor({ timeout: 20000 });
+    assert.ok((await tid('search-result').count()) >= 1);
+    await page.goBack();
+    await tid('starter-book-genesis').waitFor();
+    step('search runs locally over the loaded starter books');
+
+    // Offline: the cached catalog keeps the list; a retry restores the fresh one.
+    starterNet.offline = true;
+    await page.evaluate(() => globalThis.__kodeshreadStarter.load());
+    await tid('starter-stale').waitFor();
+    assert.ok((await tid('starter-stale').innerText()).includes('מוצגת רשימה שמורה'));
+    assert.ok((await tid('starter-book-numbers').count()) === 1, 'the list stays usable offline');
+    starterNet.offline = false;
+    await tid('starter-retry').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="starter-stale"]'));
+    assert.strictEqual(await tid('starter-upgrade-banner').count(), 1, 'the upgrade banner stays while there is no full library');
+    step('offline: cached catalog + retry state; the banner stays until the full library is installed');
+
+    await tid('starter-upgrade-button').click();
+    await tid('cloud-library-card').waitFor();
+    await page.goBack();
+    await tid('onboarding-card').waitFor();
+    step('the banner button leads to the manager\'s "הורד ספרייה מוכנה מהענן" card');
+
     await tid('onboarding-download').click();
     await tid('cloud-library-card').waitFor();
     step('onboarding "הורד ספרייה מוכנה מהענן" opens the manager with the cloud card (no blind multi-GB download)');
@@ -200,6 +340,8 @@ try {
     await tid('library-manager').waitFor();
     step('import choice opens the manager');
 
+    // The starter books read above left tabs / a search query behind; the catalog checks below start clean.
+    await page.evaluate(() => ['kodeshread.tabs', 'kodeshread.search'].forEach((k) => localStorage.removeItem(k)));
     await page.goto(BASE + '/', { timeout: 180000 });
     const secRows = page.locator('[data-testid^="tree-sec-"]');
     await secRows.first().waitFor({ timeout: 180000 });

@@ -9,6 +9,12 @@ name: Build cloud library
 #
 # GitHub Releases rejects files of 2 GB and more, hence the parts; every step deletes its input
 # before the next one starts, so the runner never holds two multi-GB copies.
+#
+# Instant cloud starter: while core_library.db still exists, scripts/export-starter-packs.js cuts the
+# curated foundational books (+ Rashi / Onkelos / Tosafot and their exact ref_links) into tiny
+# `starter-<slug>.json.gz` packs and `starter-catalog.json`. They are published to their OWN release
+# (`starter-latest`), so the library-latest asset cleanup (which prunes old multi-GB parts) can never
+# touch them, and the app can browse + open those books in ~1 second before the full download.
 
 on:
   workflow_dispatch:
@@ -37,6 +43,7 @@ concurrency:
 
 env:
   RELEASE_TAG: library-latest
+  STARTER_TAG: starter-latest
   GH_TOKEN: ${{ github.token }}
   # gh must never need a .git folder (steps run in $WORK, which is not a repository).
   GH_REPO: ${{ github.repository }}
@@ -86,6 +93,14 @@ jobs:
 
       - name: Validate the database
         run: node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
+
+      - name: Export starter packs (instant cloud starter)
+        run: |
+          set -euo pipefail
+          # Must run before the compress step deletes core_library.db. A real library has all of them
+          # (the sample / partial scopes fewer): fewer than 5 means the curated titles stopped matching.
+          node scripts/export-starter-packs.js --db="$WORK/core_library.db" --out="$WORK/starter" --min=5
+          ls -l "$WORK/starter"
 
       - name: Compress (deflate .zip)
         run: |
@@ -147,6 +162,42 @@ jobs:
           # The manifest goes last: it is what makes the new version visible to the app.
           gh release upload "$RELEASE_TAG" library-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
 
+      - name: Publish starter packs (release ${{ env.STARTER_TAG }})
+        # Independent of library-latest: runs (when the packs were exported) even if the multi-GB
+        # upload failed, and never touches the library-latest assets.
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          dir="$WORK/starter"
+          if [ ! -f "$dir/starter-catalog.json" ]; then echo "no starter packs were exported: nothing to publish"; exit 0; fi
+          cd "$dir"
+          version=$(node -p "require('./starter-catalog.json').version")
+          count=$(node -p "require('./starter-catalog.json').books.length")
+          notes="Instant cloud starter: ${count} foundational books with their primary commentaries, library version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Loaded on demand by the app."
+          if gh release view "$STARTER_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$STARTER_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes" --latest=false
+            # Unpublish the old catalog first: no client pairs it with half-replaced packs.
+            gh release delete-asset "$STARTER_TAG" starter-catalog.json --repo "$GITHUB_REPOSITORY" -y || true
+          else
+            gh release create "$STARTER_TAG" --repo "$GITHUB_REPOSITORY" --title "Cloud starter books (latest)" --notes "$notes" --latest=false --target "$GITHUB_SHA"
+          fi
+          for f in starter-*.json.gz; do
+            for attempt in 1 2 3; do
+              if gh release upload "$STARTER_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber; then break; fi
+              [ "$attempt" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
+              sleep $((attempt * 10))
+            done
+          done
+          # Drop packs of books that are no longer part of the starter set.
+          gh release view "$STARTER_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | { grep '^starter-.*\.json\.gz$' || true; } | while read -r a; do
+            [ -f "$a" ] || gh release delete-asset "$STARTER_TAG" "$a" --repo "$GITHUB_REPOSITORY" -y
+          done
+          # The catalog goes last: it is what makes the new packs visible to the app.
+          gh release upload "$STARTER_TAG" starter-catalog.json --repo "$GITHUB_REPOSITORY" --clobber
+
       - name: Summary
         if: always()
         env:
@@ -163,6 +214,10 @@ jobs:
               echo "### Cloud library build did not finish (${JOB_STATUS})"
             fi
             echo
+            if [ -f "$WORK/starter/starter-catalog.json" ]; then
+              echo "Starter packs: \`${STARTER_TAG}\` · $(CAT="$WORK/starter/starter-catalog.json" node -p "const c=require(process.env.CAT);c.books.length+' book(s), '+Math.round(c.books.reduce((a,b)=>a+b.sizeBytes,0)/1024)+' KB'" 2>/dev/null || echo unreadable)"
+              echo
+            fi
             echo "Release: \`${RELEASE_TAG}\` · source \`${SOURCE_REPO}\` · scope \`${LIBRARY_SCOPE}\`"
             if [ -f "$manifest" ]; then
               echo
