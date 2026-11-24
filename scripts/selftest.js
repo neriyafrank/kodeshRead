@@ -1625,7 +1625,31 @@ async function libraryCatalogTests() {
     }
   });
 
-  await check('catalog: the commentary drawer ranks Bavli Rashi #1 and keeps it under עיקריים (with or without the book path)', () => {
+  await check('commentary drawer: one uniform list - no עיקריים / נוספים UI, order still primary-first, only תרגומים / מקבילים / מקור are badged', () => {
+    const ui = fs.readFileSync(path.join(ROOT, 'src/components/reader/CommentaryPane.tsx'), 'utf8');
+    const code = ui.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.ok(!/עיקריים|נוספים|אחרים/.test(code), 'no primary / other labels in the drawer');
+    assert.ok(!/g\.core|\.core\b/.test(code), 'no per-commentator styling by primary status');
+    assert.ok(!/pillCore[^\n]*g\.|g\.[^\n]*pillCore/.test(code) && !/tierCore/.test(code));
+    // The order is intact: canonical commentators first, the rest after, deterministic.
+    const mk = (id, title, cat) => ({ bookId: id, bookTitle: title, categoryPath: cat });
+    const groups = [
+      mk(1, 'חידושי אגדות על בראשית', 'תנך/אחרונים/חידושי אגדות'),
+      mk(2, 'רמב"ן על בראשית', 'תנך/ראשונים/רמבן'),
+      mk(3, 'רש"י על בראשית', 'תנך/ראשונים/רש"י'),
+      mk(4, 'אונקלוס על בראשית', 'תנך/תרגומים/אונקלוס'),
+      mk(5, 'פירוש לא מוכר על בראשית', 'תנך/מחברי זמננו/פירוש לא מוכר'),
+    ];
+    const a = rank.rankCommentaries(groups, { context: { title: 'בראשית' } });
+    const b = rank.rankCommentaries([...groups].reverse(), { context: { title: 'בראשית' } });
+    assert.deepStrictEqual(a.map((r) => r.bookId), b.map((r) => r.bookId), 'deterministic');
+    const firstOther = a.findIndex((r) => !r.core && r.kind === 'commentary');
+    assert.ok(a.slice(0, firstOther).filter((r) => r.kind === 'commentary').every((r) => r.core), 'primaries before the rest');
+    assert.deepStrictEqual(a.filter((r) => r.kind === 'commentary').map((r) => r.displayName).slice(0, 2), ['רש"י', 'רמב"ן']);
+    assert.strictEqual(a.filter((r) => r.kind === 'targum').length, 1);
+  });
+
+  await check('catalog: the commentary drawer ranks Bavli Rashi #1 and keeps it first, ahead of the other commentators (with or without the book path)', () => {
     const groups = [
       { bookId: 1, bookTitle: 'רשבא על ברכות', categoryPath: 'תלמוד בבלי/ראשונים/רשבא/סדר זרעים' },
       { bookId: 2, bookTitle: 'תוספות על ברכות', categoryPath: 'תלמוד בבלי/ראשונים/תוספות/סדר זרעים' },
@@ -1637,8 +1661,9 @@ async function libraryCatalogTests() {
       const ranked = rank.rankCommentaries(groups, { context });
       assert.deepStrictEqual(ranked.slice(0, 2).map((r) => r.bookId), [3, 2], `Rashi, then Tosafot (${JSON.stringify(context)})`);
       assert.strictEqual(ranked[0].rank, 0);
-      const core = rank.filterCommentaries(ranked, { view: 'core' });
-      assert.ok(core.length >= 2 && core[0].bookId === 3, 'Rashi under עיקריים');
+      // No עיקריים-only view any more: the filter returns every commentator, in the same priority order.
+      const all = rank.filterCommentaries(ranked, { view: 'core' });
+      assert.deepStrictEqual(all.map((r) => r.bookId), ranked.map((r) => r.bookId), 'no primary / secondary split');
       assert.ok(rank.defaultExpandedKeys(ranked).has(ranked[0].key), 'open by default');
     }
   });
@@ -4983,13 +5008,13 @@ async function commentaryRankTests() {
     const bavli = rank.rankCommentaries([item('תוספות על שבת', 'תלמוד בבלי/ראשונים/תוספות'), item('רשי על שבת', 'תלמוד בבלי/ראשונים/רשי'), item('רשבא על שבת', 'תלמוד בבלי/ראשונים/רשבא')]);
     assert.deepStrictEqual(f(bavli, "תוס'"), ['תוספות']);
     assert.deepStrictEqual(f(bavli, 'רש'), ['רש"י', 'רשב"א']);
-    // View chips: core only / favorites only.
+    // View chips: favorites only (there is no עיקריים-only view: primaries are just first in the order).
     const pinnedT = rank.rankCommentaries(TANACH, { pinned: ['גור אריה'] });
     assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'pinned' })), ['גור אריה']);
-    assert.ok(rank.filterCommentaries(pinnedT, { view: 'core' }).every((x) => x.core));
-    assert.strictEqual(rank.filterCommentaries(pinnedT, { view: 'core' }).length, 10);
+    assert.strictEqual(rank.filterCommentaries(pinnedT, {}).length, pinnedT.length, 'nothing is hidden by a primary / secondary split');
+    assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'core' })), names(pinnedT), 'the retired "core" view is a no-op');
     // Word starts only: "רמ" is not the folded final mem of "הטורים".
-    assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { view: 'core', query: 'רמ' })), ['רמב"ן']);
+    assert.deepStrictEqual(names(rank.filterCommentaries(pinnedT, { query: 'רמ' })), ['רמב"ן']);
   });
 
   await check('commentary chip bar: הכל / single tap / long-press multi-select state machine', () => {

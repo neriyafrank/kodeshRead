@@ -9,7 +9,7 @@
  * paragraph, verifies grouping (רש"י / תוספות), the theme, resizing, prev/next sync,
  * and opening a commentary at its line in a tab.
  *
- * (Talmud Bavli: רש"י is card #1, ahead of תוספות, and both are עיקריים.)
+ * (Talmud Bavli: רש"י is card #1, ahead of תוספות; no עיקריים / נוספים labels, uniform cards.)
  *
  * Then בראשית א (8 commentators in the sample: core, ראשונים, אחרונים): priority order and
  * tier badges, smart default expansion (top 3), expanding / collapsing cards, open-all /
@@ -85,8 +85,8 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group-name"]').length === 2, null, { timeout: 10000 });
     const names = await tid('commentary-group-name').allInnerTexts();
     assert.deepStrictEqual(names, ['רש"י', 'תוספות']);
-    // Talmud Bavli: Rashi is #1 (ahead of Tosafot), both under the primary commentators (עיקריים).
-    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['עיקריים', 'עיקריים']);
+    // Talmud Bavli: Rashi is #1 (ahead of Tosafot); regular commentators carry no tier badge at all.
+    assert.strictEqual(await tid('commentary-tier').count(), 0, 'no עיקריים / נוספים badge on commentators');
     assert.ok((await tid('commentary-group').first().innerText()).includes('רש"י'), 'Rashi is the first card');
     // רש"י: only the entries of שורה א (2); תוספות has no שורה headings: its whole amud block (2).
     // The 3 explicitly linked dibburim are marked.
@@ -293,9 +293,17 @@ try {
     await openBereshit();
     assert.deepStrictEqual(await groupNames(), PRIORITY, 'Tanach core list first, then ראשונים before אחרונים');
     // אונקלוס keeps its place at the top of the Tanach list, but is badged as a translation (תרגום).
-    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['תרגומים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'עיקריים', 'ראשונים', 'אחרונים']);
+    // Only the translation is badged; the 7 commentators (primary first, then the rest) look identical.
+    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts(), ['תרגומים']);
+    const styleOf = (loc) => loc.evaluate((el) => { const cs = getComputedStyle(el); return [cs.color, cs.fontWeight, cs.backgroundColor, cs.fontSize].join('|'); });
+    const nameLocs = tid('commentary-group-name');
+    const nameStyles = new Set();
+    for (let i = 0; i < (await nameLocs.count()); i++) nameStyles.add(await styleOf(nameLocs.nth(i)));
+    assert.strictEqual(nameStyles.size, 1, `all commentator names share one style (${[...nameStyles].join(' ; ')})`);
+    const pageText = await page.locator('body').innerText();
+    assert.ok(!/עיקריים|נוספים|אחרים/.test(pageText), 'no עיקריים / נוספים / אחרים anywhere in the drawer');
     // Otzaria titles without gershayim are shown in their canonical spelling ("מלבים" -> מלבי"ם).
-    step('priority order + tier badges (8 commentators)');
+    step('priority order kept; uniform cards, only the translation is badged (8 commentators)');
 
     // The tools header starts folded: the first card sits right under the title bar.
     assert.strictEqual(await toolsToggle.getAttribute('aria-expanded'), 'false', 'commentary tools start collapsed');

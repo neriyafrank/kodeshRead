@@ -17,8 +17,9 @@
  * רשי על …") are not their parent, and series titles without "על" ("יכין ברכות", "באר היטב
  * אורח חיים") match by their leading name.
  *
- * Every ranked item also gets a display group (`tier`): עיקריים / תרגומים / ראשונים / אחרונים /
- * נוספים (+ מקור for a base text), and the drawer's name filter understands Torah abbreviations
+ * Every ranked item also gets a `tier` label (עיקריים / תרגומים / ראשונים / אחרונים / נוספים, + מקור for a
+ * base text) that drives the ORDER only; the drawer shows no עיקריים / נוספים distinction (it badges just
+ * תרגומים / מקבילים / מקור, and the library catalog still reads `tier`), and the drawer's name filter understands Torah abbreviations
  * through shared/hebrewTorahDict.js ("מ"ב", "אב"ע", "תוס", "רש").
  */
 'use strict';
@@ -499,7 +500,7 @@ function matchesCommentatorQuery(query, item) {
 
 /**
  * Applies the drawer's view chip and name filter to ranked items.
- * view: 'all' | 'core' (עיקריים + the base text) | 'pinned'.
+ * view: 'all' | 'pinned'. (The canonical order is the only priority signal: no עיקריים-only view.)
  */
 function filterCommentaries(ranked, opts) {
   const view = (opts && opts.view) || 'all';
@@ -507,7 +508,6 @@ function filterCommentaries(ranked, opts) {
   const kind = (opts && opts.kind) || 'all';
   return ranked.filter((r) => {
     if (kind !== 'all' && kindOf(r) !== kind && !(kind === 'commentary' && kindOf(r) === 'source')) return false;
-    if (view === 'core' && !(r.core || r.isSource)) return false;
     if (view === 'pinned' && !r.pinned) return false;
     return matchesCommentatorQuery(query, r);
   });

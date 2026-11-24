@@ -8,14 +8,16 @@
  * Built for passages with 40-100+ commentaries:
  *  - cards are ordered by priority (shared/commentaryRank.js): ⭐ favorites, the base text,
  *    the corpus' canonical core list (רש"י, רמב"ן, ... / משנה ברורה, מגן אברהם, ...), then
- *    תרגומים -> ראשונים -> אחרונים -> מחברי זמננו -> alphabetical; each card has a tier badge;
+ *    תרגומים -> ראשונים -> אחרונים -> מחברי זמננו -> alphabetical. The order is the only sign of
+ *    priority: every commentator card / pill looks the same (no עיקריים / נוספים groups or badges);
+ *    only another content role is badged: תרגומים, מקבילים (⇄) and the base text (מקור);
  *  - only favorites + the top 3 open by default; the rest are one-line headers (the user's own
  *    open / close choices stick while moving between verses);
  *  - a sticky tools header: name filter that understands abbreviations ("מ"ב", "אב"ע", "תוס"),
- *    view chips (הכל / עיקריים / מועדפים ⭐), open-all / collapse-all, and a horizontal strip of
+ *    kind chips (הכל / מפרשים / תרגומים / מקבילים), open-all / collapse-all, and a horizontal strip of
  *    commentator pills — one tap scrolls to a commentator and opens it. It is folded away by
  *    default (the commentaries start right under the title bar) and toggled by the "סינון"
- *    button in the title bar, which carries a dot while a name filter or a view chip is active.
+ *    button in the title bar, which carries a dot while a name filter or a kind chip is active.
  *
  * Content of a card:
  *  - heading-aligned units (Otzaria reference alignment, `ref_links`): the WHOLE block of
@@ -304,16 +306,19 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               accessibilityRole="button"
               aria-expanded={open}
               accessibilityState={{ expanded: open }}
-              accessibilityLabel={par ? `${g.displayName}, ספר מקביל, ${label}` : `${g.displayName}, ${g.tier}, ${g.entries.length}`}
+              accessibilityLabel={par ? `${g.displayName}, ספר מקביל, ${label}` : g.kind === 'targum' || g.isSource ? `${g.displayName}, ${g.tier}, ${g.entries.length}` : `${g.displayName}, ${g.entries.length}`}
               testID={par ? 'parallel-group-header' : 'commentary-group-header'}
             >
               <Text style={s.chevron}>{open ? '⌄' : '‹'}</Text>
               <Text style={[s.groupName, { fontFamily: font.bold }]} numberOfLines={1} testID={par ? 'parallel-group-name' : 'commentary-group-name'}>
                 {g.displayName}
               </Text>
-              <Text style={[s.tierTag, par ? s.tierParallel : g.core || g.isSource ? s.tierCore : null]} numberOfLines={1} testID={par ? 'parallel-tier' : 'commentary-tier'}>
-                {par ? '⇄ מקביל' : g.tier}
-              </Text>
+              {/* Only a different ROLE is badged (מקבילים / תרגומים / מקור); every commentator looks the same. */}
+              {par || g.kind === 'targum' || g.isSource ? (
+                <Text style={[s.tierTag, par ? s.tierParallel : s.tierRole]} numberOfLines={1} testID={par ? 'parallel-tier' : 'commentary-tier'}>
+                  {par ? '⇄ מקביל' : g.tier}
+                </Text>
+              ) : null}
               {(open || par) && g.block ? (
                 // A parallel work always shows WHICH unit it is (or סימן יב / פרק א / פרשת נח).
                 <Text style={s.inlineLabel} numberOfLines={1} testID={par ? 'parallel-block' : 'commentary-block'}>
@@ -437,14 +442,14 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                   onPress={() => onChip(g, 'tap')}
                   onLongPress={() => onChip(g, 'longpress')}
                   delayLongPress={450}
-                  style={[s.pill, par ? s.pillParallel : g.core || g.isSource ? s.pillCore : null, on && s.pillOn]}
+                  style={[s.pill, par ? s.pillParallel : null, on && s.pillOn]}
                   accessibilityRole="button"
                   aria-pressed={on}
                   accessibilityState={{ selected: on }}
                   accessibilityLabel={par ? `${g.displayName} (ספר מקביל, ${blockLabel(g)}): הקשה להצגה` : `${g.displayName}: הקשה למפרש בודד, לחיצה ארוכה להוספה לבחירה`}
                   testID={par ? 'commentary-chip-parallel' : 'commentary-chip'}
                 >
-                  <Text style={[s.pillText, par ? s.pillTextParallel : g.core || g.isSource ? s.pillTextCore : null, on && s.pillTextOn]} numberOfLines={1}>
+                  <Text style={[s.pillText, par ? s.pillTextParallel : null, on && s.pillTextOn]} numberOfLines={1}>
                     {g.pinned ? '★ ' : ''}
                     {par ? '⇄ ' : ''}
                     {g.displayName}
@@ -742,7 +747,7 @@ const createStyles = (c: Palette) =>
       paddingHorizontal: 6,
       paddingVertical: 1,
     },
-    tierCore: { color: c.accent, borderColor: c.accent },
+    tierRole: { color: c.textMuted, borderColor: c.border },
     tierParallel: { color: c.accent, borderColor: c.accent, borderStyle: 'dashed' },
     groupCount: {
       minWidth: 22,
