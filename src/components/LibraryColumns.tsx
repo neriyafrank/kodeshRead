@@ -6,7 +6,7 @@
  *
  * A segmented switch at the top chooses the view:
  *   ספרי בסיס          sections -> sub-sections -> base books only. A book with commentaries has a
- *                      compact "מפרשים (N)" pill that jumps straight to its commentaries;
+ *                      just the book icon and its full title (no action pills);
  *   מפרשים לפי ספר     the base books that have commentaries (same sections); selecting one opens
  *                      all of its commentaries together (ראשונים / אחרונים / תרגומים alike) in
  *                      canonical rank order (רש"י, תוספות, רמב"ן, ...). "מפרשים כלליים" lists the
@@ -141,17 +141,6 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
     [path, setPath],
   );
 
-  // "מפרשים (N)": jump to the commentaries of that base book.
-  const showCommentaries = useCallback(
-    (bookId: number) => {
-      const p = commPaths.get('book:' + bookId);
-      if (!p) return;
-      setFilter('');
-      showCatalog('comm', p);
-    },
-    [commPaths, showCatalog],
-  );
-
   // Reveal the newest (leftmost) column, keeping its parent visible on its right.
   useEffect(() => {
     const t = setTimeout(() => scrollRef.current?.scrollTo({ x: 0, animated: true }), 30);
@@ -231,18 +220,7 @@ export function LibraryColumns({ onOpenBook, header, emptyText }: Props) {
               </Text>
               {where ? <Text style={s.where} numberOfLines={1}>{where}</Text> : null}
             </View>
-            {n.role === 'parallel' ? (
-              // A standalone work of a parallel family (טור / שו"ע, משנה / בבלי, חומש / מדרש רבה ...): never nested.
-              <Text style={s.parallelTag} numberOfLines={1} accessibilityLabel="ספר מקביל" testID={`tree-parallel-${bookId}`}>
-                ⇄ מקביל
-              </Text>
-            ) : null}
           </Pressable>
-          {cc > 0 ? (
-            <Pressable onPress={() => showCommentaries(bookId)} hitSlop={4} style={({ pressed }) => [s.pill, pressed && s.pressed]} accessibilityRole="button" accessibilityLabel={`מפרשים על ${n.title}`} testID={`tree-comm-${bookId}`}>
-              <Text style={s.pillText}>{`מפרשים (${cc})`}</Text>
-            </Pressable>
-          ) : null}
         </View>
       );
     }
@@ -439,11 +417,8 @@ const createStyles = (c: Palette) =>
     chevron: { fontSize: 18, color: c.textMuted, width: 12, textAlign: 'center' },
     bookTitle: { fontSize: 16, color: c.text, ...alignRight },
     where: { fontSize: 11, color: c.textMuted, ...alignRight },
-    pill: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, borderWidth: 1, borderColor: c.accent, backgroundColor: c.accentSoft },
-    pillText: { fontSize: 11, fontWeight: '700', color: c.accent, ...alignRight },
     tier: { fontSize: 10, color: c.textMuted, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, paddingHorizontal: 6, paddingVertical: 1 },
     tierCore: { color: c.accent, borderColor: c.accent },
-    parallelTag: { fontSize: 10, color: c.textMuted, borderRadius: 999, borderWidth: 1, borderStyle: 'dashed', borderColor: c.border, paddingHorizontal: 6, paddingVertical: 1, marginStart: 4 },
     emptyCol: { padding: spacing.lg, color: c.textMuted, fontSize: 13, textAlign: 'center' },
     empty: { textAlign: 'center', color: c.textMuted, marginTop: spacing.xl },
     crumbBar: { flexGrow: 0, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },

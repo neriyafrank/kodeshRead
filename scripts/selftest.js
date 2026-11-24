@@ -2071,7 +2071,8 @@ async function libraryCatalogTests() {
   await check('UI wiring: Library + ScopeSheet render from the catalog, RTL, with the segmented toggle, multi-select and chips', () => {
     const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
     const lib = read('src/components/LibraryColumns.tsx');
-    for (const id of ['library-mode-', 'library-filter', 'tree-comm-', 'ספרי בסיס', 'מפרשים לפי ספר', 'מפרשים (']) assert.ok(lib.includes(id), id);
+    for (const id of ['library-mode-', 'library-filter', 'ספרי בסיס', 'מפרשים לפי ספר']) assert.ok(lib.includes(id), id);
+    for (const id of ['tree-comm-', 'tree-parallel-', 'מפרשים (', '⇄ מקביל', 'showCommentaries']) assert.ok(!lib.includes(id), `book rows have no action pills: ${id}`);
     assert.ok(lib.includes('useLibraryCatalog') && !lib.includes('loadCatalog('));
     assert.ok(/\.\.\.inputAlignRight/.test(lib) && /\.\.\.alignRight/.test(lib));
     const sheet = read('src/components/search/ScopeSheet.tsx');
@@ -7106,8 +7107,6 @@ async function parallelWorksTests() {
     assert.ok(!/(paddingLeft|paddingRight|marginLeft|marginRight)/.test(pane), 'RTL-safe styles');
     const reader = fs.readFileSync(path.join(ROOT, 'src/components/reader/BookReader.tsx'), 'utf8');
     assert.ok(reader.includes('parallelMember(adapter, bookId)') && reader.includes('parallelRef.current && !row.is_heading'), 'a parallel-only book opens the drawer');
-    const cols = fs.readFileSync(path.join(ROOT, 'src/components/LibraryColumns.tsx'), 'utf8');
-    assert.ok(cols.includes("n.role === 'parallel'") && cols.includes('tree-parallel-') && cols.includes('⇄ מקביל'));
   });
   await check('CI scripts stay zero-node_modules: audit-parallels / export-starter-packs / build-db / cloud-release and the new shared modules need Node built-ins only', () => {
     const guard = `const M=require('module');const o=M._resolveFilename;M._resolveFilename=function(r,...a){` +
