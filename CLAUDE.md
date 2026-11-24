@@ -38,6 +38,13 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > (`libraryStore.starterOpen`, `kodeshread.librarySettings`). With personal books the tree stays visible and takes the freed room.
 > Self-tested (`home layout:` checks), `e2e:library`.
 
+> **Daily-study location & reader margins:** ארץ ישראל / חו"ל is no longer a setting or a chip: `dailyLearning.detectIl()` reads the device
+> time zone (`Asia/Jerusalem` = Israel, any other zone = Diaspora, unreadable = Israel; `globalThis.__KODESHREAD_TZ__` overrides it in e2e;
+> `dailyLearningNav.deviceIsIsrael`). In `BookReader.tsx` the verse / seif / halacha margin letter lives in a gutter that runs from the
+> screen edge to the text start (`EDGE_INSET`; the verse row spans the full width with a symmetric negative margin + a trailing spacer, so
+> it needs no start/end margins), exactly one line high (`lineHeightPx`) with the letter centred both ways. The per-paragraph circular
+> commentary-count badge is gone (tapping a linked paragraph still opens the drawer). Self-tested, `e2e:reader` / `e2e:library`.
+
 > **Scan safety (Android SAF):** `shared/pipeline.js` `scanPhase` never scans a folder twice (canonical, decoded URI in a visited
 > set seeded from `import_queue`), stops descending at depth 12 (`MAX_SCAN_DEPTH`), skips hidden (`.x`) / `Android` folders, and a
 > name with a file extension is a FILE even when the provider reports a Directory (`indexer.looksLikeFileName`, URL-decoded; in

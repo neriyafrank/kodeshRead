@@ -3,7 +3,7 @@
  * resolution: src/services/dailyLearningNav.ts). The reader's TOC drawer deliberately has none:
  * it navigates the current book only.
  *
- *   DailyLearningList     today's Hebrew date, the ארץ ישראל / חו"ל switch and one row per study
+ *   DailyLearningList     today's Hebrew date and one row per study
  *                         cycle (פרשת השבוע + today's aliyah, דף היומי, משנה יומית, רמב"ם 1 / 3
  *                         פרקים); a tap opens the exact place in a tab. Books missing from the
  *                         library are listed greyed out ("לא נמצא בספרייה").
@@ -29,35 +29,10 @@ export function DailyLearningList({ onOpen, onMissing }: { onOpen: (t: ResolvedT
         <Text style={s.hebrewDate} testID="daily-hebrew-date">
           {schedule.hebrewDate}
         </Text>
-        <LocationSwitch />
       </View>
       {schedule.items.map((it) => (
         <ItemRow key={it.key} item={it} onOpen={onOpen} onMissing={onMissing} />
       ))}
-    </View>
-  );
-}
-
-function LocationSwitch() {
-  const s = useThemedStyles(createStyles);
-  const il = useLearning((x) => x.il);
-  const setIl = useLearning((x) => x.setIl);
-  const opt = (value: boolean, label: string, id: string) => (
-    <Pressable
-      onPress={() => setIl(value)}
-      style={[s.segment, il === value && s.segmentOn]}
-      accessibilityRole="radio"
-      aria-checked={il === value}
-      accessibilityState={{ selected: il === value }}
-      testID={id}
-    >
-      <Text style={[s.segmentText, il === value && s.segmentTextOn]}>{label}</Text>
-    </Pressable>
-  );
-  return (
-    <View style={s.segments} accessibilityRole="radiogroup" accessibilityLabel="מיקום ללוח הפרשות">
-      {opt(true, 'ארץ ישראל', 'daily-loc-il')}
-      {opt(false, 'חו"ל', 'daily-loc-diaspora')}
     </View>
   );
 }
@@ -138,11 +113,6 @@ const createStyles = (c: Palette) =>
     muted: { color: c.textMuted, fontSize: 13, padding: spacing.sm, ...alignRight },
     metaRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.xs, paddingVertical: 4 },
     hebrewDate: { flexShrink: 1, fontSize: 14, fontWeight: '700', color: c.text, ...alignRight },
-    segments: { flexDirection: 'row', borderRadius: radius.sm, borderWidth: StyleSheet.hairlineWidth, borderColor: c.border, overflow: 'hidden' },
-    segment: { paddingHorizontal: spacing.sm, paddingVertical: 3, backgroundColor: c.surface },
-    segmentOn: { backgroundColor: c.accent },
-    segmentText: { fontSize: 12, color: c.textMuted, fontWeight: '600' },
-    segmentTextOn: { color: c.surface },
     item: {
       alignItems: 'stretch',
       paddingHorizontal: spacing.md,

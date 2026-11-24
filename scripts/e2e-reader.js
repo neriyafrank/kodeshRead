@@ -518,6 +518,9 @@ try {
         const num = top(`[data-testid="verse-num-${first.dataset.testid.slice('verse-text-'.length)}"]`);
         const nb = num.getBoundingClientRect();
         const tb = first.getBoundingClientRect();
+        const gutter = top(`[data-testid="verse-gutter-${first.dataset.testid.slice('verse-text-'.length)}"]`).getBoundingClientRect();
+        const lb = list.getBoundingClientRect();
+        const ncx = nb.left + nb.width / 2;
         return {
           family: cs.fontFamily,
           fontSize,
@@ -532,6 +535,15 @@ try {
           numSize: parseFloat(getComputedStyle(num).fontSize),
           // Verse number vertically centred on the first text line.
           numOffset: Math.abs(nb.top + nb.height / 2 - (tb.top + lineHeight / 2)),
+          // Gutter = screen's right edge -> start of the text; the letter is centred in it both ways.
+          gutterHeight: gutter.height,
+          gutterOffset: Math.abs(gutter.top + gutter.height / 2 - (tb.top + lineHeight / 2)),
+          gapEdge: lb.right - (nb.left + nb.width),
+          gapText: nb.left - tb.right,
+          centreOffset: Math.abs(ncx - (lb.right + tb.right) / 2),
+          gutterEdgeFlush: Math.abs(gutter.right - lb.right),
+          rects: JSON.stringify({ list: [lb.left, lb.right], gutter: [gutter.left, gutter.right, gutter.width], num: [nb.left, nb.right], text: [tb.left, tb.right] }),
+          badges: document.querySelectorAll('[data-testid^="links-badge-"]').length,
           fontLoaded: document.fonts.check(`${cs.fontSize} "TaameyFrankCLM-Medium"`),
           faces: [...document.fonts].filter((f) => /TaameyFrank/.test(f.family)).map((f) => `${f.family}:${f.status}`),
         };
@@ -551,6 +563,15 @@ try {
     assert.ok(vm.numRightOfText, 'verse number in the right margin');
     assert.ok(vm.numSize < vm.fontSize * 0.7 && vm.numColor !== vm.textColor, `verse number subtle (${vm.numSize}px, ${vm.numColor})`);
     assert.ok(vm.numOffset <= 3, `verse number centred on the first line (${vm.numOffset.toFixed(1)}px)`);
+    const marginLetterOk = (m, label) => {
+      assert.strictEqual(m.gutterHeight, m.lineHeight, `${label}: the gutter is exactly one line high (${m.gutterHeight} vs ${m.lineHeight})`);
+      assert.ok(m.gutterOffset <= 1 && m.numOffset <= 2.5, `${label}: letter vertically centred on the first line (${m.gutterOffset.toFixed(1)} / ${m.numOffset.toFixed(1)}px)`);
+      assert.ok(m.centreOffset <= 2.5, `${label}: letter centred between the right screen edge and the text start (${m.centreOffset.toFixed(1)}px; gaps ${m.gapEdge.toFixed(1)} / ${m.gapText.toFixed(1)}) ${m.rects}`);
+      assert.ok(Math.abs(m.gapEdge - m.gapText) <= 4 && m.gapEdge > 4, `${label}: equal breathing room each side (${m.gapEdge.toFixed(1)} vs ${m.gapText.toFixed(1)})`);
+      assert.ok(m.gutterEdgeFlush <= 1.5, `${label}: the gutter starts at the screen edge (${m.gutterEdgeFlush})`);
+      assert.strictEqual(m.badges, 0, `${label}: no commentary count badge in the margins`);
+    };
+    marginLetterOk(vm, 'light, default size');
     assert.ok(!(await tid('verse-text-3').innerText()).includes('(א)'), 'the text no longer repeats "(א)"');
     if (await page.locator('[data-testid="commentary-pane"]').count()) await tid('commentary-close').click();
     await page.waitForTimeout(2300); // the jump-target glow fades out
@@ -598,6 +619,34 @@ try {
     await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
     vm = await verseMetrics();
     assert.ok(vm.ink < vm.lineHeight, 'dark: no collisions');
+    marginLetterOk(vm, 'dark, default size');
+    await shot('tanach-dark');
+    // Large font in both themes: the margin letter keeps both centrings (the gutter scales with the font / leading).
+    const savedSize = (await appearance()).state.fontSize;
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate(([t]) => {
+        const a = JSON.parse(localStorage.getItem('kodeshread.appearance'));
+        a.state.fontSize = 34;
+        a.state.theme = t;
+        localStorage.setItem('kodeshread.appearance', JSON.stringify(a));
+      }, [theme]);
+      await page.reload({ timeout: 180000 });
+      await tid('verse-num-3').waitFor({ timeout: 180000 });
+      await page.evaluate(() => document.fonts.ready);
+      const big = await verseMetrics();
+      assert.strictEqual(big.fontSize, 34);
+      marginLetterOk(big, `${theme}, large font`);
+      await shot(`tanach-large-${theme}`);
+    }
+    await page.evaluate((size) => {
+      const a = JSON.parse(localStorage.getItem('kodeshread.appearance'));
+      a.state.fontSize = size;
+      a.state.theme = 'dark';
+      localStorage.setItem('kodeshread.appearance', JSON.stringify(a));
+    }, savedSize);
+    await page.reload({ timeout: 180000 });
+    await tid('verse-num-3').waitFor({ timeout: 180000 });
+    step('margin letter: vertically centred on the first line and centred in the right gutter (light / dark, default / large font); no count badge');
     await shot('tanach-dark');
     // The theme reaches the commentary drawer (active verse in slate / indigo), the TOC and the library.
     await tid('para-3').click();

@@ -86,10 +86,9 @@ try {
     // Badges: line 3 (paragraph 1, מתני' יציאות השבת) has 2x רש"י + תוספות line links + the רש"י
     // "שורה א" unit; line 4 has none; the amud heading (line 2) carries only תוספות' amud-level unit
     // (the sample רש"י is aligned per paragraph: "שורה N" = the N-th paragraph of the amud).
-    assert.strictEqual((await tid('links-badge-3').innerText()).trim(), '4');
-    assert.strictEqual(await tid('links-badge-4').count(), 0);
-    assert.strictEqual((await tid('links-badge-2').innerText()).trim(), '1');
-    await shot('1-badges');
+    // The count circles are gone from the margins; the paragraph still opens the drawer on a tap (checked right below).
+    assert.strictEqual(await page.locator('[data-testid^="links-badge-"]').count(), 0, 'no per-paragraph commentary count badge');
+    await shot('1-no-badges');
     step('link-count badges');
 
     // A paragraph without a link badge: the Bavli is a parallel work (משנה / ירושלמי / תוספתא ...), so the
@@ -312,7 +311,8 @@ try {
     await lp_hold(paraEntries.first());
     await rawTid('copy-open-in-book').click();
     await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('רש"י על שבת'));
-    await tid('links-badge-7').waitFor();
+    await tid('para-7').waitFor();
+    assert.strictEqual(await page.locator('[data-testid^="links-badge-"]').count(), 0, 'no count badge here either');
     await shot('4-opened');
     const tabs = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.map((t) => t.bookTitle));
     assert.deepStrictEqual(tabs, ['שבת', 'רש"י על שבת']);

@@ -10,15 +10,24 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { computeDailyLearning, resolveDailyLearning, type ResolvedSchedule, type ResolvedTarget } from '../../shared/dailyLearning';
+import { computeDailyLearning, detectIl, resolveDailyLearning, type ResolvedSchedule, type ResolvedTarget } from '../../shared/dailyLearning';
 import type { LibraryDb } from '../../shared/sources';
 import { useLibrary } from '../db/LibraryContext';
-import { useLearning } from '../state/learningStore';
 import { useTabs } from '../state/tabsStore';
 
 declare global {
   // e2e / QA only: pins "today" ("YYYY-MM-DD") so the schedule is deterministic.
   var __KODESHREAD_TODAY__: string | undefined;
+  // e2e / QA only: pretends the device is in this IANA time zone ("Asia/Jerusalem" = ארץ ישראל, anything else = חו"ל).
+  var __KODESHREAD_TZ__: string | undefined;
+}
+
+/**
+ * ארץ ישראל or חו"ל, decided by the device's time zone (Asia/Jerusalem = Israel, else the Diaspora; Israel when the
+ * zone cannot be read). There is no switch in the UI: it only changes the weekly parsha on some weeks of the year.
+ */
+export function deviceIsIsrael(): boolean {
+  return detectIl(typeof globalThis.__KODESHREAD_TZ__ === 'string' ? globalThis.__KODESHREAD_TZ__ : undefined);
 }
 
 /** Today's local civil date (midnight). */
@@ -66,7 +75,7 @@ export function loadDailyLearning(db: LibraryDb, generation: number, date: Date,
 
 export function useDailyLearning(): { schedule: ResolvedSchedule | null; error: string | null } {
   const { adapter, generation } = useLibrary();
-  const il = useLearning((s) => s.il);
+  const il = deviceIsIsrael();
   const day = useToday();
   const [state, setState] = useState<{ key: string; schedule: ResolvedSchedule | null; error: string | null }>({ key: '', schedule: null, error: null });
   const key = `${generation}|${dateKey(day)}|${il}`;

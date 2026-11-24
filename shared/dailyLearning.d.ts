@@ -63,6 +63,8 @@ export interface ResolvedSchedule extends Omit<LearningSchedule, 'items'> {
   items: ResolvedItem[];
 }
 
+export function isIsraelTimeZone(tz: string | null | undefined): boolean;
+export function detectIl(tz?: string | null): boolean;
 export const BAVLI: Record<string, [string, string, string?]>;
 export const MISHNA: Record<string, [number, string]>;
 export const RAMBAM: Record<string, [string, string]>;

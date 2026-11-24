@@ -52,13 +52,16 @@ try {
 
 (async () => {
   const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 400, height: 820 }, deviceScaleFactor: SHOTS ? 2 : 1 });
+  // timezoneId: the daily-study location is auto-detected from the device zone (a device in Israel -> ארץ ישראל).
+  const page = await browser.newPage({ viewport: { width: 400, height: 820 }, deviceScaleFactor: SHOTS ? 2 : 1, timezoneId: 'Asia/Jerusalem' });
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('dialog', (d) => d.accept());
   await page.addInitScript(() => {
     globalThis.__KODESHREAD_TODAY__ = '2026-05-25';
     globalThis.__KODESHREAD_E2E_CLOUD__ = true;
+    const tz = sessionStorage.getItem('e2e.tz');
+    if (tz) globalThis.__KODESHREAD_TZ__ = tz;
     const free = Number(sessionStorage.getItem('e2e.freeBytes'));
     if (free) globalThis.__KODESHREAD_FREE_BYTES__ = free;
   });
@@ -401,7 +404,7 @@ try {
     await tid('para-3').waitFor({ timeout: 20000 });
     assert.ok(starterRequests.includes('starter-genesis.json.gz'));
     assert.ok((await tid('para-3').innerText()).length > 5, 'verse text rendered from the starter database');
-    await tid('links-badge-3').waitFor();
+    assert.strictEqual(await page.locator('[data-testid^="links-badge-"]').count(), 0, 'no count badge');
     await tid('para-3').click();
     await tid('commentary-group').first().waitFor({ timeout: 10000 });
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
@@ -784,7 +787,10 @@ try {
     await last('daily-item-parasha').waitFor();
     await page.waitForTimeout(300);
     assert.strictEqual((await last('daily-hebrew-date').innerText()).trim(), 'ט\' בסיון תשפ"ו');
-    assert.strictEqual(await last('daily-loc-il').getAttribute('aria-checked'), 'true', 'ארץ ישראל by default');
+    // No ארץ ישראל / חו"ל switch any more: the device time zone decides (this run: Asia/Jerusalem -> ארץ ישראל).
+    assert.strictEqual(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone), 'Asia/Jerusalem');
+    for (const id of ['daily-loc-il', 'daily-loc-diaspora']) assert.strictEqual(await tid(id).count(), 0, `${id} is gone`);
+    assert.ok(!(await last('library-daily').innerText()).includes('חו"ל') && !(await last('library-daily').innerText()).includes('ארץ ישראל'), 'no location chips in the bar');
     assert.strictEqual((await last('daily-title-parasha').innerText()).trim(), 'בהעלותך · שני');
     assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ח\' ט"ו'), 'בהעלותך שני = במדבר ח טו');
     for (const key of ['dafYomi', 'mishna', 'rambam1', 'rambam3']) {
@@ -800,24 +806,28 @@ try {
     );
     assert.ok(align.every((a) => a.align === 'right' && a.gap <= 2), `right-aligned: ${JSON.stringify(align)}`);
     await shot('daily-library');
-    // חו"ל: the Diaspora read Shavuot on Shabbat, so this week is still נשא.
-    await last('daily-loc-diaspora').click();
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop().innerText.trim() === 'נשא · שני');
-    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ד\' ל"ח'));
-    assert.strictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.il), false, 'location persisted');
-    await page.reload();
-    await last('daily-item-parasha').waitFor({ timeout: 60000 });
+    // A device outside Israel is the Diaspora (it read Shavuot on Shabbat, so this week is still נשא); an unknown zone falls back to Israel.
+    const withZone = async (tz) => {
+      await page.evaluate((z) => (z ? sessionStorage.setItem('e2e.tz', z) : sessionStorage.removeItem('e2e.tz')), tz);
+      await page.reload();
+      await last('daily-item-parasha').waitFor({ timeout: 60000 });
+    };
+    await withZone('America/New_York');
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop()?.innerText.trim() === 'נשא · שני');
-    assert.strictEqual(await last('daily-loc-diaspora').getAttribute('aria-checked'), 'true', 'חו"ל restored after reload (card stays open)');
+    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ד\' ל"ח'));
+    assert.strictEqual(await page.evaluate(() => 'il' in (JSON.parse(localStorage.getItem('kodeshread.learning'))?.state ?? {})), false, 'no stored location preference');
+    await withZone('Asia/Jerusalem');
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop()?.innerText.trim() === 'בהעלותך · שני');
+    // (An unreadable zone falls back to Israel: covered in `npm test`.) The tap below runs on the Diaspora parsha.
+    await withZone('America/New_York');
     await last('daily-item-parasha').click();
     await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק ד'), null, { timeout: 20000 });
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid^="aliyah-divider-"]')].some((e) => e.innerText.trim() === 'שני' && e.getBoundingClientRect().height > 0));
     await shot('daily-opened');
     await last('reader-back').click();
-    await last('daily-loc-il').click();
+    await page.evaluate(() => sessionStorage.removeItem('e2e.tz'));
     await last('library-daily-toggle').click();
-    await page.waitForFunction(() => JSON.parse(localStorage.getItem('kodeshread.learning')).state.il === true);
-    step('לימוד יומי bar: ט\' בסיון תשפ"ו, ארץ ישראל בהעלותך / חו"ל נשא (persisted), missing books greyed, tap opens the aliyah');
+    step('לימוד יומי bar: no location switch; the device time zone picks the parsha (Asia/Jerusalem בהעלותך, elsewhere נשא; unknown -> Israel), missing books greyed, tap opens the aliyah');
 
     assert.deepStrictEqual(errors, [], 'no page errors');
     console.log('\ne2e library manager: all passed');

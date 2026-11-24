@@ -12,9 +12,9 @@
  * - Typography (shared/typography.js): the line height grows with the visible marks (niqqud /
  *   te'amim) so stacked marks never touch the neighbouring lines, Android keeps the font
  *   padding, and leading verse / seif numbers "(א)" sit in a subtle margin column.
- * - Paragraphs with entries in `links` carry a small count badge (counts are fetched
- *   with each window chunk). Tapping such a paragraph opens the commentary drawer,
- *   docked under the text as a resizable split view and synchronized to it.
+ * - Paragraphs with entries in `links` open the commentary drawer when tapped (counts are fetched
+ *   with each window chunk; there is no count badge), docked under the text as a resizable split
+ *   view and synchronized to it.
  * - Chumash books (בראשית..דברים) get subtle centered parsha / aliyah dividers above the verse
  *   each one starts at (shared/torahParshiot.js). They are drawn outside the paragraph rows'
  *   press targets and change no stored line, index or link.
@@ -718,28 +718,31 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
       <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: glow }]} />
       {verse ? (
         <View style={styles.verseRow}>
-          {/* Same line box as the text, so the number sits centred on the verse's first line. */}
-          <Text
-            style={[styles.verseNum, { width: verseGutterWidth(size), fontSize: Math.max(11, Math.round(size * 0.58)), lineHeight: lineHeightPx, color: c.verseNumber }]}
-            accessibilityLabel={`פסוק ${verse}`}
-            testID={`verse-num-${row.line_index}`}
+          {/*
+            The marker gutter spans from the screen's edge (the row reaches back over the list + row padding) to the
+            start of the text, and the letter is centred in it both ways: horizontally between the edge and the
+            text, vertically on the first line (the box is exactly one line high at the current font size /
+            line height, so it follows every setting).
+          */}
+          <View
+            style={[styles.verseGutter, { width: EDGE_INSET + verseGutterWidth(size), height: lineHeightPx }]}
+            testID={`verse-gutter-${row.line_index}`}
           >
-            {verse}
-          </Text>
+            <Text
+              style={[styles.verseNum, { fontSize: Math.max(11, Math.round(size * 0.58)), lineHeight: Math.ceil(size * 0.58 * 1.25), color: c.verseNumber }]}
+              accessibilityLabel={`פסוק ${verse}`}
+              testID={`verse-num-${row.line_index}`}
+            >
+              {verse}
+            </Text>
+          </View>
           {text}
+          {/* Gives the end edge back the inset the row spans (order-based, so it is the same in LTR preview and RTL native). */}
+          <View style={{ width: EDGE_INSET }} />
         </View>
       ) : (
         text
       )}
-      {links ? (
-        <View
-          pointerEvents="none"
-          style={[styles.badge, { backgroundColor: selected ? c.accent : c.accentSoft, borderColor: c.border }]}
-          testID={`links-badge-${row.line_index}`}
-        >
-          <Text style={[styles.badgeText, { color: selected ? c.surface : c.accent }]}>{links > 99 ? '99+' : links}</Text>
-        </View>
-      ) : null}
     </Pressable>
   );
   if (!divider) return body;
@@ -751,6 +754,9 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
   );
 });
 
+/** Screen edge -> paragraph box: list padding + row padding (the verse-marker gutter starts at the edge). */
+const EDGE_INSET = spacing.md + spacing.sm;
+
 const styles = StyleSheet.create({
   root: { flex: 1 },
   textArea: { flex: 1 },
@@ -761,26 +767,15 @@ const styles = StyleSheet.create({
   row: { paddingVertical: 6, paddingHorizontal: spacing.sm },
   glow: { position: 'absolute', top: 0, bottom: 0, start: 0, end: 0, borderRadius: 6 },
   selectedBar: { position: 'absolute', top: 4, bottom: 4, start: -spacing.sm, width: 3, borderRadius: 2 },
-  // Sits in the end-side gutter (content + row padding) so text layout is unchanged.
-  badge: {
-    position: 'absolute',
-    top: 8,
-    end: -spacing.md + 1,
-    minWidth: 17,
-    height: 17,
-    paddingHorizontal: 3,
-    borderRadius: 9,
-    borderWidth: StyleSheet.hairlineWidth,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badgeText: { fontSize: 10, fontWeight: '700', lineHeight: 13 },
   // Android: keep the font's ascent / descent padding so te'amim above the first line and below
   // the last one are never clipped by the text view.
   text: { writingDirection: 'rtl', textAlign: 'justify', includeFontPadding: true },
-  verseRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  // Spans the full screen width (symmetric negative margin = the list + row padding, direction-independent), so the margin letter's
+  // gutter starts at the screen edge; the trailing spacer restores the same inset on the other side of the text.
+  verseRow: { flexDirection: 'row', alignItems: 'flex-start', marginHorizontal: -EDGE_INSET },
   verseText: { flex: 1, minWidth: 0 },
   // Start-side (right) margin: small, muted sans-serif digits-as-letters, like a printed Chumash.
+  verseGutter: { alignItems: 'center', justifyContent: 'center' },
   verseNum: { textAlign: 'center', fontWeight: '600', includeFontPadding: false, fontVariant: ['tabular-nums'] },
   message: { textAlign: 'center', marginTop: spacing.xl, fontSize: 16 },
   // Parsha / aliyah dividers: centered, hairline rules, no effect on the verse rows below.

@@ -781,6 +781,7 @@ async function main() {
   await copyFormatTests();
   await scanSafetyTests();
   await homeLayoutTests();
+  await marginLetterTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -6100,6 +6101,34 @@ async function torahStudyTests() {
     const di = dl.computeDailyLearning(new Date(2026, 4, 25), { il: false }).items[0];
     assert.deepStrictEqual([il.targets[0].loc, di.targets[0].loc], [{ kind: 'verse', chapter: 8, verse: 15 }, { kind: 'verse', chapter: 4, verse: 38 }]);
     assert.strictEqual(dl.computeDailyLearning(new Date(2026, 4, 25)).il, true, 'ארץ ישראל by default');
+    // The location comes from the device time zone (no switch in the UI): Asia/Jerusalem = Israel, anything else = Diaspora,
+    // an unknown / unreadable zone = Israel.
+    assert.strictEqual(dl.isIsraelTimeZone('Asia/Jerusalem'), true);
+    for (const tz of ['America/New_York', 'Europe/London', 'UTC', 'Asia/Dubai', 'Australia/Sydney', 'America/Argentina/Buenos_Aires']) assert.strictEqual(dl.isIsraelTimeZone(tz), false, tz);
+    for (const tz of [undefined, null, '', 5]) assert.strictEqual(dl.isIsraelTimeZone(tz), true, `fallback: ${String(tz)}`);
+    assert.strictEqual(dl.detectIl('Asia/Jerusalem'), true);
+    assert.strictEqual(dl.detectIl('America/New_York'), false);
+    assert.strictEqual(dl.detectIl(null), true, 'detection unavailable -> Israel');
+    assert.strictEqual(typeof dl.detectIl(), 'boolean', 'the real Intl lookup works');
+    {
+      const real = Intl.DateTimeFormat;
+      try {
+        Intl.DateTimeFormat = function () { throw new Error('no Intl'); };
+        assert.strictEqual(dl.detectIl(), true, 'Intl throws -> Israel');
+        Intl.DateTimeFormat = function () { return { resolvedOptions: () => ({}) }; };
+        assert.strictEqual(dl.detectIl(), true, 'no timeZone reported -> Israel');
+        Intl.DateTimeFormat = function () { return { resolvedOptions: () => ({ timeZone: 'America/Chicago' }) }; };
+        assert.strictEqual(dl.detectIl(), false, 'device zone read from Intl');
+      } finally {
+        Intl.DateTimeFormat = real;
+      }
+    }
+    const learningSrc = fs.readFileSync(path.join(ROOT, 'src/state/learningStore.ts'), 'utf8');
+    const dailySrc = fs.readFileSync(path.join(ROOT, 'src/components/learning/DailyLearning.tsx'), 'utf8');
+    const navSrc = fs.readFileSync(path.join(ROOT, 'src/services/dailyLearningNav.ts'), 'utf8');
+    assert.ok(!/\bil\b|setIl/.test(learningSrc), 'no stored ארץ ישראל / חו"ל preference');
+    assert.ok(!/LocationSwitch|daily-loc|ארץ ישראל|חו"ל/.test(dailySrc.replace(/\/\*[\s\S]*?\*\//g, '')), 'no switch in the Daily Study bar');
+    assert.ok(navSrc.includes('deviceIsIsrael') && navSrc.includes('detectIl'), 'location detected from the device time zone');
     // ויקהל-פקודי (5786): both parshiot's aliyah of the day.
     const vp = dl.computeDailyLearning(new Date(2026, 2, 10), { il: true }).items[0];
     assert.strictEqual(vp.title, 'ויקהל-פקודי · שלישי');
@@ -6502,6 +6531,19 @@ async function scanSafetyTests() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** Reader margin letter (verse / seif / halacha marker) alignment and the removed count badge. */
+async function marginLetterTests() {
+  const src = fs.readFileSync(path.join(ROOT, 'src/components/reader/BookReader.tsx'), 'utf8');
+  await check('reader: the margin letter sits in a full-width gutter, one line high, centred both ways; no commentary count badge', () => {
+    assert.ok(src.includes('EDGE_INSET = spacing.md + spacing.sm') && /verseRow: \{[^}]*marginHorizontal: -EDGE_INSET/.test(src) && !src.includes('marginStart: -EDGE_INSET'), 'the gutter reaches back to the screen edge (symmetric margin, no start/end quirks)');
+    assert.ok(/width: EDGE_INSET \+ verseGutterWidth\(size\), height: lineHeightPx/.test(src), 'edge -> text start, exactly one line high');
+    assert.ok(/verseGutter: \{ alignItems: 'center', justifyContent: 'center' \}/.test(src), 'centred horizontally and vertically');
+    assert.ok(/verseNum: \{ textAlign: 'center'[^}]*includeFontPadding: false/.test(src));
+    assert.ok(!src.includes('links-badge') && !/styles\.badge|badgeText|badge: \{/.test(src), 'the circular count badge is gone');
+    assert.ok(src.includes('accessibilityHint={links ?'), 'tapping a linked paragraph still opens the drawer (count kept for accessibility)');
+  });
 }
 
 /** Library (home) screen: the daily bar is always there, the starter section collapses, personal books stay. */

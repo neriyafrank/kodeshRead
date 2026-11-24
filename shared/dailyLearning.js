@@ -488,7 +488,31 @@ async function resolveDailyLearning(db, schedule) {
   return { ...schedule, items };
 }
 
+/**
+ * ארץ ישראל or חו"ל for the weekly parsha, from an IANA time zone: Asia/Jerusalem (and its old aliases) = Israel,
+ * any other zone = the Diaspora; no zone (unknown / detection unavailable) = Israel.
+ */
+function isIsraelTimeZone(tz) {
+  if (!tz || typeof tz !== 'string') return true;
+  return tz === 'Asia/Jerusalem' || tz === 'Asia/Tel_Aviv' || tz === 'Israel';
+}
+
+/** Detects `il` from the device's time zone (`tz` overrides it, for tests; `null` = unavailable). */
+function detectIl(tz) {
+  let zone = tz;
+  if (zone === undefined) {
+    try {
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      zone = null;
+    }
+  }
+  return isIsraelTimeZone(zone);
+}
+
 module.exports = {
+  isIsraelTimeZone,
+  detectIl,
   BAVLI,
   MISHNA,
   RAMBAM,
