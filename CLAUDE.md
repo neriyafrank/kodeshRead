@@ -62,7 +62,7 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > distinction (uniform cards and pills, no tier badge, no primary-only view): canonical order is the only priority signal; only
 > תרגומים / מקבילים / מקור are badged. The toolbar (sliders) button controls the commentator
 > chip strip + the name-filter row together: picking a commentator collapses both (reading space), the button reopens both, a
-> long-press multi-select keeps them open, הכל keeps the strip accessible; a `?` button explains the long-press.
+> long-press multi-select keeps them open, הכל keeps the strip accessible; a `?` button explains the long-press. The chip strip has no category buttons (no מפרשים / תרגומים / מקבילים pills): commentators, targumim and parallels are all plain chips in priority order.
 >
 > **Long-press paragraph toolbar (reader + commentary drawer):** `CopyToolbar.tsx` (`useCopyMode`: idle -> actions -> select,
 > `ParagraphToolbar`, `useCopyToast` = clipboard + `הועתק ללוח`) is used by `BookReader.tsx` and `CommentaryPane.tsx`. A long-press

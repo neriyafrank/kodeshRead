@@ -450,10 +450,15 @@ try {
     // Chip bar: הכל at the right edge, then the commentators in priority order; no extra buttons.
     await setTools(false);
     assert.deepStrictEqual(await chipTexts(), ['הכל', ...PRIORITY], 'chip bar: הכל + commentators right-to-left in priority order');
-    // + the kind pills (אונקלוס is a translation): מפרשים 7 · תרגומים 1, right after הכל (right-to-left).
-    const kinds = await page.locator('[data-testid^="commentary-kind-"]').evaluateAll((els) => els.map((e) => ({ t: e.innerText.trim(), x: e.getBoundingClientRect().x })));
-    assert.deepStrictEqual(kinds.sort((a, b) => b.x - a.x).map((k) => k.t), ['מפרשים 7', 'תרגומים 1']);
-    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 11, 'הכל + 2 kind pills + 8 commentators, no mode buttons');
+    // No category buttons (פרשנים / תרגומים / מקבילים) in the strip: אונקלוס is just another chip, directly selectable.
+    assert.strictEqual(await page.locator('[data-testid^="commentary-kind-"]').count(), 0, 'no kind filter buttons');
+    assert.ok(!(await tid('commentary-chipbar').innerText()).match(/מפרשים\s*\d|תרגומים\s*\d/), 'no "מפרשים 7" / "תרגומים 1" pills');
+    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 9, 'הכל + 8 commentators / targum chips, no mode or category buttons');
+    await tid('commentary-chip').filter({ hasText: 'אונקלוס' }).click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"], [data-testid="commentary-focus-row"]')].map((e) => (e.dataset.testid === 'commentary-focus-row' ? e.getAttribute('aria-label') : e.innerText)).join() === 'אונקלוס');
+    assert.deepStrictEqual(await tid('commentary-tier').allInnerTexts().catch(() => []), [], 'focus mode: no card header badge row');
+    await tid('commentary-chip-all').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 8);
     const allBox = await tid('commentary-chip-all').boundingBox();
     assert.ok(allBox.x + allBox.width <= 401 && allBox.x > 200, `הכל visible at the right edge (${allBox.x})`);
     const chip = (name) => {
@@ -720,20 +725,16 @@ try {
     assert.strictEqual(await tid('parallel-group-header').getAttribute('aria-expanded'), 'false', 'parallels start folded');
     assert.strictEqual(await tid('parallel-entry').count(), 0);
     assert.ok((await tid('commentary-title').innerText()).includes('מקבילים (1)'), await tid('commentary-title').innerText());
-    // Compact layout kept: 36px title bar, 28px chips (the parallel chip too), kind pills.
+    // Compact layout kept: 36px title bar, 28px chips (the parallel chip too).
     assert.ok(Math.abs((await tid('commentary-title').evaluate((e) => e.parentElement.getBoundingClientRect().height)) - 36) <= 1);
     assert.strictEqual(Math.round((await tid('commentary-chip-parallel').boundingBox()).height), 28);
     assert.strictEqual((await tid('commentary-chip-parallel').innerText()).trim(), '⇄ משנה');
-    assert.strictEqual((await tid('commentary-kind-commentary').innerText()).trim(), 'מפרשים 2');
-    assert.strictEqual((await tid('commentary-kind-parallel').innerText()).trim(), 'מקבילים 1');
-    // A kind pill isolates the parallel works, and back.
-    await tid('commentary-kind-parallel').click();
-    await page.waitForFunction(() => !document.querySelector('[data-testid="commentary-group"]'));
-    assert.strictEqual(await tid('parallel-group').count(), 1);
-    await tid('commentary-kind-parallel').click();
-    await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
+    // No category pills: the parallel work is one more chip (⇄), the commentators are chips too.
+    assert.strictEqual(await page.locator('[data-testid^="commentary-kind-"]').count(), 0, 'no מפרשים / מקבילים buttons');
+    assert.ok(!/מפרשים\s*\d|מקבילים\s*\d/.test(await tid('commentary-chipbar').innerText()));
+    assert.strictEqual(await tid('commentary-chipbar').locator('[data-testid^="commentary-"]').count(), 4, 'הכל + רש"י + תוספות + ⇄ משנה');
     await shot('11-parallel-section');
-    step('parallel works: מקבילים section + ⇄ chip + kind pills next to רש"י / תוספות (compact 36px / 28px layout)');
+    step('parallel works: מקבילים section + ⇄ chip (no category pills) next to רש"י / תוספות (compact 36px / 28px layout)');
 
     // Tapping the parallel chip shows the opening of משנה שבת פרק א with a prominent "פתח בספר ↗".
     await tid('commentary-chip-parallel').click();

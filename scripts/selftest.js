@@ -6906,7 +6906,9 @@ async function parallelWorksTests() {
   // ---- 4. UI wiring + CI scripts -----------------------------------------------------------------
   await check('UI wiring: the drawer separates מקבילים / תרגומים from מפרשים (kind pills, dashed parallel chips, section, prominent פתח בספר) in the compact layout', () => {
     const pane = fs.readFileSync(path.join(ROOT, 'src/components/reader/CommentaryPane.tsx'), 'utf8');
-    for (const id of ['findParallels', 'mergeParallelGroups', 'parallelGroups', 'commentary-kind-', 'commentary-chip-parallel', 'parallel-group', 'parallel-group-name', 'parallel-section', 'parallel-open', 'parallel-focus-row', 'parallel-block', 'מקבילים', 'ספרים עצמאיים']) assert.ok(pane.includes(id), id);
+    for (const id of ['findParallels', 'mergeParallelGroups', 'parallelGroups', 'commentary-chip-parallel', 'parallel-group', 'parallel-group-name', 'parallel-section', 'parallel-open', 'parallel-focus-row', 'parallel-block', 'מקבילים', 'ספרים עצמאיים']) assert.ok(pane.includes(id), id);
+    assert.ok(!pane.includes('commentary-kind-') && !pane.includes('KIND_LABELS') && !pane.includes('setKindFilter'), 'no פרשנים / תרגומים / מקבילים category buttons in the chip strip');
+    assert.ok(pane.includes("testID={par ? 'commentary-chip-parallel' : 'commentary-chip'}"), 'parallels and targumim are plain chips');
     assert.ok(/header: \{[^}]*height: 36/.test(pane), 'compact 36px title bar');
     assert.ok(/pill: \{[^}]*height: 28/.test(pane), '28px chips');
     assert.ok(/focusRow: \{[^}]*height: 28/.test(pane), 'ultra-slim focus row');

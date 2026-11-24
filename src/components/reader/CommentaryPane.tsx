@@ -14,10 +14,10 @@
  *  - only favorites + the top 3 open by default; the rest are one-line headers (the user's own
  *    open / close choices stick while moving between verses);
  *  - a sticky tools header: name filter that understands abbreviations ("מ"ב", "אב"ע", "תוס"),
- *    kind chips (הכל / מפרשים / תרגומים / מקבילים), open-all / collapse-all, and a horizontal strip of
+ *    open-all / collapse-all, and a horizontal strip of
  *    commentator pills — one tap scrolls to a commentator and opens it. It is folded away by
  *    default (the commentaries start right under the title bar) and toggled by the "סינון"
- *    button in the title bar, which carries a dot while a name filter or a kind chip is active.
+ *    button in the title bar, which carries a dot while a name filter is active.
  *    Picking a commentator collapses the chip strip + filter row together (reading space); the same
  *    toggle reopens both; a long-press multi-select keeps them open; `?` explains the long-press.
  *
@@ -66,9 +66,6 @@ import { SlidersIcon } from '../Icons';
 import { RichText } from '../RichText';
 
 type RankedGroup = Ranked<CommentaryGroup>;
-/** Drawer kind filter: everything, or only commentaries / translations / parallel works. */
-type KindFilter = 'all' | 'commentary' | 'targum' | 'parallel';
-const KIND_LABELS: Record<Exclude<KindFilter, 'all'>, string> = { commentary: 'מפרשים', targum: 'תרגומים', parallel: 'מקבילים' };
 
 const GRABBER_HEIGHT = 12;
 
@@ -153,12 +150,10 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
   // Chip-bar selection (sticky across verses); keys this passage lacks simply match nothing.
   const selected = useMemo(() => selectCommentaries(ranked, selection), [ranked, selection]);
   const selecting = selection.length > 0;
-  // Kind pills (מפרשים / תרגומים / מקבילים); a kind this passage lacks falls back to הכל.
+  // Counts for the title ("מפרשים (2) · מקבילים (1)"). The chip strip has no category buttons: commentators,
+  // translations and parallel works are all plain chips (sorted by priority).
   const counts = useMemo(() => kindCounts(ranked), [ranked]);
-  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
-  const kind: KindFilter = kindFilter !== 'all' && counts[kindFilter] ? kindFilter : 'all';
-  const kindsPresent = (['commentary', 'targum', 'parallel'] as const).filter((k) => counts[k] > 0);
-  const visible = useMemo(() => filterCommentaries(selected, { query, kind }), [selected, query, kind]);
+  const visible = useMemo(() => filterCommentaries(selected, { query }), [selected, query]);
   const hasOwn = visible.some((g) => !g.isParallel);
   // One commentator isolated in the chip bar: ultra-compact reading mode (no card header).
   const focusMode = selection.length === 1 && visible.length === 1;
@@ -468,7 +463,6 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
           testID="commentary-chipbar"
         >
           {ranked
-            .filter((g) => kind === 'all' || filterCommentaries([g], { kind }).length > 0)
             .slice()
             .reverse()
             .map((g) => {
@@ -496,49 +490,19 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
               );
             })
             .concat(
-              kindsPresent.length >= 2
-                ? [
-                    <View key="kind-sep" style={s.pillSep} />,
-                    ...kindsPresent
-                      .slice()
-                      .reverse()
-                      .map((k) => {
-                        const on = kind === k;
-                        return (
-                          <Pressable
-                            key={'kind-' + k}
-                            onPress={() => setKindFilter(on ? 'all' : k)}
-                            style={[s.pill, s.kindPill, on && s.pillOn]}
-                            accessibilityRole="button"
-                            aria-pressed={on}
-                            accessibilityState={{ selected: on }}
-                            accessibilityLabel={`הצג ${KIND_LABELS[k]} בלבד`}
-                            testID={`commentary-kind-${k}`}
-                          >
-                            <Text style={[s.pillText, s.kindPillText, on && s.pillTextOn]} numberOfLines={1}>
-                              {`${KIND_LABELS[k]} ${counts[k]}`}
-                            </Text>
-                          </Pressable>
-                        );
-                      }),
-                  ]
-                : [],
-            )
-            .concat(
               <Pressable
                 key="all"
                 onPress={() => {
                   clearSelection();
-                  setKindFilter('all');
                   setPanel('auto');
                 }}
-                style={[s.pill, s.pillCore, !selecting && kind === 'all' && s.pillOn]}
+                style={[s.pill, s.pillCore, !selecting && s.pillOn]}
                 accessibilityRole="button"
-                aria-pressed={!selecting && kind === 'all'}
-                accessibilityState={{ selected: !selecting && kind === 'all' }}
+                aria-pressed={!selecting}
+                accessibilityState={{ selected: !selecting }}
                 testID="commentary-chip-all"
               >
-                <Text style={[s.pillText, s.pillTextCore, !selecting && kind === 'all' && s.pillTextOn]} numberOfLines={1}>
+                <Text style={[s.pillText, s.pillTextCore, !selecting && s.pillTextOn]} numberOfLines={1}>
                   הכל
                 </Text>
               </Pressable>,
@@ -803,9 +767,6 @@ const createStyles = (c: Palette) =>
     pillCore: { backgroundColor: c.accentSoft, borderColor: c.accentSoft },
     pillParallel: { backgroundColor: c.surface, borderColor: c.accent, borderStyle: 'dashed', borderWidth: 1 },
     pillTextParallel: { color: c.accent },
-    kindPill: { backgroundColor: c.surface, borderColor: c.border, borderWidth: 1 },
-    kindPillText: { color: c.text, fontWeight: '700', fontSize: 12 },
-    pillSep: { width: StyleSheet.hairlineWidth, height: 18, backgroundColor: c.border, marginHorizontal: 2 },
     pillOn: { backgroundColor: c.accent, borderColor: c.accent },
     pillText: { fontSize: 13, fontWeight: '600', color: c.textMuted, writingDirection: 'rtl' },
     pillTextCore: { color: c.accent, fontWeight: '700' },
