@@ -485,11 +485,22 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
 ## Cloud library (GitHub Actions, multi-part release)
 
 No PC needed: the **Build cloud library** workflow (`.github/workflows/build-library.yml`, *Run workflow*) indexes
-the Otzaria library on a GitHub runner and publishes **one complete library** (scope `all`, every folder) to the
-release `library-latest`. Input: `source_repo` (`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`).
-`starter-latest` is exported from the same build. The library manager shows one card (live size and book count) with a
-single download / update button, using the same resumable chunked-Range download and SHA-256 verification. Installs made
-by older builds with the smaller "classic" library keep working and are simply offered the complete library as an update.
+the Otzaria library on a GitHub runner, splits it into **two disjoint databases** and publishes both to the release `library-latest`
+(`library-manifest.json` describes each package with its own multipart zip and SHA-256s). Input: `source_repo`
+(`Sivan22/otzaria-library` default, or `Otzaria/otzaria-library`). `starter-latest` is exported from the same build.
+
+| Stage | Database | Contents |
+| --- | --- | --- |
+| **ספריית יסוד** (small, fast) | `core_library.db` | תנ"ך + רש"י, רמב"ן, אבן עזרא, אונקלוס, מצודות · משנה + ברטנורא · תלמוד בבלי + רש"י, תוספות · משנה תורה · שולחן ערוך (with the Rema) + משנה ברורה |
+| **הרחבה לספרייה מלאה** (optional, anytime) | `extended_library.db` | every other book and commentator (zero overlap with core); ids shifted by `EXTENDED_ID_BASE` |
+
+Each database has its own FTS5 index and meta (`part` = `core` / `extended`). The app queries them through one router
+(`shared/sources.js`; no on-device merge): library tree, TOC, reader, commentary drawer (links live with their commentary book and
+may cross databases), cross-references and full-text search combine both. The library manager offers, on a fresh install,
+**ספריית יסוד** (core size) or **ספרייה מלאה** (combined size: core then extended in one flow, one progress bar; core is installed as
+soon as it is downloaded, so a cancellation keeps it usable); with core installed one button **הרחב לספרייה מלאה** downloads ONLY the
+extended size. Both stages use the resumable chunked-Range download with per-part and whole-zip SHA-256. Older monolithic
+`core_library.db` installs (and the classic build) keep working and are offered the two-stage update.
 
 Pipeline (each step deletes its input first, so the runner never holds two multi-GB copies; 35 GB free are enforced):
 `scripts/ci/fetch-otzaria-source.sh` (release zip(s) of the source repo, else the repository tarball streamed into `tar`)

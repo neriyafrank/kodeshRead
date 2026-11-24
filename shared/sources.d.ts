@@ -1,10 +1,10 @@
 import type { QueryAdapter } from './quickJump';
 
 export interface LibrarySource {
-  /** 'core' | 'user' in the app ('main' for a plain adapter). */
+  /** 'core' | 'extended' | 'starter' | 'user' in the app ('main' for a plain adapter). */
   name: string;
   adapter: QueryAdapter;
-  /** Lowest id of this database's namespace (0 for core, USER_ID_BASE for user). */
+  /** Lowest id of this database's namespace (0 for core, EXTENDED_ID_BASE for extended, USER_ID_BASE for user). */
   idBase: number;
   /** Top-level folder that holds all of this source's categories (user: "הספרים שלי"). */
   categoryRoot?: string;
@@ -36,6 +36,7 @@ export interface CatalogBook {
   source: string;
 }
 
+export const EXTENDED_ID_BASE: number;
 export const USER_ID_BASE: number;
 export const USER_ROOT_NAME: string;
 export function isRouter(db: unknown): db is LibraryRouter;

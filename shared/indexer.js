@@ -32,6 +32,8 @@ const { createLineSplitter } = require('./bookStream');
 const SCHEMA_VERSION = 6;
 /** First id of the personal library's namespace (core ids stay below it). */
 const USER_ID_BASE = 1000000000;
+/** First id of the optional extended database (shared/coreLibrary.js); core ids stay below it. */
+const EXTENDED_ID_BASE = 500000000;
 /** Root folder of the personal library in the merged tree. */
 const USER_ROOT_NAME = 'הספרים שלי';
 
@@ -1510,6 +1512,7 @@ module.exports = {
   decodeUriName,
   SCHEMA_VERSION,
   USER_ID_BASE,
+  EXTENDED_ID_BASE,
   USER_ROOT_NAME,
   ensureSchema,
   readMeta,

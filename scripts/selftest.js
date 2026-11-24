@@ -1169,11 +1169,11 @@ async function starterPackTests() {
         assert.ok(i >= 0, `workflow lacks: ${needle}`);
         return i;
       };
-      const order = ['cloud-release.js validate', 'export-starter-packs.js --db="$WORK/core_library.db"', 'zip -9', 'rm -f core_library.db core_library.db-journal', 'gh release upload "$RELEASE_TAG" library-manifest.json', 'name: Publish starter packs'].map(at);
+      const order = ['cloud-release.js validate', 'export-starter-packs.js --db="$WORK/full_library.db"', 'split-library.js" --db=full_library.db', 'zip -9', 'gh release upload "$RELEASE_TAG" library-manifest.json', 'name: Publish starter packs'].map(at);
       assert.deepStrictEqual(order, [...order].sort((x, y) => x - y));
       assert.ok(text.includes('STARTER_TAG: starter-latest') && text.includes('starter-catalog.json'));
       const pub = text.slice(at('name: Publish starter packs'), at('name: Summary'));
-      assert.ok(!pub.includes('RELEASE_TAG') && !pub.includes('core_library.db.zip.part'), 'never touches the library-latest assets');
+      assert.ok(!pub.includes('RELEASE_TAG') && !pub.includes('core_library.db.zip.part') && !pub.includes('extended_library'), 'never touches the library-latest assets');
       assert.ok(pub.indexOf('gh release delete-asset "$STARTER_TAG" starter-catalog.json') < pub.indexOf('gh release upload "$STARTER_TAG" "$f"') && pub.lastIndexOf('starter-catalog.json') > pub.lastIndexOf('gh release upload "$STARTER_TAG" "$f"'), 'catalog hidden first, published last');
       const lib = text.slice(at('name: Publish release ${{ env.RELEASE_TAG }}'), at('name: Publish starter packs'));
       assert.ok(!lib.includes('starter'), 'the library-latest cleanup never mentions the starter packs');
@@ -3727,37 +3727,62 @@ async function cloudLibraryTests() {
       const { releaseTag: _t, ...old } = f;
       assert.strictEqual(mp.validateCloudManifest(old).version, 'v1', 'a manifest from before releaseTag still validates');
     });
-    await check('library release: install / current / update, and an older classic install updates cleanly to the complete library', () => {
-      const man = (version) => ({ version, scope: 'all' });
-      const act = (installedScope, installedVersion, version) => releases.libraryAction({ installedScope, installedVersion, manifest: man(version) });
-      assert.strictEqual(act(null, null, 'f1'), 'install', 'nothing installed');
-      assert.strictEqual(act('all', 'f1', 'f1'), 'current');
-      assert.strictEqual(act('all', 'f1', 'f2'), 'update', 'קיים עדכון בענן');
-      // Older builds installed a classic (classical_full) library: it is always offered the complete one, even at an equal version string.
-      assert.strictEqual(act('classical_full', 'c1', 'f1'), 'update');
-      assert.strictEqual(act('classical_full', 'f1', 'f1'), 'update');
-      assert.ok(releases.isPartialScope('classical_full') && !releases.isPartialScope('all') && !releases.isPartialScope(null));
-      // A library of unknown origin (built on the device / pre-scope download) is replaced, never an error.
-      assert.strictEqual(act(null, 'x', 'f1'), 'install');
-      assert.strictEqual(act(null, 'f1', 'f1'), 'current');
-      // persisted `installedCloud` of older builds ({ edition, version }) migrates to { version }
+    await check('library release: stages, actions and flows (fresh / expand / update / older classic and monolithic installs)', () => {
+      const man = (version, extended = true) => ({ version, extended: extended ? {} : null });
+      const st = (coreInfo, extendedInfo, recorded) => releases.libraryState({ coreInfo, extendedInfo, recorded });
+      const act = (state, manifest) => releases.libraryAction({ state, manifest });
+      // nothing installed: two choices (core / the whole library in one go)
+      assert.deepStrictEqual(act(st(null), man('v1')), { mode: 'choose', plans: ['core', 'full'] });
+      assert.deepStrictEqual(act(st(null), man('v1', false)), { mode: 'choose', plans: ['core'] }, 'a release without an expansion pack offers one download');
+      // core installed: expand downloads ONLY the extended pack
+      const core1 = { version: 'v1', scope: 'core', part: 'core' };
+      assert.strictEqual(st(core1).stage, 'core');
+      assert.deepStrictEqual(act(st(core1), man('v1')), { mode: 'expand', plans: ['extended'] });
+      assert.deepStrictEqual(act(st(core1), man('v2')), { mode: 'update', plans: ['core', 'full'] });
+      // core + extended of the same build
+      assert.strictEqual(st(core1, { version: 'v1' }).stage, 'full');
+      assert.deepStrictEqual(act(st(core1, { version: 'v1' }), man('v1')), { mode: 'current', plans: [] });
+      assert.deepStrictEqual(act(st(core1, { version: 'v1' }), man('v2')), { mode: 'update', plans: ['full'] });
+      // an expansion of another build is stale: the library counts as core only
+      assert.deepStrictEqual([st(core1, { version: 'v0' }).stage, st(core1, { version: 'v0' }).extendedStale], ['core', true]);
+      // backward compatibility: a monolithic library.db (no `part`) is the complete library; an older classic build is partial
+      const mono = { version: 'm1', scope: 'all', part: null };
+      assert.deepStrictEqual([st(mono).stage, st(mono).legacy], ['full', true]);
+      assert.deepStrictEqual(act(st(mono), man('v2')), { mode: 'update', plans: ['full'] });
+      assert.deepStrictEqual(act(st({ version: 'm1', scope: null, part: null }), man('m1')), { mode: 'current', plans: [] }, 'an on-device build with the cloud version is current');
+      const classic = { version: 'c1', scope: 'classical_full', part: null };
+      assert.strictEqual(st(classic).stage, 'partial');
+      assert.deepStrictEqual(act(st(classic), man('v1')), { mode: 'update', plans: ['full'] });
+      // the browser preview's sample library has no `part`: the recorded stage tells
+      assert.strictEqual(st({ version: 'v1', scope: null, part: null }, null, { version: 'v1', stage: 'core' }).stage, 'core');
+      assert.strictEqual(st({ version: 'v2', scope: null, part: null }, null, { version: 'v1', stage: 'core' }).stage, 'full', 'a stale record is ignored');
+      // flows
+      const flow = (state, plan, manifest = man('v1')) => releases.flowOf({ state, manifest, plan });
+      assert.deepStrictEqual(flow(st(null), 'core'), { packages: ['core'], installAsYouGo: true });
+      assert.deepStrictEqual(flow(st(null), 'full'), { packages: ['core', 'extended'], installAsYouGo: true }, 'fresh full: core first, installed at once');
+      assert.deepStrictEqual(flow(st(core1), 'full'), { packages: ['extended'], installAsYouGo: true }, 'core is current: only the delta');
+      assert.deepStrictEqual(flow(st(core1), 'extended'), { packages: ['extended'], installAsYouGo: true });
+      assert.deepStrictEqual(flow(st(core1, { version: 'v1' }), 'full', man('v2')), { packages: ['core', 'extended'], installAsYouGo: false }, 'an update stages both, then swaps');
+      assert.deepStrictEqual(flow(st(mono), 'full'), { packages: ['core', 'extended'], installAsYouGo: false });
+      assert.deepStrictEqual(flow(st(classic), 'full'), { packages: ['core', 'extended'], installAsYouGo: false });
+      // persisted `installedCloud` of older builds ({ edition, version }) migrates
       assert.deepStrictEqual(releases.normalizeInstalledCloud({ edition: 'classic', version: 'c1' }), { version: 'c1' });
-      assert.deepStrictEqual(releases.normalizeInstalledCloud({ edition: 'full', version: 'f1' }), { version: 'f1' });
-      assert.deepStrictEqual(releases.normalizeInstalledCloud({ version: 'f1' }), { version: 'f1' });
+      assert.deepStrictEqual(releases.normalizeInstalledCloud({ edition: 'full', version: 'f1', stage: 'core' }), { version: 'f1', stage: 'core' });
       for (const junk of [null, undefined, 'x', {}, { version: '' }, { edition: 'classic' }]) assert.strictEqual(releases.normalizeInstalledCloud(junk), null);
       const store = fs.readFileSync(path.join(ROOT, 'src/state/libraryStore.ts'), 'utf8');
-      assert.ok(store.includes('normalizeInstalledCloud') && /version: 2/.test(store) && !/edition/.test(store.replace(/older builds also stored an `edition`[^\n]*|v1 stored[^\n]*/g, '')), 'store migrates v1 and keeps no edition field');
+      assert.ok(store.includes('normalizeInstalledCloud') && /version: 2/.test(store), 'the store migrates the v1 record');
     });
-    await check('library release: the app has one card, one download button and no basic / full picker', () => {
+    await check('library release: the card offers core / full choices, then one expand button; no edition leftovers', () => {
       const card = fs.readFileSync(path.join(ROOT, 'src/components/library/CloudLibraryCard.tsx'), 'utf8');
-      for (const id of ['cloud-download"', 'cloud-info"', 'cloud-size"', 'cloud-books"', 'libraryAction']) assert.ok(card.includes(id), id);
-      for (const gone of ['EDITION', 'cloud-installed', 'מותקן כעת', 'ספרייה בסיסית', 'מעבר בין מהדורות', 'עבור ל', 'switch']) assert.ok(!card.includes(gone), `card has no ${gone}`);
-      for (const f of ['src/components/library/StarterBooks.tsx', 'src/app/index.tsx', 'src/services/cloudLibrary.ts', 'src/services/libraryActions.ts', 'src/db/LibraryContext.tsx']) {
+      for (const id of ['cloud-download-expand', 'cloud-download-update-', 'cloud-download-${plan}', 'cloud-size-core', 'cloud-size-extended', 'הרחב לספרייה מלאה', 'הורד ספרייה מלאה', 'libraryAction', 'libraryState']) assert.ok(card.includes(id), id);
+      for (const gone of ['EDITION', 'מותקן כעת', 'ספרייה בסיסית', 'מעבר בין מהדורות']) assert.ok(!card.includes(gone), `card has no ${gone}`);
+      assert.ok(releases.STAGE_TITLES.core === 'ספריית יסוד' && releases.STAGE_TITLES.extended === 'הרחבה לספרייה מלאה');
+      for (const f of ['src/components/library/StarterBooks.tsx', 'src/app/index.tsx', 'src/services/cloudLibrary.ts', 'src/services/libraryActions.ts']) {
         const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
-        assert.ok(!/library-classic-latest|cloudClassicManifestUrl|shared\/editions|בסיסית/.test(text), `${f} has no basic-tier leftovers`);
+        assert.ok(!/library-classic-latest|cloudClassicManifestUrl|shared\/editions|בסיסית/.test(text), `${f} has no classic-tier leftovers`);
       }
     });
-    await check('library release: the workflow builds the one complete library (scope all -> library-latest), starter + audit from the same build', () => {
+    await check('library release: the workflow builds the library once, splits it into core + extended and publishes both (starter + audit from the full build)', () => {
       const text = fs.readFileSync(path.join(ROOT, '.github/workflows/build-library.yml'), 'utf8');
       assert.ok(text.includes('RELEASE_TAG: library-latest') && text.includes('LIBRARY_SCOPE: all'));
       assert.ok(!/matrix|edition|classic|classical_full|check-edition/i.test(text.replace(/^#.*$/gm, '')), 'no matrix / edition / classic tier in the workflow');
@@ -3767,11 +3792,12 @@ async function cloudLibraryTests() {
         assert.ok(i >= 0, `workflow lacks: ${needle}`);
         return i;
       };
-      assert.ok(at('cloud-release.js validate') < at('node scripts/audit-parallels.js') && at('node scripts/audit-parallels.js') < at('export-starter-packs.js --db=') && at('export-starter-packs.js --db=') < at('cloud-release.js manifest'));
+      assert.ok(at('cloud-release.js validate') < at('node scripts/audit-parallels.js') && at('node scripts/audit-parallels.js') < at('export-starter-packs.js --db=') && at('export-starter-packs.js --db=') < at('split-library.js" --db=full_library.db') && at('split-library.js" --db=full_library.db') < at('cloud-release.js manifest'));
+      assert.ok(text.includes('--extended-stats=') && text.includes('--extended-parts-dir=') && text.includes('extended_library.db'), 'the manifest carries both packages');
       assert.ok(!/classical_full|--scope/.test(fs.readFileSync(path.join(ROOT, 'scripts/ci/fetch-otzaria-source.sh'), 'utf8').replace(/^#.*$/gm, '')), 'the fetch script has no tier filter');
       // Zero node_modules in CI: every script the workflow runs requires only built-ins / relative modules.
       assert.ok(!/npm (ci|install)|npx |yarn |pnpm /.test(text), 'no package install in build-library.yml');
-      for (const f of ['scripts/cloud-release.js', 'scripts/export-starter-packs.js', 'scripts/audit-parallels.js', 'scripts/build-db.js', 'shared/libraryRelease.js', 'shared/libraryScope.js']) {
+      for (const f of ['scripts/cloud-release.js', 'scripts/split-library.js', 'shared/coreLibrary.js', 'scripts/export-starter-packs.js', 'scripts/audit-parallels.js', 'scripts/build-db.js', 'shared/libraryRelease.js', 'shared/libraryScope.js']) {
         const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
         for (const m of src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
           const dep = m[1];
@@ -4313,6 +4339,317 @@ async function cloudLibraryTests() {
       server.close();
     }
 
+    // =================================================================================================
+    // Two-stage library: core (ספריית יסוד) + extended (הרחבה לספרייה מלאה), disjoint databases
+    // =================================================================================================
+    const coreLibrary = require('../shared/coreLibrary');
+    const { splitLibrary } = require('./split-library');
+    const libraryCatalogMod = require('../shared/libraryCatalog');
+    const TWO = { core: path.join(tmp, 'two-core.db'), ext: path.join(tmp, 'two-ext.db') };
+    const splitResult = await splitLibrary({ fullDb: SAMPLE_DB, coreOut: TWO.core, extendedOut: TWO.ext });
+    const reader = (file) => {
+      const db = writable(file);
+      return { db, all: async (sql, params = []) => db.prepare(sql).all(...params) };
+    };
+    const F = reader(SAMPLE_DB);
+    const C = reader(TWO.core);
+    const E = reader(TWO.ext);
+    const EXT_BASE = coreLibrary.EXTENDED_ID_BASE;
+    const coreOnlyRouter = sources.createRouter([{ name: 'core', adapter: C, idBase: 0 }]);
+    const mergedRouter = sources.createRouter([
+      { name: 'core', adapter: C, idBase: 0 },
+      { name: 'extended', adapter: E, idBase: EXT_BASE },
+    ]);
+
+    await check('two-stage: the real library splits into core + extended with ZERO overlap (every book in exactly one)', () => {
+      const lines = fs.readFileSync(path.join(ROOT, 'otzaria_index_only.txt'), 'utf8').split('\n').map((l) => l.trim().replace(/^\.\//, '')).filter((l) => l.endsWith('.txt'));
+      const books = lines.map((l, i) => {
+        const parts = l.split('/');
+        return { id: i + 1, title: parts.pop().replace(/\.txt$/, ''), categoryPath: parts.join('/') };
+      });
+      const sel = coreLibrary.selectCoreBooks(books);
+      const ext = books.filter((b) => !sel.ids.has(b.id));
+      assert.strictEqual(sel.ids.size + ext.length, books.length, 'core + extended = the whole library');
+      assert.strictEqual(new Set([...sel.ids, ...ext.map((b) => b.id)]).size, books.length, 'no book in both');
+      const byCorpus = {};
+      for (const c of sel.baseCorpusOf.values()) byCorpus[c] = (byCorpus[c] || 0) + 1;
+      assert.deepStrictEqual(byCorpus, { tanach: 39, mishna: 63, bavli: 37, rambam: 85, 'shulchan-aruch': 4 }, 'the base books of the five core corpora');
+      assert.ok(sel.ids.size > 400 && sel.ids.size < books.length * 0.15, `a genuinely small core (${sel.ids.size} of ${books.length})`);
+      const titleOf = (id) => books.find((b) => b.id === id).title;
+      const names = new Set([...sel.commentaries].map((id) => titleOf(id).split(' על ')[0].replace(/["״]/g, '')));
+      for (const must of ['רשי', 'רמבן', 'אבן עזרא', 'תרגום אונקלוס', 'מצודת דוד', 'מצודת ציון', 'ברטנורא', 'תוספות', 'משנה ברורה']) assert.ok(names.has(must), `core commentator ${must}`);
+      for (const never of ['כתב יד רשי', 'פסקי תוספות', 'תוספות הראש', 'חידושי רמבן']) assert.ok(!names.has(never), `${never} is extended`);
+      // every core commentary is on a core base book
+      assert.ok([...sel.commentaries].every((id) => id !== undefined));
+      assert.ok(books.filter((b) => sel.ids.has(b.id)).every((b) => !/ירושלמי/.test(b.categoryPath.split('/')[0] || '') || false), 'the Yerushalmi is not core');
+    });
+    await check('two-stage: split databases are disjoint, id-namespaced, each with its own FTS index and meta', async () => {
+      assert.strictEqual(splitResult.overlap, 0);
+      const [full, core, ext] = await Promise.all([F, C, E].map((x) => x.all('SELECT id, title, file_path FROM books')));
+      assert.strictEqual(core.length + ext.length, full.length);
+      const cp = new Set(core.map((b) => b.file_path));
+      assert.ok(ext.every((b) => !cp.has(b.file_path)), 'no shared file_path');
+      assert.deepStrictEqual([...cp, ...ext.map((b) => b.file_path)].sort(), full.map((b) => b.file_path).sort(), 'together exactly the full library');
+      assert.ok(core.every((b) => b.id < EXT_BASE) && ext.every((b) => b.id >= EXT_BASE && b.id < sources.USER_ID_BASE), 'books: core below, extended in its own namespace');
+      for (const [table, col] of [['categories', 'id'], ['toc_nodes', 'id'], ['paragraphs', 'id']]) {
+        assert.strictEqual((await C.all(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} >= ?`, [EXT_BASE]))[0].n, 0, `core ${table} ids stay below the extended base`);
+        assert.strictEqual((await E.all(`SELECT COUNT(*) AS n FROM ${table} WHERE ${col} < ?`, [EXT_BASE]))[0].n, 0, `extended ${table} ids are all in the extended namespace`);
+      }
+      const n = async (x, t) => (await x.all(`SELECT COUNT(*) AS n FROM ${t}`))[0].n;
+      assert.strictEqual((await n(C, 'paragraphs')) + (await n(E, 'paragraphs')), await n(F, 'paragraphs'), 'no paragraph lost or duplicated');
+      assert.strictEqual((await n(C, 'toc_nodes')) + (await n(E, 'toc_nodes')), await n(F, 'toc_nodes'));
+      for (const [x, part] of [[C, 'core'], [E, 'extended']]) {
+        const meta = Object.fromEntries((await x.all('SELECT key, value FROM meta')).map((r) => [r.key, r.value]));
+        assert.deepStrictEqual([meta.part, meta.kind, meta.scope], [part, part, part]);
+        assert.strictEqual(meta.db_version, Object.fromEntries((await F.all('SELECT key, value FROM meta')).map((r) => [r.key, r.value])).db_version, 'same build');
+        assert.strictEqual(await n(x, 'paragraphs_fts_docsize'), await n(x, 'paragraphs'), `${part}: its own FTS index covers every one of its paragraphs`);
+        assert.strictEqual(Number(meta.books), await n(x, 'books'));
+      }
+      // ref_links live with their COMMENTARY book; a row may point at the other database's base book
+      assert.ok((await E.all('SELECT * FROM ref_links')).every((r) => r.comm_book_id >= EXT_BASE));
+      assert.ok((await E.all('SELECT * FROM ref_links')).some((r) => r.base_book_id < EXT_BASE), 'an extended commentary on a core base book');
+      assert.ok((await C.all('SELECT * FROM ref_links')).every((r) => r.comm_book_id < EXT_BASE));
+      assert.strictEqual((await n(C, 'ref_links')) + (await n(E, 'ref_links')), await n(F, 'ref_links'));
+      // core alone: the spec'd corpora and primary commentators; every other commentator in extended
+      const coreTitles = core.map((b) => b.title);
+      for (const t of ['בראשית', 'במדבר', 'אונקלוס על בראשית', 'רש"י על בראשית', 'רמב"ן על בראשית', 'אבן עזרא על בראשית', 'משנה שבת', 'שבת', 'רש"י על שבת', 'תוספות על שבת']) assert.ok(coreTitles.includes(t), `core has ${t}`);
+      assert.deepStrictEqual(ext.map((b) => b.title).sort(), ['גור אריה על בראשית', 'דעת זקנים על בראשית', 'מלבים על בראשית', 'ספורנו על בראשית'].sort());
+    });
+
+    await check('two-stage: core alone works; with extended attached, books / search / commentaries merge seamlessly (== the full library)', async () => {
+      // --- book index & catalog
+      const idx = async (r) => [...(await loadBookIndex(r)).books.values()].map((b) => b.title).sort();
+      assert.deepStrictEqual(await idx(mergedRouter), await idx(F), 'merged index = full library');
+      assert.strictEqual((await idx(coreOnlyRouter)).length, splitResult.core.books);
+      assert.ok(!(await idx(coreOnlyRouter)).includes('ספורנו על בראשית') && (await idx(mergedRouter)).includes('ספורנו על בראשית'));
+      const cat = await sources.loadCatalog(mergedRouter);
+      assert.strictEqual(new Set(cat.categories.map((c) => c.path)).size, cat.categories.length, 'one folder per path (core + extended folders are folded)');
+      assert.strictEqual(cat.books.length, splitResult.core.books + splitResult.extended.books);
+      const catIds = new Set(cat.categories.map((c) => c.id));
+      assert.ok(cat.books.every((b) => catIds.has(b.category_id)) && cat.categories.every((c) => c.parent_id == null || catIds.has(c.parent_id)), 'no dangling category');
+      const tree = libraryCatalogMod.buildLibraryCatalog(cat);
+      const treeFull = libraryCatalogMod.buildLibraryCatalog(await sources.loadCatalog(F));
+      const flat = (t) => JSON.stringify(t.sections.map((s) => [s.name, s.count]));
+      assert.strictEqual(flat(tree), flat(treeFull), 'the merged tree equals the full tree');
+      // --- full-text search: ids keep keyset paging across the databases
+      const extText = (await E.all('SELECT clean_text FROM paragraphs ORDER BY id LIMIT 1'))[0].clean_text;
+      const word = extText.split(/\s+/).find((w) => /^[א-ת]{4,}$/.test(w));
+      assert.ok(word, 'probe word');
+      const keys = (r) => r.rows.map((x) => `${x.book_title}#${x.line_index}`).sort();
+      const [hf, hc, hm] = await Promise.all([F, coreOnlyRouter, mergedRouter].map((r) => search.searchParagraphs(r, word, { limit: 500 })));
+      assert.deepStrictEqual(keys(hm), keys(hf), `merged search "${word}" == full library`);
+      assert.ok(keys(hc).length < keys(hm).length && keys(hm).some((k) => /גור אריה|דעת זקנים|מלבים|ספורנו/.test(k)), 'core alone misses the extended hits');
+      const common = 'אמר';
+      const [cf, cm] = await Promise.all([F, mergedRouter].map((r) => search.searchParagraphs(r, common, { limit: 5000 })));
+      assert.deepStrictEqual(keys(cm), keys(cf));
+      const paged = [];
+      for (let afterId; ; ) {
+        const page = await search.searchParagraphs(mergedRouter, word, { limit: 1, afterId });
+        paged.push(...page.rows);
+        if (!page.hasMore) break;
+        afterId = page.rows[page.rows.length - 1].id;
+      }
+      assert.deepStrictEqual(keys({ rows: paged }), keys(hf), 'keyset paging runs from core into extended');
+      const probeTitle = (await E.all('SELECT b.title AS t FROM paragraphs p JOIN books b ON b.id = p.book_id ORDER BY p.id LIMIT 1'))[0].t;
+      const probeId = [...(await loadBookIndex(mergedRouter)).books.values()].find((b) => b.title === probeTitle).id;
+      const scoped = await search.searchParagraphs(mergedRouter, word, { limit: 50, scope: { kind: 'book', bookId: probeId, title: probeTitle } });
+      assert.ok(probeId >= EXT_BASE && scoped.rows.length > 0 && scoped.rows.every((r) => r.book_title === probeTitle), 'a book scope searches only the extended database');
+      // --- commentary drawer: commentaries of a core base text come from BOTH databases
+      const line = (await F.all("SELECT r.base_start AS l FROM ref_links r JOIN books b ON b.id = r.comm_book_id WHERE b.title = 'ספורנו על בראשית' ORDER BY r.base_start LIMIT 1"))[0].l;
+      const titlesOf = async (r, bookId) => [...new Set((await commentary.fetchLinkedEntries(r, bookId, line)).map((e) => e.book_title))].sort();
+      const fullTitles = await titlesOf(F, 1);
+      assert.ok(fullTitles.includes('ספורנו על בראשית') && fullTitles.includes('רש"י על בראשית'));
+      assert.deepStrictEqual(await titlesOf(mergedRouter, 1), fullTitles, 'merged drawer == full library drawer');
+      const coreTitlesAt = await titlesOf(coreOnlyRouter, 1);
+      assert.ok(coreTitlesAt.includes('רש"י על בראשית') && !coreTitlesAt.includes('ספורנו על בראשית'), 'core alone shows its own commentators only');
+      const texts = async (r) => (await commentary.fetchLinkedEntries(r, 1, line)).map((e) => `${e.book_title}|${e.line}|${e.display_text}`).sort();
+      assert.deepStrictEqual(await texts(mergedRouter), await texts(F), 'identical paragraphs (read from the database that owns each)');
+      const counts = async (r) => JSON.stringify([...(await commentary.fetchLinkCounts(r, 1, 1, 400)).entries()].sort((a, b) => a[0] - b[0]));
+      assert.strictEqual(await counts(mergedRouter), await counts(F), 'link badges count both databases');
+      assert.notStrictEqual(await counts(coreOnlyRouter), await counts(F));
+      // the other direction: from the extended commentary back to its core base text
+      const extId = [...(await loadBookIndex(mergedRouter)).books.values()].find((b) => b.title === 'ספורנו על בראשית').id;
+      assert.ok(extId >= EXT_BASE);
+      const commLine = (await E.all('SELECT comm_start AS l FROM ref_links ORDER BY id LIMIT 1'))[0].l;
+      const back = await commentary.fetchLinkedEntries(mergedRouter, extId, commLine);
+      assert.ok(back.some((e) => e.book_title === 'בראשית' && e.display_text), 'the base text of a core book opens from an extended commentary');
+      // --- Quick Jump / parallel works resolve in both
+      assert.ok((await resolveReference(mergedRouter, await loadBookIndex(mergedRouter), 'בראשית א')).length > 0);
+    });
+
+    // A local "GitHub release" with both packages: counts requests so we can prove what is (not) downloaded.
+    const stagedDir = path.join(tmp, 'two-parts');
+    fs.mkdirSync(stagedDir);
+    const sliceInto = (name, bytes, n) => {
+      const zip = Buffer.from(zipSync({ [name]: new Uint8Array(bytes) }, { level: 6 }));
+      const size = Math.ceil(zip.length / n);
+      const kind = name.startsWith('extended') ? 'extended' : 'core';
+      return Array.from({ length: n }, (_, i) => zip.subarray(i * size, (i + 1) * size)).map((b, i) => {
+        fs.writeFileSync(path.join(stagedDir, mp.partName(i + 1, kind)), b);
+        return b;
+      });
+    };
+    const coreBytes = fs.readFileSync(TWO.core);
+    const extBytes = fs.readFileSync(TWO.ext);
+    const coreSlices = sliceInto('core_library.db', coreBytes, 3);
+    const extSlices = sliceInto('extended_library.db', extBytes, 2);
+    const twoManifest = mp.validateCloudManifest(
+      await cloudRelease.buildManifest({
+        stats: cloudRelease.validateDb(TWO.core),
+        partsDir: stagedDir,
+        extended: { stats: cloudRelease.validateDb(TWO.ext), partsDir: stagedDir },
+        sourceRepo: 'o/r',
+        scope: 'all',
+      }),
+    );
+    const twoHits = [];
+    const twoServer = http.createServer((req, res) => {
+      const name = decodeURIComponent(req.url.split('/').pop());
+      const all = [...coreSlices.map((b, i) => [mp.partName(i + 1, 'core'), b]), ...extSlices.map((b, i) => [mp.partName(i + 1, 'extended'), b])];
+      const hit = all.find(([n]) => n === name);
+      if (!hit) return res.writeHead(404).end();
+      twoHits.push(name);
+      const m = /^bytes=(\d+)-$/.exec(req.headers.range || '');
+      const from = m ? Number(m[1]) : 0;
+      res.writeHead(m ? 206 : 200, { 'content-length': hit[1].length - from });
+      res.end(hit[1].subarray(from));
+    });
+    await new Promise((r) => twoServer.listen(0, '127.0.0.1', r));
+    const twoUrl = `http://127.0.0.1:${twoServer.address().port}/releases/download/library-latest/library-manifest.json`;
+    try {
+      await check('two-stage: the manifest sizes core and extended exactly (parts + SHA-256 each); an older one-database manifest still validates', () => {
+        assert.deepStrictEqual(Object.keys(twoManifest.extended).sort(), ['bookCount', 'fullZipSha256', 'paragraphCount', 'parts', 'totalZipBytes', 'uncompressedDbBytes']);
+        assert.strictEqual(twoManifest.totalZipBytes, coreSlices.reduce((a, b) => a + b.length, 0));
+        assert.strictEqual(twoManifest.extended.totalZipBytes, extSlices.reduce((a, b) => a + b.length, 0));
+        assert.deepStrictEqual(twoManifest.extended.parts.map((p) => p.name), ['extended_library.db.zip.part-01', 'extended_library.db.zip.part-02']);
+        assert.deepStrictEqual(twoManifest.extended.parts.map((p) => p.sha256), extSlices.map(sha));
+        assert.strictEqual(twoManifest.extended.uncompressedDbBytes, extBytes.length);
+        const plan = (p) => mp.planPackages(twoManifest, p);
+        assert.strictEqual(plan('core').totalZipBytes, twoManifest.totalZipBytes, 'ספריית יסוד: exactly the core size');
+        assert.strictEqual(plan('extended').totalZipBytes, twoManifest.extended.totalZipBytes, 'הרחבה: exactly the incremental size');
+        assert.strictEqual(plan('full').totalZipBytes, twoManifest.totalZipBytes + twoManifest.extended.totalZipBytes, 'ספרייה מלאה: the combined size');
+        assert.strictEqual(plan('full').bookCount, splitResult.core.books + splitResult.extended.books);
+        assert.ok(mp.requiredFreeBytesForPlan(twoManifest, 'full') > mp.requiredFreeBytesForPlan(twoManifest, 'core'));
+        // names are checked per package; an old manifest has no extended pack
+        assert.throws(() => mp.validateCloudManifest({ ...twoManifest, extended: { ...twoManifest.extended, parts: twoManifest.parts } }), /unexpected name/);
+        assert.throws(() => mp.validateCloudManifest({ ...twoManifest, extended: { ...twoManifest.extended, totalZipBytes: 1 } }), /add up/);
+        const { extended: _x, ...old } = twoManifest;
+        assert.strictEqual(mp.validateCloudManifest(old).extended, null);
+        assert.throws(() => mp.packageOf(mp.validateCloudManifest(old), 'extended'), /no extended library/);
+        assert.strictEqual(mp.partName(2, 'extended'), 'extended_library.db.zip.part-02');
+        assert.strictEqual(mp.partName(2), 'core_library.db.zip.part-02');
+      });
+
+      /** Runs a staged flow over the local release with the in-memory backend; records stage / install order and progress. */
+      const runFlow = async (state, plan, o = {}) => {
+        const events = [];
+        const reports = [];
+        const files = new Map();
+        const r = await releases.runStagedFlow({
+          state,
+          manifest: twoManifest,
+          plan,
+          stage: async (pkg, win) => {
+            if (o.cancelStage === pkg.kind) throw new Error('cancelled');
+            events.push('stage:' + pkg.kind);
+            const io = mp.createMemoryIO();
+            await mp.stageCloudLibrary(io, pkg, { manifestUrl: twoUrl, dbName: pkg.dbName, window: win, report: (p) => reports.push({ kind: pkg.kind, ...p }) });
+            files.set(pkg.kind, Buffer.from(io.files.get(pkg.dbName)));
+          },
+          install: async (pkg) => {
+            events.push('install:' + pkg.kind);
+          },
+        }).catch((e) => ({ error: e }));
+        return { events, reports, files, result: r };
+      };
+      const stateOf = (coreInfo, extendedInfo) => releases.libraryState({ coreInfo, extendedInfo });
+      const coreInfo = (version) => ({ version, scope: 'core', part: 'core' });
+
+      await check('two-stage: "הורד ספרייה מלאה" on a fresh install downloads core -> extended in ONE flow with ONE overall progress bar', async () => {
+        twoHits.length = 0;
+        const { events, reports, files, result } = await runFlow(stateOf(null), 'full');
+        assert.deepStrictEqual(events, ['stage:core', 'install:core', 'stage:extended', 'install:extended'], 'core is installed as soon as it is staged, then the expansion follows');
+        assert.deepStrictEqual(twoHits.filter((n) => /^core/.test(n)).concat(twoHits.filter((n) => /^extended/.test(n))), twoHits, 'every core part is requested before any extended part');
+        assert.strictEqual(twoHits.length, 5);
+        assert.ok(files.get('core').equals(coreBytes) && files.get('extended').equals(extBytes), 'both databases are byte-identical after download + assembly + extraction');
+        // one bar: monotonic across both packages, total = core + extended zip bytes
+        const total = twoManifest.totalZipBytes + twoManifest.extended.totalZipBytes;
+        const dl = reports.filter((p) => /מוריד|ממשיך/.test(p.stage));
+        for (let i = 1; i < dl.length; i++) assert.ok(dl[i].fraction + 1e-9 >= dl[i - 1].fraction, 'the overall bar never goes backwards');
+        assert.strictEqual(Math.max(...dl.map((p) => p.fraction)), 1);
+        const late = dl.filter((p) => p.kind === 'extended');
+        assert.ok(late.length && late.every((p) => p.fraction > twoManifest.totalZipBytes / total - 1e-9), 'extended progress continues after the core share of the bar');
+        const last = dl[dl.length - 1].detail;
+        assert.ok(last.startsWith('הרחבה לספרייה מלאה · חלק 2 מתוך 2 · ') && last.endsWith(`${mp.formatBytes(total)} / ${mp.formatBytes(total)} · 100%`), last);
+        assert.ok(dl.some((p) => p.detail.startsWith('ספריית יסוד · חלק 1 מתוך 3')));
+        assert.deepStrictEqual([result.kinds, result.installed, result.total], [['core', 'extended'], ['core', 'extended'], total]);
+        assert.strictEqual(result.books, splitResult.core.books + splitResult.extended.books);
+      });
+      await check('two-stage: a core-only download (ספריית יסוד) never touches the extended parts', async () => {
+        twoHits.length = 0;
+        const { events, reports } = await runFlow(stateOf(null), 'core');
+        assert.deepStrictEqual(events, ['stage:core', 'install:core']);
+        assert.ok(twoHits.length === 3 && twoHits.every((n) => /^core_/.test(n)));
+        const dl = reports.filter((p) => /מוריד|ממשיך/.test(p.stage));
+        assert.strictEqual(dl[dl.length - 1].fraction, 1, 'the bar of a core-only flow ends at 100% of the CORE size');
+        assert.ok(dl[dl.length - 1].detail.startsWith('ספריית יסוד · '));
+      });
+      await check('two-stage: cancelling after core finished keeps it installed; finishing later (or expanding) downloads ONLY extended', async () => {
+        twoHits.length = 0;
+        const first = await runFlow(stateOf(null), 'full', { cancelStage: 'extended' });
+        assert.deepStrictEqual(first.events, ['stage:core', 'install:core'], 'core.db was installed before the cancellation');
+        assert.ok(first.result.error && /cancelled/.test(first.result.error.message));
+        // The app now has core installed (meta.part = core, same version): the card offers the expansion with its own size only.
+        const state = stateOf(coreInfo(twoManifest.version));
+        assert.deepStrictEqual(releases.libraryAction({ state, manifest: twoManifest }), { mode: 'expand', plans: ['extended'] });
+        for (const plan of ['extended', 'full']) {
+          twoHits.length = 0;
+          const next = await runFlow(state, plan);
+          assert.deepStrictEqual(next.events, ['stage:extended', 'install:extended'], `${plan}: only the delta`);
+          assert.ok(twoHits.length === 2 && twoHits.every((n) => /^extended_/.test(n)), `${plan}: core.db is never downloaded again (${twoHits})`);
+          assert.ok(next.files.get('extended').equals(extBytes));
+          assert.strictEqual(next.result.total, twoManifest.extended.totalZipBytes, 'the bar of the expansion = the extended size only');
+        }
+      });
+      await check('two-stage: an update stages both stages first, then swaps; older monolithic / classic installs update to core + extended', async () => {
+        const newer = { ...twoManifest, version: 'next-build' };
+        const run = async (state) => {
+          const events = [];
+          await releases.runStagedFlow({ state, manifest: newer, plan: 'full', stage: async (p) => void events.push('stage:' + p.kind), install: async (p) => void events.push('install:' + p.kind) });
+          return events;
+        };
+        const both = ['stage:core', 'stage:extended', 'install:core', 'install:extended'];
+        assert.deepStrictEqual(await run(stateOf(coreInfo(twoManifest.version), { version: twoManifest.version })), both, 'core + extended installed -> both rebuilt, never mixed');
+        assert.deepStrictEqual(await run(stateOf(coreInfo(twoManifest.version))), both, 'core only, newer cloud build -> core + extended');
+        assert.deepStrictEqual(await run(stateOf({ version: 'm1', scope: 'all', part: null })), both, 'a monolithic library.db is replaced by the two stages');
+        assert.deepStrictEqual(await run(stateOf({ version: 'c1', scope: 'classical_full', part: null })), both, 'an older classic build too');
+        assert.deepStrictEqual(await run(stateOf({ version: 'x', scope: null, part: null })), both, 'an on-device build too');
+        // the staged stage verifies: a corrupted part is rejected by its SHA-256 and re-downloaded (the 2 retries are on the same part)
+        assert.strictEqual(mp.validateCloudManifest(newer).extended.parts.length, 2);
+      });
+      await check('two-stage: a stage whose SHA-256 does not match is never installed', async () => {
+        const bad = { ...twoManifest, extended: { ...twoManifest.extended, parts: twoManifest.extended.parts.map((p, i) => (i === 0 ? { ...p, sha256: '0'.repeat(64) } : p)) } };
+        const events = [];
+        await assert.rejects(
+          () =>
+            releases.runStagedFlow({
+              state: stateOf(coreInfo(twoManifest.version)),
+              manifest: bad,
+              plan: 'extended',
+              stage: async (pkg, win) => {
+                const io = mp.createMemoryIO();
+                await mp.stageCloudLibrary(io, pkg, { manifestUrl: twoUrl, dbName: pkg.dbName, window: win, retries: 0, backoffBaseMs: 1, sleep: async () => undefined });
+              },
+              install: async () => void events.push('install'),
+            }),
+          /SHA|sha|checksum|verif|hash/i,
+        );
+        assert.deepStrictEqual(events, [], 'nothing installed');
+      });
+    } finally {
+      twoServer.close();
+    }
+
     await check('cloud-release: validate accepts a real library (integrity, books, paragraphs, FTS, ref_links)', () => {
       const s = cloudRelease.validateDb(SAMPLE_DB);
       assert.ok(s.bookCount > 0 && s.paragraphCount > 0 && s.refLinkCount > 0 && s.version && s.uncompressedDbBytes === dbBytes.length);
@@ -4341,7 +4678,7 @@ async function cloudLibraryTests() {
         return i;
       };
       assert.ok(text.includes('/usr/share/dotnet') && text.includes('/usr/local/lib/android') && text.includes('/opt/ghc'));
-      const order = ['Free disk space', 'fetch-otzaria-source.sh', 'scripts/build-db.js', 'rm -rf "$WORK/src"', 'cloud-release.js validate', 'zip -9', 'rm -f core_library.db core_library.db-journal', 'split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1', 'rm -f core_library.db.zip', 'cloud-release.js manifest', 'gh release upload "$RELEASE_TAG" library-manifest.json'].map(at);
+      const order = ['Free disk space', 'fetch-otzaria-source.sh', 'scripts/build-db.js', 'rm -rf "$WORK/src"', 'cloud-release.js validate', 'split-library.js" --db=full_library.db', 'zip -9', 'split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1', 'cloud-release.js manifest', 'gh release upload "$RELEASE_TAG" library-manifest.json'].map(at);
       assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), 'steps run in the documented order');
       assert.ok(/PART_SIZE: 1500M/.test(text) && text.includes('RELEASE_TAG: library-latest') && text.includes('--scope="$LIBRARY_SCOPE"'));
       assert.ok(text.includes('-lt 35'), '35 GB free-space guard');

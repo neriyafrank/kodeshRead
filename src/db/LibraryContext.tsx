@@ -8,12 +8,12 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { loadBookIndex, type BookIndex, type QueryAdapter } from '../../shared/quickJump';
 import { booksScope, hasFts5 } from '../../shared/search';
-import { createRouter, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type LibrarySource } from '../../shared/sources';
+import { createRouter, EXTENDED_ID_BASE, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type LibrarySource } from '../../shared/sources';
 import { useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { closeQuietly } from './dbUtils';
 import { readMeta } from '../../shared/indexer';
-import { deleteStarterDatabase, installStagedCore, isWeb, openCoreDatabase, openStarterDatabase, openUserDatabase, deleteCoreDatabase, starterDbExists, toAdapter, type CoreInfo } from './library';
+import { deleteExtendedDatabase, deleteStarterDatabase, installStagedCore, installStagedExtended, isWeb, openCoreDatabase, openExtendedDatabase, openStarterDatabase, openUserDatabase, deleteCoreDatabase, starterDbExists, toAdapter, type CoreInfo } from './library';
 
 export interface Library {
   /** Routes per-book queries to the owning DB and merges library-wide ones. */
@@ -24,6 +24,11 @@ export interface Library {
   fts: boolean;
   /** core_library.db, or null until one is downloaded / built. */
   core: { db: SQLiteDatabase; info: CoreInfo } | null;
+  /**
+   * extended_library.db (הרחבה לספרייה מלאה): the optional second stage, queried as one more router source (ids >=
+   * EXTENDED_ID_BASE; nothing is merged on the device). null until it is downloaded; never open without a core.
+   */
+  extended: { db: SQLiteDatabase; info: CoreInfo } | null;
   /** user_library.db (always open, read-write for the local indexer). */
   user: SQLiteDatabase;
   /**
@@ -47,6 +52,12 @@ export interface LibraryController {
    * user_library.db is untouched. Throws a coreFinalize.StepError naming the failed sub-step.
    */
   installCore: (from?: string) => Promise<void>;
+  /**
+   * Swaps in the verified staging file extended_library.db.tmp over extended_library.db and attaches it to the router.
+   * The core library is untouched and stays usable throughout.
+   */
+  installExtended: () => Promise<void>;
+  /** Removes the core library AND the expansion pack (the expansion only works next to its core). */
   removeCore: () => Promise<void>;
 }
 
@@ -115,9 +126,10 @@ function coreGate(db: SQLiteDatabase): CoreGate {
   return gate;
 }
 
-async function buildLibrary(core: Library['core'], user: SQLiteDatabase, starter: SQLiteDatabase | null, generation: number): Promise<Library> {
+async function buildLibrary(core: Library['core'], user: SQLiteDatabase, starter: SQLiteDatabase | null, generation: number, extended: Library['extended'] = null): Promise<Library> {
   const sources: LibrarySource[] = [];
   if (core) sources.push({ name: 'core', adapter: coreGate(core.db).adapter, idBase: 0 });
+  if (core && extended) sources.push({ name: 'extended', adapter: coreGate(extended.db).adapter, idBase: EXTENDED_ID_BASE });
   // Starter mode: the books opened from the cloud stand in for the core library (same ids as in it).
   else if (starter) sources.push({ name: 'starter', adapter: toAdapter(starter), idBase: 0 });
   // Web preview only: after a page reload expo-sqlite's web storage can hand back the seeded
@@ -135,7 +147,7 @@ async function buildLibrary(core: Library['core'], user: SQLiteDatabase, starter
     if (id >= USER_ID_BASE) userBookCount++;
     else coreBookCount++;
   }
-  return { adapter, bookIndex, fts, core, user, starter: core ? null : starter, coreBookCount, userBookCount, generation };
+  return { adapter, bookIndex, fts, core, extended: core ? extended : null, user, starter: core ? null : starter, coreBookCount, userBookCount, generation };
 }
 
 /**
@@ -200,12 +212,18 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
     (async () => {
       try {
         const [core, user] = await Promise.all([openCoreDatabase(), openUserDatabase()]);
+        // The expansion pack only works next to a core library of the same build; a stale one is ignored (replaced on update).
+        let extended = core ? await openExtendedDatabase() : null;
+        if (extended && extended.info.version !== core?.info.version) {
+          await closeQuietly(extended.db);
+          extended = null;
+        }
         // No full library yet: the cloud starter database is the instant first-launch library.
         // (A starter DB left behind next to an installed core library is stale: removed.)
         let starter: SQLiteDatabase | null = null;
         if (!core) starter = await openStarterDatabase().catch((e) => (console.warn('starter library unavailable', e), null));
         else if (starterDbExists()) await deleteStarterDatabase().catch(() => undefined);
-        const lib = await buildLibrary(core, user, starter, ++generation.current);
+        const lib = await buildLibrary(core, user, starter, ++generation.current, extended);
         if (alive) publish(lib);
       } catch (e) {
         console.error(e);
@@ -223,7 +241,7 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
         serial(async () => {
           const lib = current.current;
           if (!lib) return;
-          publish(await buildLibrary(lib.core, lib.user, lib.starter, ++generation.current));
+          publish(await buildLibrary(lib.core, lib.user, lib.starter, ++generation.current, lib.extended));
         }),
       installCore: (from?: string) =>
         serial(async () => {
@@ -237,12 +255,18 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
                 if (!lib.core) return;
                 // No query may run on (or start against) the old file while it is replaced.
                 await coreGate(lib.core.db).drain(2000);
+                if (lib.extended) {
+                  await coreGate(lib.extended.db).drain(2000);
+                  await lib.extended.db.closeAsync();
+                }
                 await lib.core.db.closeAsync();
                 closed = true;
               },
               reopenCore: async () => {
                 const core = await openCoreDatabase({ strict: true });
                 if (!core) throw new Error('core_library.db is not a valid library after the swap');
+                // The expansion of the OLD core is of another build: it is dropped and downloaded again (only that delta).
+                if (lib.extended) deleteExtendedDatabase();
                 const next = await buildLibrary(core, lib.user, null, ++generation.current);
                 // Starter books (or an older, smaller library) -> the complete library: open tabs
                 // follow their books (same title + folder).
@@ -261,15 +285,54 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
             // Republish whatever is installed now (the old library if the swap did not happen).
             // A failed close left the old connection open: keep serving it through a new gate.
             let core: Library['core'] = null;
-            if (closed || !lib.core) core = await openCoreDatabase().catch(() => null);
-            else {
+            let extended: Library['extended'] = null;
+            if (closed || !lib.core) {
+              core = await openCoreDatabase().catch(() => null);
+              extended = core ? await openExtendedDatabase().catch(() => null) : null;
+            } else {
               coreGates.delete(lib.core.db);
               core = lib.core;
+              extended = lib.extended;
+              if (extended) coreGates.delete(extended.db);
             }
             try {
-              publish(await buildLibrary(core, lib.user, lib.starter, ++generation.current));
+              publish(await buildLibrary(core, lib.user, lib.starter, ++generation.current, extended));
             } catch (again) {
               console.warn('library could not be republished after a failed install', again);
+            }
+            throw e;
+          }
+        }),
+      installExtended: () =>
+        serial(async () => {
+          const lib = current.current;
+          if (!lib?.core) throw new Error('הרחבת הספרייה דורשת ספריית יסוד מותקנת');
+          let closed = false;
+          try {
+            await installStagedExtended({
+              closeExtended: async () => {
+                if (!lib.extended) return;
+                await coreGate(lib.extended.db).drain(2000);
+                await lib.extended.db.closeAsync();
+                closed = true;
+              },
+              reopenExtended: async () => {
+                const extended = await openExtendedDatabase();
+                if (!extended) throw new Error('extended_library.db is not a valid expansion library after the swap');
+                if (extended.info.version !== lib.core?.info.version) throw new Error(`הרחבה (${extended.info.version}) אינה מתאימה לספריית היסוד (${lib.core?.info.version})`);
+                // The core connection stays open: only the extended source is (re)attached to the router.
+                publish(await buildLibrary(lib.core, lib.user, null, ++generation.current, extended));
+              },
+              warn: (w) => console.warn(`expansion install: ${w.step} failed (ignored)`, w.message),
+            });
+          } catch (e) {
+            let extended: Library['extended'] = lib.extended;
+            if (closed) extended = await openExtendedDatabase().catch(() => null);
+            else if (extended) coreGates.delete(extended.db);
+            try {
+              publish(await buildLibrary(lib.core, lib.user, null, ++generation.current, extended));
+            } catch (again) {
+              console.warn('library could not be republished after a failed expansion install', again);
             }
             throw e;
           }
@@ -278,6 +341,11 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
         serial(async () => {
           const lib = current.current;
           if (!lib) return;
+          if (lib.extended) {
+            await coreGate(lib.extended.db).drain(2000);
+            await closeQuietly(lib.extended.db);
+          }
+          deleteExtendedDatabase();
           if (lib.core) {
             await coreGate(lib.core.db).drain(2000);
             await closeQuietly(lib.core.db);

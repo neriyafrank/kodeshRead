@@ -21,12 +21,11 @@ import { useLibrary, useLibraryController } from '../db/LibraryContext';
 import { CORE_BUILD_DB } from '../db/library';
 import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
-import { LIBRARY_TITLE } from '../../shared/libraryRelease';
+import { libraryState, STAGE_TITLES, type Plan } from '../../shared/libraryRelease';
 import { formatCloudNotification, type CloudManifest } from '../../shared/multipart';
-import { clearCloudParts, CLOUD_KEEP_AWAKE_TAG, downloadAndStageCloud, isPreviewCloudDownload, stageCloudForPreview } from './cloudLibrary';
+import { isPreviewCloudDownload, runCloudFlow } from './cloudLibrary';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
 import * as importService from './importForegroundService';
-import { withKeepAwake } from './keepAwake';
 import {
   buildCoreFromFolder,
   deleteUserBooks,
@@ -258,23 +257,27 @@ export function useLibraryActions() {
         }),
 
       /**
-       * Multi-part cloud library (library-latest): resumable part download -> assemble -> extract ->
-       * validate -> atomic install (shared/multipart.js, src/services/cloudLibrary.ts).
+       * Multi-part cloud library (library-latest), staged: plan `core` (ספריית יסוד), `extended` (only the expansion pack,
+       * core.db is never downloaded again) or `full` (core -> extended, one flow, one progress bar). Resumable part
+       * download -> assemble -> extract -> validate -> atomic install per package (shared/multipart.js,
+       * src/services/cloudLibrary.ts runCloudFlow).
        */
-      downloadCloud: (manifest: CloudManifest, manifestUrl: string) =>
+      downloadCloud: (manifest: CloudManifest, manifestUrl: string, plan: Plan = manifest.extended ? 'full' : 'core') =>
         runJob('download', 'מתחיל הורדה…', async () => {
-          const preview = isPreviewCloudDownload();
-          const version = preview ? await stageCloudForPreview(manifest, manifestUrl) : await downloadAndStageCloud(manifest, manifestUrl);
-          useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: null });
-          if (preview) (globalThis as { __kodeshreadCloudInstalled?: string }).__kodeshreadCloudInstalled = version;
-          else {
-            // The DB swap (drain readers, close, rename) must not be cut short by the device sleeping.
-            await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => ctl.installCore());
-            clearCloudParts();
-          }
-          // Which cloud version is installed (the DB's meta.version says it too; this covers older builds).
-          useLibrarySettings.getState().setInstalledCloud(version);
-          return `ספריית הליבה הותקנה מהענן — ${LIBRARY_TITLE} (גרסה ${version}): ${manifest.bookCount.toLocaleString('he-IL')} ספרים`;
+          const state = libraryState({ coreInfo: lib.core?.info ?? null, extendedInfo: lib.extended?.info ?? null, recorded: useLibrarySettings.getState().installedCloud });
+          const { books } = await runCloudFlow(manifest, manifestUrl, plan, state, {
+            installCore: () => ctl.installCore(),
+            installExtended: () => ctl.installExtended(),
+            // Which cloud version / stage is installed (the DB's meta.version / meta.part say it too; this covers the preview).
+            onInstalled: (kind, version) => {
+              const g = globalThis as { __kodeshreadCloudInstalled?: string[] };
+              if (isPreviewCloudDownload()) g.__kodeshreadCloudInstalled = [...(g.__kodeshreadCloudInstalled ?? []), `${kind}:${version}`];
+              // A core installed while the expansion is still to come (or not wanted) is the "core" stage.
+              useLibrarySettings.getState().setInstalledCloud(version, kind === 'core' && manifest.extended ? 'core' : 'full');
+            },
+          });
+          const title = STAGE_TITLES[plan === 'extended' ? 'extended' : plan === 'core' ? 'core' : 'full'];
+          return `ספריית הליבה הותקנה מהענן — ${title} (גרסה ${manifest.version}): ${books.toLocaleString('he-IL')} ספרים`;
         }),
 
       /** Builds core_library.db on the device from a picked Otzaria folder (resumes the same folder). */
@@ -356,5 +359,5 @@ export function useLibraryActions() {
           return 'ספריית הליבה הוסרה (הספרים האישיים נשמרו)';
         }),
     };
-  }, [ctl, lib.user, manifestUrl]);
+  }, [ctl, lib.user, lib.core?.info, lib.extended?.info, manifestUrl]);
 }

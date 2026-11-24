@@ -12,7 +12,9 @@
  *       Hashes every core_library.db.zip.part-NN (and, streaming over them in order, the whole zip)
  *       and writes library-manifest.json:
  *       { sourceRepo, scope, releaseTag, version, builtAt, bookCount, paragraphCount, uncompressedDbBytes,
- *         totalZipBytes, fullZipSha256, parts: [{ name, sizeBytes, sha256 }] }
+ *         totalZipBytes, fullZipSha256, parts: [{ name, sizeBytes, sha256 }],
+ *         extended: { bookCount, paragraphCount, uncompressedDbBytes, totalZipBytes, fullZipSha256, parts } }
+ *       (top level = the core package, `extended` = the optional expansion pack; --extended-stats / --extended-parts-dir)
  *
  * The zip itself is never needed here (and is already deleted by then): its hash is the hash of the
  * concatenated parts.
@@ -22,11 +24,10 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { validateCloudManifest, CLOUD_ZIP_NAME, MAX_PART_BYTES, CLOUD_MANIFEST_NAME } = require('../shared/multipart');
+const { validateCloudManifest, MAX_PART_BYTES, CLOUD_MANIFEST_NAME } = require('../shared/multipart');
 const { openDb } = require('./build-db');
 const releases = require('../shared/libraryRelease');
 
-const PART_RE = /^core_library\.db\.zip\.part-(\d{2,})$/;
 
 /** Integrity + non-emptiness checks of a finished core library. Returns the stats; throws on failure. */
 function validateDb(file) {
@@ -81,14 +82,15 @@ async function sha256Files(files) {
   return h.digest('hex');
 }
 
-/** library-manifest.json content for the parts in `partsDir`. */
-async function buildManifest({ stats, partsDir, sourceRepo, scope }) {
-  if (scope && scope !== releases.LIBRARY_SCOPE) throw new Error(`the cloud library is built with scope ${releases.LIBRARY_SCOPE}, not ${scope}`);
+const PART_RES = { core: /^core_library\.db\.zip\.part-(\d{2,})$/, extended: /^extended_library\.db\.zip\.part-(\d{2,})$/ };
+
+/** The numbers of one package (core or extended): its parts with SHA-256 + the hash of the whole zip. */
+async function buildPackage(kind, stats, partsDir) {
   const names = fs
     .readdirSync(partsDir)
-    .filter((n) => PART_RE.test(n))
+    .filter((n) => PART_RES[kind].test(n))
     .sort();
-  if (!names.length) throw new Error(`no ${CLOUD_ZIP_NAME}.part-NN files in ${partsDir}`);
+  if (!names.length) throw new Error(`no ${kind}_library.db.zip.part-NN files in ${partsDir}`);
   const parts = [];
   for (const name of names) {
     const file = path.join(partsDir, name);
@@ -96,18 +98,31 @@ async function buildManifest({ stats, partsDir, sourceRepo, scope }) {
     if (sizeBytes >= MAX_PART_BYTES) throw new Error(`${name} is ${sizeBytes} bytes: GitHub Releases rejects files of 2 GB and more`);
     parts.push({ name, sizeBytes, sha256: await sha256Files([file]) });
   }
-  const manifest = {
-    sourceRepo,
-    scope: scope || releases.LIBRARY_SCOPE,
-    releaseTag: releases.LIBRARY_TAG,
-    version: stats.version,
-    builtAt: stats.builtAt,
+  return {
     bookCount: stats.bookCount,
     paragraphCount: stats.paragraphCount,
     uncompressedDbBytes: stats.uncompressedDbBytes,
     totalZipBytes: parts.reduce((a, p) => a + p.sizeBytes, 0),
     fullZipSha256: await sha256Files(names.map((n) => path.join(partsDir, n))),
     parts,
+  };
+}
+
+/**
+ * library-manifest.json content. The top-level numbers / parts describe the core package (so an app that knows only one
+ * database still reads a valid manifest); `extended` describes the expansion pack with its own parts and SHA-256s.
+ */
+async function buildManifest({ stats, partsDir, extended, sourceRepo, scope }) {
+  if (scope && scope !== releases.LIBRARY_SCOPE) throw new Error(`the cloud library is built with scope ${releases.LIBRARY_SCOPE}, not ${scope}`);
+  if (extended && extended.stats.version !== stats.version) throw new Error(`core (${stats.version}) and extended (${extended.stats.version}) come from different builds`);
+  const manifest = {
+    sourceRepo,
+    scope: scope || releases.LIBRARY_SCOPE,
+    releaseTag: releases.LIBRARY_TAG,
+    version: stats.version,
+    builtAt: stats.builtAt,
+    ...(await buildPackage('core', stats, partsDir)),
+    ...(extended ? { extended: await buildPackage('extended', extended.stats, extended.partsDir) } : {}),
   };
   validateCloudManifest(manifest); // numbering, sizes add up, hashes well-formed
   return manifest;
@@ -132,12 +147,13 @@ async function main() {
     console.log(`[cloud-release] OK: ${stats.bookCount} books, ${stats.paragraphCount} paragraphs, ${stats.refLinkCount} ref links, ${(stats.uncompressedDbBytes / 1024 / 1024).toFixed(0)} MB`);
   } else if (cmd === 'manifest') {
     const stats = JSON.parse(fs.readFileSync(path.resolve(args.stats), 'utf8'));
-    const manifest = await buildManifest({ stats, partsDir: path.resolve(args['parts-dir']), sourceRepo: args['source-repo'], scope: args.scope });
+    const extended = args['extended-stats'] ? { stats: JSON.parse(fs.readFileSync(path.resolve(args['extended-stats']), 'utf8')), partsDir: path.resolve(args['extended-parts-dir']) } : null;
+    const manifest = await buildManifest({ stats, partsDir: path.resolve(args['parts-dir']), extended, sourceRepo: args['source-repo'], scope: args.scope });
     const out = path.resolve(args.out || path.join(args['parts-dir'], CLOUD_MANIFEST_NAME));
     fs.writeFileSync(out, JSON.stringify(manifest, null, 2) + '\n');
-    console.log(`[cloud-release] ${path.basename(out)}: ${manifest.parts.length} part(s), ${(manifest.totalZipBytes / 1024 / 1024).toFixed(0)} MB, version ${manifest.version}`);
+    console.log(`[cloud-release] ${path.basename(out)}: core ${manifest.parts.length} part(s) ${(manifest.totalZipBytes / 1024 / 1024).toFixed(0)} MB${manifest.extended ? `, extended ${manifest.extended.parts.length} part(s) ${(manifest.extended.totalZipBytes / 1024 / 1024).toFixed(0)} MB` : ''}, version ${manifest.version}`);
   } else {
-    console.error('usage: cloud-release.js validate --db=<file> --stats=<json> | manifest --stats=<json> --parts-dir=<dir> --source-repo=<o/r> [--scope=all] [--out=<file>]');
+    console.error('usage: cloud-release.js validate --db=<file> --stats=<json> | manifest --stats=<json> --parts-dir=<dir> [--extended-stats=<json> --extended-parts-dir=<dir>] --source-repo=<o/r> [--scope=all] [--out=<file>]');
     process.exit(2);
   }
 }

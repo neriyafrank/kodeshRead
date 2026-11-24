@@ -4,6 +4,26 @@ export interface CloudPart {
   sha256: string;
 }
 
+/** One stage of the two-stage library: the core database or the optional extended one. */
+export interface CloudPackage {
+  bookCount: number;
+  paragraphCount: number;
+  uncompressedDbBytes: number;
+  totalZipBytes: number;
+  fullZipSha256: string;
+  parts: CloudPart[];
+}
+
+/** A package as the download pipeline sees it: the numbers of its stage + the file names of that stage. */
+export interface CloudPackageView extends CloudPackage {
+  version: string;
+  kind: 'core' | 'extended';
+  zipName: string;
+  dbName: string;
+}
+
+export type CloudPlan = 'core' | 'extended' | 'full';
+
 export interface CloudManifest {
   sourceRepo: string | null;
   scope: string | null;
@@ -15,6 +35,8 @@ export interface CloudManifest {
   totalZipBytes: number;
   fullZipSha256: string;
   parts: CloudPart[];
+  /** The optional expansion pack (extended_library.db); null for releases that ship one database. */
+  extended: CloudPackage | null;
 }
 
 export interface PartReader {
@@ -63,14 +85,19 @@ export const CLOUD_ZIP_NAME: string;
 export const CLOUD_DB_NAME: string;
 export const FREE_SPACE_MARGIN: number;
 export const MAX_PART_BYTES: number;
-export function partName(n: number): string;
+export const EXTENDED_ZIP_NAME: string;
+export const EXTENDED_DB_NAME: string;
+export function partName(n: number, kind?: 'core' | 'extended'): string;
+export function packageOf(manifest: CloudManifest, kind: 'core' | 'extended'): CloudPackageView;
+export function planPackages(manifest: CloudManifest, plan: CloudPlan): { plan: CloudPlan; packages: ('core' | 'extended')[]; totalZipBytes: number; uncompressedDbBytes: number; bookCount: number };
+export function requiredFreeBytesForPlan(manifest: CloudManifest, plan: CloudPlan): number;
 export function cloudManifestUrl(repo: string): string;
 export function partUrl(manifestUrl: string, part: { name: string }): string;
 export function validateCloudManifest(m: unknown): CloudManifest;
 export function requiredFreeBytes(m: CloudManifest): number;
 export function checkFreeSpace(m: CloudManifest, freeBytes: number | null): { ok: boolean; required: number; free: number | null };
 export function formatBytes(n: number): string;
-export function formatPartProgress(p: { partIndex: number; partCount: number; doneBytes: number; totalBytes: number }): string;
+export function formatPartProgress(p: { partIndex: number; partCount: number; doneBytes: number; totalBytes: number; label?: string | null }): string;
 export function isValidPart(io: PartsIO, part: CloudPart): Promise<boolean>;
 export interface RetryEvent {
   partIndex: number;
@@ -94,7 +121,7 @@ export interface ResilienceOptions {
 }
 export const PARTIAL_SUFFIX: string;
 export function partialIdName(name: string): string;
-export function existingBytes(io: PartsIO, manifest: CloudManifest): Promise<number>;
+export function existingBytes(io: PartsIO, manifest: CloudPackage): Promise<number>;
 export const NETWORK_RETRY_STAGE: string;
 export function partialName(name: string): string;
 export function isTransientNetworkError(e: unknown): boolean;
@@ -102,18 +129,18 @@ export function backoffDelayMs(attempt: number, baseMs?: number, capMs?: number)
 export function formatCloudNotification(stage: string, fraction: number | null, detail: string | null): { title: string; text: string; current: number; total: number };
 export function downloadParts(
   io: PartsIO,
-  manifest: CloudManifest,
+  manifest: CloudPackage,
   opts: ResilienceOptions & { manifestUrl: string; onRetry?: (e: RetryEvent) => void; onProgress?: (p: PartProgress) => void; isCancelled?: () => boolean },
 ): Promise<{ downloaded: number; skipped: number }>;
 export function assembleParts(
   io: PartsIO,
-  manifest: CloudManifest,
+  manifest: CloudPackage,
   zipName: string,
   opts?: { chunkSize?: number; onProgress?: (p: { doneBytes: number; totalBytes: number }) => void; isCancelled?: () => boolean },
 ): Promise<void>;
 export function extractZip(
   io: PartsIO,
-  manifest: CloudManifest,
+  manifest: CloudPackage,
   zipName: string,
   dbName: string,
   opts?: { onProgress?: (p: { bytesIn: number; bytesOut: number; totalIn: number | null }) => void; isCancelled?: () => boolean },
@@ -122,11 +149,13 @@ export function extractZip(
 export function createMemoryIO(opts?: { fetch?: typeof fetch }): PartsIO & { files: Map<string, Uint8Array> };
 export function stageCloudLibrary(
   io: PartsIO,
-  manifest: CloudManifest,
+  manifest: CloudPackage & { zipName?: string; dbName?: string },
   opts: ResilienceOptions & {
     manifestUrl: string;
     zipName?: string;
     dbName?: string;
+    /** Two-stage flow: maps this package's download bytes onto one bar (offset = bytes of earlier packages, total = whole flow). */
+    window?: { offset: number; total: number; label?: string };
     /** Wraps assembly + extraction (wake lock); must run and await `fn`. */
     keepAwake?: (fn: () => Promise<void>) => Promise<void>;
     isCancelled?: () => boolean;

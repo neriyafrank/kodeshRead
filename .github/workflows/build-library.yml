@@ -1,19 +1,22 @@
 name: Build cloud library
 
-# Indexes the Otzaria library into core_library.db in the cloud and publishes it as a multi-part
+# Indexes the Otzaria library in the cloud, splits it into core + extended databases, and publishes it as a multi-part
 # GitHub Release that the app downloads and installs on the phone (Library manager -> "ספרייה מוכנה מהענן").
 #
-# One complete library: scope `all` (every Otzaria folder) -> release `library-latest`
-# (shared/libraryRelease.js is the single source of the names). The instant starter packs are
-# exported from the same build. Only Node built-ins are used.
+# One library in two stages: scope `all` (every Otzaria folder) is indexed once, then split into two DISJOINT
+# databases (scripts/split-library.js, shared/coreLibrary.js) published together to release `library-latest`:
+#   core_library.db      ספריית יסוד        foundational texts + primary commentators (small)
+#   extended_library.db  הרחבה לספרייה מלאה  every other book (downloaded later, only the delta)
+# Each has its own multipart zip + SHA-256s in ONE library-manifest.json. The instant starter packs are exported
+# from the same build. Only Node built-ins are used.
 #
-#   source archive -> build-db.js -> (source deleted) -> validate -> core_library.db.zip
-#   -> (db deleted) -> 1.5 GB parts -> (zip deleted) -> library-manifest.json -> release
+#   source archive -> build-db.js -> (source deleted) -> validate -> split -> (full db deleted)
+#   -> per database: zip -> (db deleted) -> 1.5 GB parts -> (zip deleted) -> library-manifest.json -> release
 #
 # GitHub Releases rejects files of 2 GB and more, hence the parts; every step deletes its input
 # before the next one starts, so the runner never holds two multi-GB copies.
 #
-# Instant cloud starter: while core_library.db still exists, scripts/export-starter-packs.js cuts the
+# Instant cloud starter: while the full database still exists, scripts/export-starter-packs.js cuts the
 # curated foundational books (+ Rashi / Onkelos / Tosafot and their exact ref_links) into tiny
 # `starter-<slug>.json.gz` packs and `starter-catalog.json`. They are published to their OWN release
 # (`starter-latest`), so the library-latest asset cleanup (which prunes old multi-GB parts) can never
@@ -84,44 +87,62 @@ jobs:
       - name: Index the library (core_library.db)
         run: |
           set -euo pipefail
-          node scripts/build-db.js --source="$WORK/src" --scope="$LIBRARY_SCOPE" --lean --out="$WORK/core_library.db"
+          node scripts/build-db.js --source="$WORK/src" --scope="$LIBRARY_SCOPE" --lean --out="$WORK/full_library.db"
           # The text files and the downloaded archives are not needed any more.
           rm -rf "$WORK/src"
           df -h "$WORK" | tail -1
 
-      - name: Validate the database
-        run: node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
+      - name: Validate the full database
+        run: node scripts/cloud-release.js validate --db="$WORK/full_library.db" --stats="$WORK/full-stats.json"
 
       - name: Audit parallel works and book roles
         # Every parallel-family member (טור / שו"ע, משנה / בבלי / ירושלמי / תוספתא, חומש / מדרש רבה ...)
         # must stay a standalone work: no commentary leaks, no excluded title (קיצור שו"ע, חיי אדם ...).
-        run: node scripts/audit-parallels.js --db="$WORK/core_library.db"
+        run: node scripts/audit-parallels.js --db="$WORK/full_library.db"
 
       - name: Export starter packs (instant cloud starter)
         run: |
           set -euo pipefail
-          # Must run before the compress step deletes core_library.db. A real library has all of them
+          # Must run before the split step deletes the full database. A real library has all of them
           # (the sample / partial scopes fewer): fewer than 5 means the curated titles stopped matching.
-          node scripts/export-starter-packs.js --db="$WORK/core_library.db" --out="$WORK/starter" --min=5
+          node scripts/export-starter-packs.js --db="$WORK/full_library.db" --out="$WORK/starter" --min=5
           ls -l "$WORK/starter"
 
-      - name: Compress (deflate .zip)
+      - name: Split into core + extended (disjoint databases)
         run: |
           set -euo pipefail
           cd "$WORK"
-          zip -9 -q core_library.db.zip core_library.db
-          rm -f core_library.db core_library.db-journal core_library.db-wal core_library.db-shm
-          ls -l core_library.db.zip
-          unzip -tq core_library.db.zip
+          node "$GITHUB_WORKSPACE/scripts/split-library.js" --db=full_library.db --core-out=core_library.db --extended-out=extended_library.db --stats=split.json
+          rm -f full_library.db full_library.db-journal full_library.db-wal full_library.db-shm
+          df -h "$WORK" | tail -1
+
+      - name: Validate core + extended
+        run: |
+          set -euo pipefail
+          node scripts/cloud-release.js validate --db="$WORK/core_library.db" --stats="$WORK/stats.json"
+          node scripts/cloud-release.js validate --db="$WORK/extended_library.db" --stats="$WORK/extended-stats.json"
+
+      - name: Compress (deflate .zip, one per database)
+        run: |
+          set -euo pipefail
+          cd "$WORK"
+          for name in core extended; do
+            zip -9 -q "${name}_library.db.zip" "${name}_library.db"
+            rm -f "${name}_library.db" "${name}_library.db-journal" "${name}_library.db-wal" "${name}_library.db-shm"
+            ls -l "${name}_library.db.zip"
+            unzip -tq "${name}_library.db.zip"
+          done
 
       - name: Split into 1.5 GB parts
         run: |
           set -euo pipefail
           cd "$WORK"
           mkdir parts
-          # -d -a 2 --numeric-suffixes=1: core_library.db.zip.part-01, part-02, ...
-          split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1 core_library.db.zip parts/core_library.db.zip.part-
-          rm -f core_library.db.zip
+          for name in core extended; do
+            # -d -a 2 --numeric-suffixes=1: core_library.db.zip.part-01, part-02, ... (and extended_library.db.zip.part-NN)
+            split -b "$PART_SIZE" -d -a 2 --numeric-suffixes=1 "${name}_library.db.zip" "parts/${name}_library.db.zip.part-"
+            rm -f "${name}_library.db.zip"
+          done
           ls -l parts
           if find parts -type f -size +2000M | grep -q .; then echo "::error::a part is 2 GB or larger"; exit 1; fi
 
@@ -129,6 +150,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/cloud-release.js manifest --stats="$WORK/stats.json" --parts-dir="$WORK/parts" \
+            --extended-stats="$WORK/extended-stats.json" --extended-parts-dir="$WORK/parts" \
             --source-repo="${{ inputs.source_repo }}" --scope="$LIBRARY_SCOPE" \
             --out="$WORK/library-manifest.json"
           cat "$WORK/library-manifest.json"
@@ -150,7 +172,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Cloud library" --notes "$notes" --latest=false --target "$GITHUB_SHA"
           fi
-          for f in parts/core_library.db.zip.part-*; do
+          for f in parts/*_library.db.zip.part-*; do
             for attempt in 1 2 3; do
               if gh release upload "$RELEASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber; then break; fi
               [ "$attempt" = 3 ] && { echo "::error::upload of $f failed"; exit 1; }
@@ -158,7 +180,7 @@ jobs:
             done
           done
           # Drop parts of an older, longer build.
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | { grep '^core_library\.db\.zip\.part-' || true; } | while read -r a; do
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | { grep -E '^(core|extended)_library\.db\.zip\.part-' || true; } | while read -r a; do
             [ -f "parts/$a" ] || gh release delete-asset "$RELEASE_TAG" "$a" --repo "$GITHUB_REPOSITORY" -y
           done
           # The manifest goes last: it is what makes the new version visible to the app.

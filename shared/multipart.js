@@ -26,6 +26,9 @@ const CLOUD_RELEASE_TAG = releases.LIBRARY_TAG;
 const CLOUD_MANIFEST_NAME = 'library-manifest.json';
 const CLOUD_ZIP_NAME = 'core_library.db.zip';
 const CLOUD_DB_NAME = 'core_library.db';
+/** The optional second stage (the expansion pack): its own zip / parts / database. */
+const EXTENDED_ZIP_NAME = 'extended_library.db.zip';
+const EXTENDED_DB_NAME = 'extended_library.db';
 /** Slack required on top of (zip + extracted DB) before a download starts. */
 const FREE_SPACE_MARGIN = 500 * 1024 * 1024;
 /** GitHub Releases rejects assets of 2 GiB and more. */
@@ -35,8 +38,8 @@ const COPY_CHUNK = 1 << 20;
 const HEX64 = /^[0-9a-f]{64}$/;
 
 /** Name of the n-th part (1-based) as `split -d -a 2` + a 1-based rename writes it. */
-const partName = (n) => `${CLOUD_ZIP_NAME}.part-${String(n).padStart(2, '0')}`;
-const PART_NAME_RE = /^core_library\.db\.zip\.part-(\d{2,})$/;
+const partName = (n, kind = 'core') => `${kind === 'extended' ? EXTENDED_ZIP_NAME : CLOUD_ZIP_NAME}.part-${String(n).padStart(2, '0')}`;
+const PART_NAME_RES = { core: /^core_library\.db\.zip\.part-(\d{2,})$/, extended: /^extended_library\.db\.zip\.part-(\d{2,})$/ };
 
 /** URL of the manifest of the cloud library release (`library-latest`). */
 function cloudManifestUrl(repo) {
@@ -55,17 +58,35 @@ function partUrl(manifestUrl, part) {
  */
 function validateCloudManifest(m) {
   if (!m || typeof m !== 'object') throw new Error('manifest is not a JSON object');
+  if (!m.version || typeof m.version !== 'string') throw new Error('manifest has no "version"');
+  const core = validatePackage(m, 'core', 'manifest');
+  // `extended` (the expansion pack, schema of the two-stage library) is optional: older manifests describe one database.
+  const extended = m.extended == null ? null : validatePackage(m.extended, 'extended', 'manifest.extended');
+  // `edition` (written by builds that still had a classic tier) is dropped: there is one library.
+  const { edition: _legacyEdition, extended: _ext, ...rest } = m;
+  return {
+    ...rest,
+    version: m.version,
+    sourceRepo: m.sourceRepo ? String(m.sourceRepo) : null,
+    scope: m.scope ? String(m.scope) : null,
+    builtAt: m.builtAt ? String(m.builtAt) : null,
+    ...core,
+    extended,
+  };
+}
+
+/** One package (the core database, or the extended one): its numbers coerced, parts checked, hashes lower-cased. */
+function validatePackage(m, kind, label) {
   const int = (k) => {
     const v = Number(m[k]);
-    if (!Number.isFinite(v) || v < 0 || !Number.isInteger(v)) throw new Error(`manifest "${k}" is not a non-negative integer`);
+    if (!Number.isFinite(v) || v < 0 || !Number.isInteger(v)) throw new Error(`${label} "${k}" is not a non-negative integer`);
     return v;
   };
-  if (!m.version || typeof m.version !== 'string') throw new Error('manifest has no "version"');
-  if (!Array.isArray(m.parts) || !m.parts.length) throw new Error('manifest has no "parts"');
+  if (!Array.isArray(m.parts) || !m.parts.length) throw new Error(`${label} has no "parts"`);
   const fullZipSha256 = String(m.fullZipSha256 || '').toLowerCase();
-  if (!HEX64.test(fullZipSha256)) throw new Error('manifest "fullZipSha256" is not a SHA-256 hex digest');
+  if (!HEX64.test(fullZipSha256)) throw new Error(`${label} "fullZipSha256" is not a SHA-256 hex digest`);
   const parts = m.parts.map((p, i) => {
-    const m2 = PART_NAME_RE.exec(String((p && p.name) || ''));
+    const m2 = PART_NAME_RES[kind].exec(String((p && p.name) || ''));
     if (!m2) throw new Error(`part ${i + 1} has an unexpected name "${p && p.name}"`);
     if (Number(m2[1]) !== i + 1) throw new Error(`parts are out of order: expected part-${String(i + 1).padStart(2, '0')}, got "${p.name}"`);
     const sizeBytes = Number(p.sizeBytes);
@@ -78,14 +99,7 @@ function validateCloudManifest(m) {
   const totalZipBytes = int('totalZipBytes');
   const sum = parts.reduce((a, p) => a + p.sizeBytes, 0);
   if (sum !== totalZipBytes) throw new Error(`part sizes add up to ${sum} bytes, but totalZipBytes is ${totalZipBytes}`);
-  // `edition` (written by builds that still had a classic tier) is dropped: there is one library.
-  const { edition: _legacyEdition, ...rest } = m;
   return {
-    ...rest,
-    version: m.version,
-    sourceRepo: m.sourceRepo ? String(m.sourceRepo) : null,
-    scope: m.scope ? String(m.scope) : null,
-    builtAt: m.builtAt ? String(m.builtAt) : null,
     bookCount: int('bookCount'),
     paragraphCount: int('paragraphCount'),
     uncompressedDbBytes: int('uncompressedDbBytes'),
@@ -95,9 +109,46 @@ function validateCloudManifest(m) {
   };
 }
 
+/**
+ * One stage of a validated manifest as the download pipeline sees it ({ version, parts, totalZipBytes, uncompressedDbBytes,
+ * fullZipSha256, bookCount, ... }), with the file names of that stage. The core view is the manifest itself.
+ */
+function packageOf(manifest, kind) {
+  if (kind === 'extended') {
+    if (!manifest.extended) throw new Error('this release has no extended library');
+    return { ...manifest.extended, version: manifest.version, kind: 'extended', zipName: EXTENDED_ZIP_NAME, dbName: EXTENDED_DB_NAME };
+  }
+  return { ...manifest, kind: 'core', zipName: CLOUD_ZIP_NAME, dbName: CLOUD_DB_NAME };
+}
+
+/**
+ * The staged download plan of the card (pure):
+ *   core      ספריית יסוד only
+ *   extended  the expansion pack only (core is already installed)
+ *   full      core + extended in one flow (core first)
+ * @returns {{ plan, packages: string[], totalZipBytes, uncompressedDbBytes, bookCount }}
+ */
+function planPackages(manifest, plan) {
+  const kinds = plan === 'core' ? ['core'] : plan === 'extended' ? ['extended'] : ['core', 'extended'];
+  const pk = kinds.map((k) => packageOf(manifest, k));
+  return {
+    plan,
+    packages: kinds,
+    totalZipBytes: pk.reduce((a, p) => a + p.totalZipBytes, 0),
+    uncompressedDbBytes: pk.reduce((a, p) => a + p.uncompressedDbBytes, 0),
+    bookCount: pk.reduce((a, p) => a + p.bookCount, 0),
+  };
+}
+
 /** Free space the whole download + install needs. */
 function requiredFreeBytes(m) {
   return m.totalZipBytes + m.uncompressedDbBytes + FREE_SPACE_MARGIN;
+}
+
+/** Free space a plan needs: its downloads + extracted databases + the margin (the zips go one at a time, so no double count). */
+function requiredFreeBytesForPlan(manifest, plan) {
+  const p = planPackages(manifest, plan);
+  return p.totalZipBytes + p.uncompressedDbBytes + FREE_SPACE_MARGIN;
 }
 
 /** `{ ok, required, free }`; unknown free space (null) never blocks. */
@@ -116,10 +167,13 @@ function formatBytes(n) {
   return `${Math.max(1, Math.round(v / 1024))} KB`;
 }
 
-/** "חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%" (overall bytes across all parts). */
-function formatPartProgress({ partIndex, partCount, doneBytes, totalBytes }) {
+/**
+ * "חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%" (overall bytes across all parts). In a two-stage flow `label` names the
+ * stage ("ספריית יסוד · חלק 2 מתוך 3 · ..."), and the bytes / percentage are those of the WHOLE flow.
+ */
+function formatPartProgress({ partIndex, partCount, doneBytes, totalBytes, label }) {
   const pct = totalBytes > 0 ? Math.min(100, Math.floor((doneBytes / totalBytes) * 100)) : 0;
-  return `חלק ${partIndex} מתוך ${partCount} · ${formatBytes(doneBytes)} / ${formatBytes(totalBytes)} · ${pct}%`;
+  return `${label ? label + ' · ' : ''}חלק ${partIndex} מתוך ${partCount} · ${formatBytes(doneBytes)} / ${formatBytes(totalBytes)} · ${pct}%`;
 }
 
 /**
@@ -438,10 +492,15 @@ async function extractZip(io, manifest, zipName, dbName, opts) {
 async function stageCloudLibrary(io, manifest, opts) {
   const o = opts || {};
   const report = o.report || (() => undefined);
-  const zipName = o.zipName || CLOUD_ZIP_NAME;
-  const dbName = o.dbName || CLOUD_DB_NAME;
+  const zipName = o.zipName || manifest.zipName || CLOUD_ZIP_NAME;
+  const dbName = o.dbName || manifest.dbName || CLOUD_DB_NAME;
+  // Two-stage flow: `window` = { offset, total, label } maps this package's download bytes onto ONE bar for the whole
+  // flow (offset = bytes of the packages before it, total = the combined size of every package of the flow).
+  const win = o.window || null;
+  const overall = (bytes) => (win ? win.offset + bytes : bytes);
+  const overallTotal = win ? win.total : manifest.totalZipBytes;
   // Seeded with what is already on disk: a retry's first report is the saved percentage, never 0%.
-  let lastFraction = manifest.totalZipBytes ? Math.min(1, (await existingBytes(io, manifest)) / manifest.totalZipBytes) : 0;
+  let lastFraction = overallTotal ? Math.min(1, overall(await existingBytes(io, manifest)) / overallTotal) : 0;
   const keepAwake = o.keepAwake || ((fn) => fn());
   await downloadParts(io, manifest, {
     manifestUrl: o.manifestUrl,
@@ -461,11 +520,11 @@ async function stageCloudLibrary(io, manifest, opts) {
       }),
     onProgress: (p) => {
       // Strictly monotonic: a transient drop / retry never moves the bar backwards.
-      lastFraction = Math.max(lastFraction, p.totalBytes ? p.doneBytes / p.totalBytes : 0);
+      lastFraction = Math.max(lastFraction, overallTotal ? overall(p.doneBytes) / overallTotal : 0);
       report({
         stage: p.skipped ? 'ממשיך — חלק קיים' : 'מוריד…',
-        fraction: p.totalBytes ? lastFraction : null,
-        detail: formatPartProgress(p),
+        fraction: overallTotal ? lastFraction : null,
+        detail: formatPartProgress({ ...p, doneBytes: overall(p.doneBytes), totalBytes: overallTotal, label: win && win.label }),
       });
     },
   });
@@ -633,6 +692,11 @@ module.exports = {
   CLOUD_MANIFEST_NAME,
   CLOUD_ZIP_NAME,
   CLOUD_DB_NAME,
+  EXTENDED_ZIP_NAME,
+  EXTENDED_DB_NAME,
+  packageOf,
+  planPackages,
+  requiredFreeBytesForPlan,
   FREE_SPACE_MARGIN,
   MAX_PART_BYTES,
   partName,

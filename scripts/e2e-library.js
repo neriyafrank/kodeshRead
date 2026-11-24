@@ -11,11 +11,13 @@
  * card, personal library untouched) and restoring it on reload. Downloading, verifying
  * and indexing are covered in Node by `npm test`.
  *
- * Cloud library (ONE complete library: `library-latest`): the browser has no file system, so the test
- * mocks library-manifest.json and two tiny zip chunks (page.route) and runs the real pipeline over
- * in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): the single card with its live size / book
- * count and one download button (no basic / full picker), an older persisted `{ edition, version }`
- * record still loading cleanly, the up-to-date state, the low-storage warning, "חלק 2 מתוך 2 · … · 50%" progress while part 2 is in flight, and the install.
+ * Cloud library (two stages of `library-latest`: core = ספריית יסוד, extended = הרחבה לספרייה מלאה): the browser has no file
+ * system, so the test mocks library-manifest.json (core package + `extended`) and four tiny zip chunks (page.route) and runs the
+ * real pipeline over in-memory storage (globalThis.__KODESHREAD_E2E_CLOUD__): fresh install = two choices with exact sizes
+ * (ספריית יסוד | ספרייה מלאה = combined), the one-tap full download core -> extended with ONE overall progress bar, a core-only
+ * download that never touches the extended parts, "הרחב לספרייה מלאה" with only the extended size once core is installed
+ * (downloads ONLY the extended parts, can be cancelled), a monolithic older install updating to both stages, an older persisted
+ * `{ edition, version }` record loading cleanly, the low-storage warning and the install.
  *
  * Instant cloud starter: with no full library (core removed) a fresh user sees the starter catalog
  * (starter-catalog.json + starter-*.json.gz are mocked with page.route from REAL packs exported out of the
@@ -66,37 +68,51 @@ try {
     if (free) globalThis.__KODESHREAD_FREE_BYTES__ = free;
   });
 
-  // --- mocked multi-part cloud release (2 small chunks of a real zip of a fake SQLite file) ---
+  // --- mocked two-stage cloud release (2 chunks of a real zip of a fake SQLite file per stage) ---
   const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
-  const fakeDb = Buffer.concat([Buffer.from('SQLite format 3\0'), crypto.randomBytes(48 * 1024)]);
-  const zip = Buffer.from(zipSync({ 'core_library.db': new Uint8Array(fakeDb) }, { level: 6 }));
-  const half = Math.ceil(zip.length / 2);
-  const chunks = [zip.subarray(0, half), zip.subarray(half)];
+  const mkStage = (name, size) => {
+    const db = Buffer.concat([Buffer.from('SQLite format 3\0'), crypto.randomBytes(size)]);
+    const zip = Buffer.from(zipSync({ [`${name}_library.db`]: new Uint8Array(db) }, { level: 6 }));
+    const half = Math.ceil(zip.length / 2);
+    const chunks = [zip.subarray(0, half), zip.subarray(half)];
+    return {
+      db,
+      zip,
+      chunks,
+      pkg: {
+        bookCount: name === 'core' ? 506 : 7168,
+        paragraphCount: name === 'core' ? 400000 : 834567,
+        uncompressedDbBytes: db.length,
+        totalZipBytes: zip.length,
+        fullZipSha256: sha(zip),
+        parts: chunks.map((c, i) => ({ name: `${name}_library.db.zip.part-0${i + 1}`, sizeBytes: c.length, sha256: sha(c) })),
+      },
+    };
+  };
+  const stages = { core: mkStage('core', 48 * 1024), extended: mkStage('extended', 160 * 1024) };
   const manifestOf = (over) => ({
     sourceRepo: 'Sivan22/otzaria-library',
     scope: 'all',
     version: 'cloud-e2e-1',
     builtAt: '2026-11-20T10:00:00.000Z',
-    bookCount: 7674,
-    paragraphCount: 1234567,
-    uncompressedDbBytes: fakeDb.length,
-    totalZipBytes: zip.length,
-    fullZipSha256: sha(zip),
-    parts: chunks.map((c, i) => ({ name: `core_library.db.zip.part-0${i + 1}`, sizeBytes: c.length, sha256: sha(c) })),
+    ...stages.core.pkg,
+    extended: stages.extended.pkg,
     ...over,
   });
   const cloud = { current: manifestOf() };
   const cloudManifest = cloud.current;
-  const cloudRequests = [];
+  let cloudRequests = [];
+  const partsByName = new Map(Object.values(stages).flatMap((st) => st.pkg.parts.map((p, i) => [p.name, st.chunks[i]])));
   await page.route('**/releases/download/library-latest/**', async (route) => {
     const name = decodeURIComponent(route.request().url().split('/').pop());
     const cors = { 'access-control-allow-origin': '*' };
     if (name === 'library-manifest.json') return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(cloud.current) });
-    const i = cloud.current.parts.findIndex((p) => p.name === name);
-    if (i < 0) return route.fulfill({ status: 404, headers: cors, body: '' });
+    const body = partsByName.get(name);
+    if (!body) return route.fulfill({ status: 404, headers: cors, body: '' });
     cloudRequests.push(name);
-    if (i === 1) await new Promise((r) => setTimeout(r, 2500)); // part 2 is "in flight" while the test reads the progress
-    return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body: chunks[i] });
+    // The second part of each stage is "in flight" while the test reads the progress.
+    if (/part-02$/.test(name)) await new Promise((r) => setTimeout(r, name.startsWith('extended') ? 2500 : 1200));
+    return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body });
   });
   // The old classic release is never requested any more.
   const classicRequests = [];
@@ -157,22 +173,28 @@ try {
     await tid('cloud-info').waitFor();
     const clean = (t) => t.replace(/[\u2066-\u2069]/g, ''); // bidi isolates are invisible
     const info = clean(await tid('cloud-info').innerText());
+    const CORE_BYTES = stages.core.pkg.totalZipBytes;
+    const EXT_BYTES = stages.extended.pkg.totalZipBytes;
+    const fmt = (n) => (n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
     assert.ok(/ספרים\s*7,674/.test(info) && /cloud-e2e-1/.test(info) && /נבנתה/.test(info), info);
-    assert.ok(/2 חלקים/.test(clean(await tid('cloud-size').innerText())), await tid('cloud-size').innerText());
-    assert.notStrictEqual(await tid('cloud-download').getAttribute('aria-disabled'), 'true', 'enabled in the e2e preview');
-    assert.strictEqual(await tid('cloud-storage-warning').count(), 0, 'no warning while the storage is unknown');
-    assert.strictEqual(await page.locator('[data-testid^="cloud-download"]').count(), 1, 'one download button, no library picker');
-    assert.strictEqual(await page.locator('[data-testid^="cloud-installed"], [data-testid^="cloud-switch"]').count(), 0, 'no installed-tier badge or switch hint');
-    assert.ok((await tid('cloud-title').innerText()).includes('הספרייה המלאה'));
+    assert.ok(clean(await tid('cloud-size-core').innerText()).startsWith(fmt(CORE_BYTES)), await tid('cloud-size-core').innerText());
+    assert.ok(clean(await tid('cloud-size-extended').innerText()).startsWith(fmt(EXT_BYTES)), await tid('cloud-size-extended').innerText());
+    assert.strictEqual(await tid('cloud-storage-warning-full').count(), 0, 'no warning while the storage is unknown');
+    assert.strictEqual(await page.locator('[data-testid^="cloud-installed-edition"], [data-testid^="cloud-switch"]').count(), 0, 'no tier badge or switch hint');
     const cardText = await tid('cloud-library-card').innerText();
-    assert.ok(cardText.includes('כל מאגר אוצריא המלא') && !/בסיסית|ללא אחרוני זמננו|כולל אחרוני זמננו|מותקן כעת/.test(cardText), cardText);
-    assert.ok(clean(await tid('cloud-download').innerText()).includes('הורד'), await tid('cloud-download').innerText());
-    assert.ok(/\d+(\.\d+)? (KB|MB|GB)/.test(clean(await tid('cloud-download').innerText())), 'the button shows the total size');
+    assert.ok(!/בסיסית|מותקן כעת/.test(cardText), cardText);
+    // The sample library of the preview is a monolithic install (no `part`): the complete library of an older build.
+    // It is offered ONE button: update to the two-stage library (both stages, combined size). Nothing to choose.
+    assert.strictEqual(await tid('cloud-download-update-full').count(), 1);
+    assert.strictEqual(await page.locator('[data-testid="cloud-download-core"], [data-testid="cloud-download-expand"]').count(), 0, 'no core-only / expand choice for a complete older install');
+    assert.ok(clean(await tid('cloud-download-update-full').innerText()).includes('עדכן לספרייה מלאה'), await tid('cloud-download-update-full').innerText());
+    assert.ok(clean(await tid('cloud-download-update-full-size').innerText()).startsWith(fmt(CORE_BYTES + EXT_BYTES)), await tid('cloud-download-update-full-size').innerText());
+    assert.ok((await tid('cloud-installed-stage').innerText()).includes('ספרייה מלאה'));
     const cloudAlign = await page.evaluate(() => {
       const el = document.querySelector('[data-testid="cloud-library-card"]');
       const card = el.getBoundingClientRect();
       return [...el.querySelectorAll('div')]
-        .filter((e) => !e.children.length && /[א-ת]{3}/.test(e.innerText || '') && e.getBoundingClientRect().width > 120)
+        .filter((e) => !e.children.length && !e.closest('[data-testid="cloud-info"]') && /[א-ת]{3}/.test(e.innerText || '') && e.getBoundingClientRect().width > 120)
         .map((e) => {
           const r = document.createRange();
           r.selectNodeContents(e);
@@ -182,29 +204,51 @@ try {
     assert.ok(cloudAlign.length >= 3, `cloud card labels (${cloudAlign.length})`);
     for (const t of cloudAlign) assert.ok(t.align === 'right' && t.gapRight < t.gapLeft + 1, `"${t.text}" flush right (${t.align}, ${Math.round(t.gapRight)} / ${Math.round(t.gapLeft)})`);
     await shot('cloud-card');
-    step('cloud card: one complete library with its size + book count from library-latest, one download button, RTL right-aligned');
+    step('cloud card: exact core / extended sizes from the manifest; a monolithic older install is offered one update to both stages (combined size), RTL');
 
-    // Download the library: part 1 completes, part 2 is in flight (progress), then assembly, extraction, install.
-    await tid('cloud-download').click();
+    /** Records every distinct progress line of the running job (the unified bar), starting now. */
+    const watchProgress = () =>
+      page.evaluate(() => {
+        globalThis.__seenProgress = [];
+        globalThis.__kodeshreadCloudInstalled = [];
+        const grab = () => {
+          const t = (document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[⁦-⁩]/g, '');
+          if (t && !globalThis.__seenProgress.includes(t)) globalThis.__seenProgress.push(t);
+        };
+        globalThis.__progressTimer && clearInterval(globalThis.__progressTimer);
+        globalThis.__progressTimer = setInterval(grab, 30);
+      });
+    const seenProgress = async () => (await page.evaluate(() => globalThis.__seenProgress)).join('\n');
+    const installedList = () => page.evaluate(() => globalThis.__kodeshreadCloudInstalled);
+    const finishJob = async () => {
+      await tid('job-result').waitFor({ timeout: 40000 });
+      const text = await tid('job-result').innerText();
+      await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+      await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
+      return text;
+    };
+
+    // A monolithic install updates to the two-stage library: both stages are staged first, then installed (never mixed).
+    cloudRequests = [];
+    await watchProgress();
+    await tid('cloud-download-update-full').click();
     await tid('job-status').waitFor();
-    await page.waitForFunction(
-      () => /חלק 2 מתוך 2 · \d+ (KB|MB) \/ \d+ (KB|MB) · \d+%/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[⁦-⁩]/g, '')),
-      null,
-      { timeout: 15000 },
-    );
-    const progressText = await tid('job-status').innerText();
-    assert.ok(/מוריד/.test(progressText), progressText);
+    await page.waitForFunction(() => /הרחבה לספרייה מלאה · חלק 2 מתוך 2 · \d+ (KB|MB) \/ \d+ (KB|MB) · \d+%/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[⁦-⁩]/g, '')), null, { timeout: 20000 });
     await shot('cloud-progress');
-    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02'], 'parts are fetched sequentially (resumable chunked download), from library-latest');
-    await tid('job-result').waitFor({ timeout: 30000 });
-    const cloudDone = await tid('job-result').innerText();
-    assert.ok(cloudDone.includes('הותקנה מהענן') && cloudDone.includes('הספרייה המלאה') && cloudDone.includes('cloud-e2e-1') && cloudDone.includes('7,674') && !cloudDone.includes('בסיסית'), cloudDone);
-    assert.strictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), 'cloud-e2e-1', 'the staged (SHA-256 verified) library reached the install step');
+    const cloudDone = await finishJob();
+    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02', 'extended_library.db.zip.part-01', 'extended_library.db.zip.part-02'], 'core parts first, then the extended parts, sequentially');
+    assert.ok(cloudDone.includes('הותקנה מהענן') && cloudDone.includes('ספרייה מלאה') && cloudDone.includes('cloud-e2e-1') && cloudDone.includes('7,674'), cloudDone);
+    assert.deepStrictEqual(await installedList(), ['core:cloud-e2e-1', 'extended:cloud-e2e-1'], 'both staged (SHA-256 verified) databases reached the install step, core first');
+    const COMBINED = fmt(CORE_BYTES + EXT_BYTES);
+    const seen = await seenProgress();
+    assert.ok(/ספריית יסוד · חלק 1 מתוך 2/.test(seen) && /הרחבה לספרייה מלאה · חלק 2 מתוך 2/.test(seen), seen);
+    for (const line of seen.split('\n').flatMap((t) => t.split('\n'))) {
+      const m = /· (\d+ (?:KB|MB)) \/ (\d+ (?:KB|MB)) · (\d+)%/.exec(line);
+      if (m) assert.strictEqual(m[2], COMBINED, `every progress line shows the combined total (${line})`);
+    }
     const recorded = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings') || '{}').state?.installedCloud);
-    assert.deepStrictEqual(recorded, { version: 'cloud-e2e-1' }, 'the installed cloud version is recorded (no edition)');
-    await shot('cloud-installed');
-    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
-    step('cloud download: חלק 1 → חלק 2 מתוך 2 progress, assemble + extract, install, version recorded');
+    assert.deepStrictEqual(recorded, { version: 'cloud-e2e-1', stage: 'full' }, 'the installed cloud version + stage are recorded');
+    step(`older monolithic install -> core + extended in one flow: one bar over ${COMBINED}, core staged first, both installed`);
 
     const coreVersion = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'assets', 'db', 'db-version.json'), 'utf8')).version;
     assert.ok(coreVersion, 'db-version.json has a version');
@@ -214,25 +258,64 @@ try {
       await tid('open-library-manager').last().click();
       await tid('cloud-info').waitFor({ timeout: 60000 });
     };
-    // 1. Backward compatibility: a persisted v1 record of an older build ({ edition: 'classic', version }) loads
-    //    cleanly (migrated), the card is the same single card and the library can be (re)downloaded.
-    await page.evaluate((v) => {
-      localStorage.setItem('kodeshread.librarySettings', JSON.stringify({ state: { manifestUrl: null, onboardingDismissed: true, starterOpen: true, installedCloud: { edition: 'classic', version: v } }, version: 1 }));
-    }, coreVersion);
-    await reopenManager();
-    assert.strictEqual(await page.locator('[data-testid^="cloud-download"]').count(), 1);
-    assert.ok(!/בסיסית|מותקן כעת/.test(await tid('cloud-library-card').innerText()), 'a recorded classic install shows no tier');
-    assert.notStrictEqual(await tid('cloud-download').getAttribute('aria-disabled'), 'true');
-    step('an older persisted { edition: classic } record loads cleanly: one card, nothing to choose');
+    const setRecord = (record) =>
+      page.evaluate((r) => localStorage.setItem('kodeshread.librarySettings', JSON.stringify({ state: { manifestUrl: null, onboardingDismissed: true, starterOpen: true, installedCloud: r }, version: 1 })), record);
 
-    // 2. The cloud version equals the installed one -> up to date; a newer cloud version -> a plain download / update button.
+    // 1. Backward compatibility: a persisted v1 record of an older build ({ edition: 'classic', version }) loads cleanly (migrated).
+    await setRecord({ edition: 'classic', version: coreVersion });
+    await reopenManager();
+    assert.strictEqual(await tid('cloud-download-update-full').count(), 1);
+    assert.ok(!/בסיסית|מותקן כעת/.test(await tid('cloud-library-card').innerText()), 'a recorded classic install shows no tier');
+    step('an older persisted { edition: classic } record loads cleanly: the install is offered the two-stage update, nothing to choose');
+
+    // 2. ספריית יסוד installed (core of the cloud build): ONE button, "הרחב לספרייה מלאה", with only the extended size.
+    cloud.current = manifestOf({ version: coreVersion });
+    await setRecord({ version: coreVersion, stage: 'core' });
+    await reopenManager();
+    assert.strictEqual(await page.locator('[data-testid^="cloud-download"]:not([data-testid$="-size"])').count(), 1, 'a single expand button');
+    assert.ok(clean(await tid('cloud-download-expand').innerText()).includes('הרחב לספרייה מלאה'), await tid('cloud-download-expand').innerText());
+    assert.ok(clean(await tid('cloud-download-expand-size').innerText()).startsWith(fmt(EXT_BYTES)), `only the remaining extended size: ${await tid('cloud-download-expand-size').innerText()}`);
+    assert.ok((await tid('cloud-installed-stage').innerText()).includes('ספריית יסוד'));
+    await shot('cloud-expand');
+    cloudRequests = [];
+    await watchProgress();
+    await tid('cloud-download-expand').click();
+    await tid('job-status').waitFor();
+    await page.waitForFunction(() => /הרחבה לספרייה מלאה · חלק 2 מתוך 2/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[\u2066-\u2069]/g, '')), null, { timeout: 20000 }).catch(async (e) => {
+      throw new Error(`${e.message}\nstatus: ${await page.locator('[data-testid="job-status"]').innerText().catch(() => '-')}\nresult: ${await page.locator('[data-testid="job-result"]').innerText().catch(() => '-')}\nrequests: ${cloudRequests}`);
+    });
+    await finishJob();
+    assert.deepStrictEqual(cloudRequests, ['extended_library.db.zip.part-01', 'extended_library.db.zip.part-02'], 'expanding downloads ONLY the extended parts; core.db is never downloaded again');
+    assert.deepStrictEqual(await installedList(), [`extended:${coreVersion}`]);
+    for (const line of (await seenProgress()).split('\n')) {
+      const m = /· (\d+ (?:KB|MB)) \/ (\d+ (?:KB|MB)) · (\d+)%/.exec(line);
+      if (m) assert.strictEqual(m[2], fmt(EXT_BYTES), `the bar of an expansion is the extended size only (${line})`);
+    }
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud), { version: coreVersion, stage: 'full' });
+    step('"הרחב לספרייה מלאה": one button with the extended size only; only the extended parts are downloaded, bar = extended size');
+
+    // 3. The expansion can be cancelled mid-way: nothing but extended parts were requested, the core record stays.
+    await setRecord({ version: coreVersion, stage: 'core' });
+    await reopenManager();
+    cloudRequests = [];
+    await tid('cloud-download-expand').click();
+    await tid('job-status').waitFor();
+    await page.waitForFunction(() => /חלק 2 מתוך 2/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[\u2066-\u2069]/g, '')), null, { timeout: 20000 });
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().requestCancel());
+    await tid('job-result').waitFor({ timeout: 40000 });
+    assert.ok(!((await installedList()) || []).length, 'a cancelled expansion installs nothing');
+    assert.ok(cloudRequests.every((n) => n.startsWith('extended_')), cloudRequests.join());
+    assert.strictEqual((await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud)).stage, 'core', 'core stays recorded as installed');
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
+    step('a cancelled expansion keeps ספריית יסוד and installs nothing; the card still offers הרחב');
+
+    // 4. Up to date: the cloud version equals the installed full library.
+    await setRecord({ version: coreVersion, stage: 'full' });
     cloud.current = manifestOf({ version: coreVersion });
     await reopenManager();
-    assert.ok((await tid('cloud-library-card').innerText()).includes('הגרסה המותקנת זהה לגרסה בענן'));
-    assert.strictEqual(await tid('cloud-update').count(), 0);
+    assert.ok(!(await tid('cloud-library-card').innerText()).includes('קיים עדכון'), 'a legacy full install at the cloud version has no update');
     cloud.current = manifestOf();
-    await reopenManager();
-    assert.ok(!(await tid('cloud-library-card').innerText()).includes('הגרסה המותקנת זהה'));
     // The record is dropped again so the later steps see a plain library.
     await page.evaluate(() => {
       const k = 'kodeshread.librarySettings';
@@ -241,7 +324,6 @@ try {
       localStorage.setItem(k, JSON.stringify(cur));
     });
     assert.deepStrictEqual(classicRequests, [], 'the removed classic release is never requested');
-    step('cloud version == installed -> up to date; a different cloud version -> download again, no tier switching');
 
     // Failure card: the exact sub-step + native error, and "copy error details".
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE }).catch(() => undefined);
@@ -433,6 +515,64 @@ try {
     await tid('onboarding-download').click();
     await tid('cloud-library-card').waitFor();
     step('onboarding "הורד ספרייה מוכנה מהענן" opens the manager with the cloud card (no blind multi-GB download)');
+
+    // First download, nothing installed: TWO clear choices with their exact sizes.
+    await tid('cloud-download-core').waitFor({ timeout: 30000 });
+    const cleanText = (t) => t.replace(/[\u2066-\u2069]/g, '');
+    const coreSize = cleanText(await tid('cloud-download-core-size').innerText());
+    const fullSize = cleanText(await tid('cloud-download-full-size').innerText());
+    const fmt2 = (n) => (n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+    const CB = stages.core.pkg.totalZipBytes;
+    const EB = stages.extended.pkg.totalZipBytes;
+    assert.ok(coreSize.startsWith(fmt2(CB)) && coreSize.includes('506'), `ספריית יסוד: core size only (${coreSize})`);
+    assert.ok(fullSize.startsWith(fmt2(CB + EB)) && fullSize.includes('7,674'), `ספרייה מלאה: combined size (${fullSize})`);
+    assert.ok(cleanText(await tid('cloud-download-core').innerText()).includes('ספריית יסוד') && cleanText(await tid('cloud-download-full').innerText()).includes('הורד ספרייה מלאה'));
+    assert.strictEqual(await page.locator('[data-testid="cloud-download-expand"], [data-testid^="cloud-download-update"]').count(), 0, 'no expand / update before anything is installed');
+    await shot('cloud-choose');
+    step('first download: two choices — ספריית יסוד (core size) and ספרייה מלאה (combined size)');
+
+    // ספריית יסוד: core only, the extended parts are never requested.
+    cloudRequests = [];
+    await page.evaluate(() => {
+      globalThis.__kodeshreadCloudInstalled = [];
+    });
+    await tid('cloud-download-core').click();
+    await tid('job-result').waitFor({ timeout: 40000 });
+    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02']);
+    assert.deepStrictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), ['core:cloud-e2e-1']);
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud), { version: 'cloud-e2e-1', stage: 'core' });
+    assert.ok((await tid('job-result').innerText()).includes('ספריית יסוד'));
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
+    step('ספריית יסוד: only core parts downloaded and installed, stage recorded as core');
+
+    // הורד ספרייה מלאה (one tap): core -> extended in ONE flow with ONE progress bar; core is installed as soon as it is staged.
+    await page.evaluate(() => localStorage.setItem('kodeshread.librarySettings', JSON.stringify({ state: { manifestUrl: null, onboardingDismissed: false, starterOpen: true, installedCloud: null }, version: 1 })));
+    cloudRequests = [];
+    await page.evaluate(() => {
+      globalThis.__seenProgress = [];
+      globalThis.__kodeshreadCloudInstalled = [];
+      globalThis.__progressTimer && clearInterval(globalThis.__progressTimer);
+      globalThis.__progressTimer = setInterval(() => {
+        const t = (document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[\u2066-\u2069]/g, '');
+        if (t && !globalThis.__seenProgress.includes(t)) globalThis.__seenProgress.push(t);
+      }, 30);
+    });
+    await tid('cloud-download-full').click();
+    await tid('job-result').waitFor({ timeout: 60000 });
+    assert.deepStrictEqual(cloudRequests, ['core_library.db.zip.part-01', 'core_library.db.zip.part-02', 'extended_library.db.zip.part-01', 'extended_library.db.zip.part-02'], 'core -> extended, one after the other');
+    assert.deepStrictEqual(await page.evaluate(() => globalThis.__kodeshreadCloudInstalled), ['core:cloud-e2e-1', 'extended:cloud-e2e-1'], 'core installed first, then the expansion');
+    const seenLines = (await page.evaluate(() => globalThis.__seenProgress)).join('\n');
+    assert.ok(/ספריית יסוד · חלק 1 מתוך 2/.test(seenLines) && /הרחבה לספרייה מלאה · חלק 2 מתוך 2/.test(seenLines), seenLines);
+    const totals = new Set([...seenLines.matchAll(/\/ (\d+ (?:KB|MB)) · \d+%/g)].map((m) => m[1]));
+    assert.deepStrictEqual([...totals], [fmt2(CB + EB)], `ONE total (core + extended) on every progress line: ${[...totals]}`);
+    const pcts = [...seenLines.matchAll(/· (\d+)%/g)].map((m) => Number(m[1]));
+    assert.ok(pcts.length > 2 && pcts.every((v, i) => i === 0 || v >= pcts[i - 1] - 0) , `the overall percentage only goes up: ${pcts}`);
+    assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud), { version: 'cloud-e2e-1', stage: 'full' });
+    assert.ok(/ספרייה מלאה/.test(await tid('job-result').innerText()) && (await tid('job-result').innerText()).includes('7,674'));
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
+    step(`הורד ספרייה מלאה: core -> extended in one flow, one bar over ${fmt2(CB + EB)}, core installed first`);
     await page.goBack();
     await tid('onboarding-card').waitFor();
 
@@ -678,12 +818,12 @@ try {
     await tid('open-library-manager').last().click();
     await tid('cloud-info').last().waitFor({ timeout: 60000 });
     // Low free storage: warn clearly (zip + extracted DB + 500 MB), still allow "continue anyway".
-    const need = cloudManifest.totalZipBytes + cloudManifest.uncompressedDbBytes + 500 * 1024 * 1024;
+    const need = cloudManifest.totalZipBytes + cloudManifest.uncompressedDbBytes + cloudManifest.extended.totalZipBytes + cloudManifest.extended.uncompressedDbBytes + 500 * 1024 * 1024;
     await page.evaluate((v) => sessionStorage.setItem('e2e.freeBytes', String(v)), need - 1024);
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-library-manager').last().click();
-    await tid('cloud-storage-warning').waitFor();
-    const warn = await tid('cloud-storage-warning').innerText();
+    await tid('cloud-storage-warning-full').waitFor();
+    const warn = await tid('cloud-storage-warning-full').innerText();
     assert.ok(/אין מספיק מקום פנוי/.test(warn) && /500 MB/.test(warn.replace(/[\u2066-\u2069]/g, '')), warn);
     await shot('cloud-warning');
     step('cloud card warns when free space < zip + DB + 500 MB');
@@ -691,7 +831,7 @@ try {
     await page.goto(BASE + '/', { timeout: 180000 });
     await tid('open-library-manager').last().click();
     await tid('cloud-info').waitFor();
-    assert.strictEqual(await tid('cloud-storage-warning').count(), 0);
+    assert.strictEqual(await tid('cloud-storage-warning-full').count(), 0);
 
     // Themes: the card follows the palette.
     const cardBg = () => tid('cloud-edition').last().evaluate((el) => getComputedStyle(el).backgroundColor);

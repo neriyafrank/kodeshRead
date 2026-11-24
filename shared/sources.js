@@ -1,8 +1,11 @@
 /**
- * Unified query layer over the two library databases:
+ * Unified query layer over the library databases:
  *
- *   core  (core_library.db)  downloaded release or built from an Otzaria folder; ids from 1
- *   user  (user_library.db)  personal books imported on the device; ids >= USER_ID_BASE
+ *   core      (core_library.db)      downloaded release (ספריית יסוד, or the whole library of older builds) or built
+ *                                    from an Otzaria folder; ids from 1
+ *   extended  (extended_library.db)  the optional expansion pack (shared/coreLibrary.js): ids >= EXTENDED_ID_BASE;
+ *                                    installed next to core, queried through the router, never merged on the device
+ *   user      (user_library.db)      personal books imported on the device; ids >= USER_ID_BASE
  *
  * A "router" is { sources: [{ name, adapter, idBase, categoryRoot? }], forBook(bookId) }.
  * Every per-book query (reader window, TOC, Quick Jump traversal, commentaries) goes to
@@ -19,7 +22,7 @@
  */
 'use strict';
 
-const { USER_ID_BASE, USER_ROOT_NAME } = require('./indexer');
+const { USER_ID_BASE, USER_ROOT_NAME, EXTENDED_ID_BASE } = require('./indexer');
 
 function isRouter(db) {
   return !!db && Array.isArray(db.sources) && typeof db.forBook === 'function';
@@ -65,23 +68,38 @@ function sourcesForCategory(db, path) {
 }
 
 /**
- * Categories + books of every source (tree / scope picker). Ids are unique across
- * sources. A source with no books contributes no categories (an empty personal library
- * adds no empty folder to the tree).
+ * Categories + books of every source (tree / scope picker). Book ids are unique across sources. A source
+ * with no books contributes no categories (an empty personal library adds no empty folder to the tree).
+ * The folders of core and extended are the same folders of one library: a category path that an earlier
+ * library source already has is folded into it (the later source's books / sub-folders point at the first id),
+ * so the tree shows one תנ"ך, one תלמוד בבלי, ... whichever stages are installed. A source with its own
+ * `categoryRoot` (personal books) never merges.
  */
 async function loadCatalog(db) {
   const categories = [];
   const books = [];
+  const idByPath = new Map();
   for (const s of sourcesOf(db)) {
     const [cats, bks] = await Promise.all([
       s.adapter.all('SELECT id, parent_id, name, path FROM categories ORDER BY id', []),
       s.adapter.all('SELECT id, category_id, title, aliases, total_lines FROM books ORDER BY id', []),
     ]);
     if (!bks.length) continue;
-    for (const c of cats) categories.push({ ...c, source: s.name });
-    for (const b of bks) books.push({ ...b, source: s.name });
+    const fold = !s.categoryRoot;
+    const remap = new Map();
+    for (const c of cats) {
+      const seen = fold ? idByPath.get(c.path) : undefined;
+      if (seen !== undefined) {
+        remap.set(c.id, seen);
+        continue;
+      }
+      if (fold) idByPath.set(c.path, c.id);
+    }
+    const to = (id) => (id == null ? id : remap.has(id) ? remap.get(id) : id);
+    for (const c of cats) if (!remap.has(c.id)) categories.push({ ...c, parent_id: to(c.parent_id), source: s.name });
+    for (const b of bks) books.push({ ...b, category_id: to(b.category_id), source: s.name });
   }
   return { categories, books };
 }
 
-module.exports = { USER_ID_BASE, USER_ROOT_NAME, isRouter, sourcesOf, sourceForId, adapterForBook, createRouter, sourcesForCategory, loadCatalog };
+module.exports = { EXTENDED_ID_BASE, USER_ID_BASE, USER_ROOT_NAME, isRouter, sourcesOf, sourceForId, adapterForBook, createRouter, sourcesForCategory, loadCatalog };

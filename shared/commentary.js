@@ -11,10 +11,15 @@
  *     commentary shows the base text of its unit.
  * Explicit links that point into a block already shown are dropped (no duplicates).
  * Databases built before schema v4 have no ref_links table: lookups then use `links` only.
+ *
+ * Two-stage library (shared/coreLibrary.js): a commentary of the extended database can comment on a base book of the
+ * core database (and vice versa). The links of a book are therefore looked up in EVERY installed database ("holders":
+ * the rows live with their commentary book), and the text of each linked block is read from the database that owns the
+ * linked book. With one database (or a plain adapter) this is exactly the single-database lookup.
  */
 'use strict';
 
-const { adapterForBook } = require('./sources');
+const { adapterForBook, sourcesOf } = require('./sources');
 const { paragraphNumber } = require('./refAlign');
 
 /** Longest commentary / base block rendered in the drawer (a whole chapter at most). */
@@ -63,9 +68,14 @@ async function refPartners(a, side, bookId) {
   return ids;
 }
 
+/** Every database that can hold link rows of a book (a plain adapter is its own single holder). */
+const holdersOf = (db) => sourcesOf(db).map((s) => s.adapter);
+
 /** Forget cached partners (after an import changed the links). */
 function clearRefCache(db) {
-  if (db) partnerCache.delete(db);
+  if (!db) return;
+  partnerCache.delete(db);
+  for (const h of holdersOf(db)) partnerCache.delete(h);
 }
 
 /**
@@ -75,28 +85,29 @@ function clearRefCache(db) {
  * role 'base': bookId is the base book, the other side is a commentary block (and vice versa).
  */
 async function fetchUnitLinks(db, bookId, line) {
-  const a = adapterForBook(db, bookId);
   const out = [];
-  for (const side of ['base', 'comm']) {
-    const partners = await refPartners(a, side, bookId);
-    if (!partners.length) continue;
-    const S = SIDES[side];
-    const values = partners.map(() => '(?)').join(', ');
-    const rows = await a.all(
-      `WITH p(id) AS (VALUES ${values})
-       SELECT r.${S.other} AS other_id, r.ref_key, r.${S.start} AS s, r.${S.end} AS e, r.${S.oStart} AS os, r.${S.oEnd} AS oe, r.link_type
-         FROM p JOIN ref_links r
-           ON r.${S.self} = ? AND r.${S.other} = p.id
-          AND r.${S.start} = (
-                SELECT ${S.start} FROM ref_links
-                 WHERE ${S.self} = ? AND ${S.other} = p.id AND ${S.start} <= ? AND ${S.end} >= ?
-                 ORDER BY ${S.start} DESC LIMIT 1)
-        WHERE r.${S.end} >= ?
-        ORDER BY r.${S.other}, r.${S.oStart}`,
-      [...partners, bookId, bookId, line, line, line],
-    );
-    for (const r of rows) {
-      out.push({ role: side, otherBookId: r.other_id, refKey: r.ref_key, start: r.s, end: r.e, otherStart: r.os, otherEnd: r.oe, link_type: r.link_type });
+  for (const a of holdersOf(db)) {
+    for (const side of ['base', 'comm']) {
+      const partners = await refPartners(a, side, bookId);
+      if (!partners.length) continue;
+      const S = SIDES[side];
+      const values = partners.map(() => '(?)').join(', ');
+      const rows = await a.all(
+        `WITH p(id) AS (VALUES ${values})
+         SELECT r.${S.other} AS other_id, r.ref_key, r.${S.start} AS s, r.${S.end} AS e, r.${S.oStart} AS os, r.${S.oEnd} AS oe, r.link_type
+           FROM p JOIN ref_links r
+             ON r.${S.self} = ? AND r.${S.other} = p.id
+            AND r.${S.start} = (
+                  SELECT ${S.start} FROM ref_links
+                   WHERE ${S.self} = ? AND ${S.other} = p.id AND ${S.start} <= ? AND ${S.end} >= ?
+                   ORDER BY ${S.start} DESC LIMIT 1)
+          WHERE r.${S.end} >= ?
+          ORDER BY r.${S.other}, r.${S.oStart}`,
+        [...partners, bookId, bookId, line, line, line],
+      );
+      for (const r of rows) {
+        out.push({ role: side, otherBookId: r.other_id, refKey: r.ref_key, start: r.s, end: r.e, otherStart: r.os, otherEnd: r.oe, link_type: r.link_type });
+      }
     }
   }
   return out;
@@ -108,28 +119,29 @@ async function fetchUnitLinks(db, bookId, line) {
  * @returns {Promise<Map<number, number>>} line_index -> count (lines without links are absent)
  */
 async function fetchLinkCounts(db, bookId, from, to) {
-  const a = adapterForBook(db, bookId);
-  const rows = await a.all(
-    `SELECT line, COUNT(*) AS n FROM (
-       SELECT line_a AS line FROM links WHERE book_a_id = ? AND line_a BETWEEN ? AND ?
-       UNION ALL
-       SELECT line_b AS line FROM links WHERE book_b_id = ? AND line_b BETWEEN ? AND ?
-     ) GROUP BY line`,
-    [bookId, from, to, bookId, from, to],
-  );
   const out = new Map();
-  for (const r of rows) out.set(r.line, r.n);
-  for (const side of ['base', 'comm']) {
-    const partners = await refPartners(a, side, bookId);
-    if (!partners.length) continue;
-    const S = SIDES[side];
-    const units = await a.all(
-      `SELECT ${S.start} AS line, COUNT(*) AS n FROM ref_links
-        WHERE ${S.self} = ? AND ${S.other} IN (${partners.map(() => '?').join(', ')}) AND ${S.start} BETWEEN ? AND ?
-        GROUP BY ${S.start}`,
-      [bookId, ...partners, from, to],
+  for (const a of holdersOf(db)) {
+    const rows = await a.all(
+      `SELECT line, COUNT(*) AS n FROM (
+         SELECT line_a AS line FROM links WHERE book_a_id = ? AND line_a BETWEEN ? AND ?
+         UNION ALL
+         SELECT line_b AS line FROM links WHERE book_b_id = ? AND line_b BETWEEN ? AND ?
+       ) GROUP BY line`,
+      [bookId, from, to, bookId, from, to],
     );
-    for (const r of units) out.set(r.line, (out.get(r.line) || 0) + r.n);
+    for (const r of rows) out.set(r.line, (out.get(r.line) || 0) + r.n);
+    for (const side of ['base', 'comm']) {
+      const partners = await refPartners(a, side, bookId);
+      if (!partners.length) continue;
+      const S = SIDES[side];
+      const units = await a.all(
+        `SELECT ${S.start} AS line, COUNT(*) AS n FROM ref_links
+          WHERE ${S.self} = ? AND ${S.other} IN (${partners.map(() => '?').join(', ')}) AND ${S.start} BETWEEN ? AND ?
+          GROUP BY ${S.start}`,
+        [bookId, ...partners, from, to],
+      );
+      for (const r of units) out.set(r.line, (out.get(r.line) || 0) + r.n);
+    }
   }
   return out;
 }
@@ -147,28 +159,39 @@ const ENTRY_COLUMNS = `b.title AS book_title, c.path AS category_path`;
  * line links that are not already inside a block of the same book.
  */
 async function fetchLinkedEntries(db, bookId, line) {
-  // Links never cross databases: a book's commentaries live in the same library DB.
-  const a = adapterForBook(db, bookId);
-  const lineLinks = await a.all(
-    `SELECT x.book_id, ${ENTRY_COLUMNS}, x.line, x.link_type, p.display_text, p.toc_path
-     FROM (
-       SELECT book_b_id AS book_id, line_b AS line, link_type FROM links WHERE book_a_id = ? AND line_a = ?
-       UNION ALL
-       SELECT book_a_id AS book_id, line_a AS line, link_type FROM links WHERE book_b_id = ? AND line_b = ?
-     ) x
-     JOIN books b ON b.id = x.book_id
-     LEFT JOIN categories c ON c.id = b.category_id
-     LEFT JOIN paragraphs p ON p.book_id = x.book_id AND p.line_index = x.line
-     ORDER BY x.book_id, x.line`,
-    [bookId, line, bookId, line],
-  );
+  // Explicit link rows live in the database of one of their books (any installed database may hold them); the
+  // linked paragraph is read from the database that owns the OTHER book.
+  const raw = [];
+  for (const h of holdersOf(db)) {
+    raw.push(
+      ...(await h.all(
+        `SELECT book_b_id AS book_id, line_b AS line, link_type FROM links WHERE book_a_id = ? AND line_a = ?
+         UNION ALL
+         SELECT book_a_id AS book_id, line_a AS line, link_type FROM links WHERE book_b_id = ? AND line_b = ?`,
+        [bookId, line, bookId, line],
+      )),
+    );
+  }
+  const lineLinks = [];
+  for (const r of raw) {
+    const found = await adapterForBook(db, r.book_id).all(
+      `SELECT b.title AS book_title, c.path AS category_path, p.display_text, p.toc_path
+         FROM books b
+         LEFT JOIN categories c ON c.id = b.category_id
+         LEFT JOIN paragraphs p ON p.book_id = b.id AND p.line_index = ?
+        WHERE b.id = ?`,
+      [r.line, r.book_id],
+    );
+    if (found.length) lineLinks.push({ book_id: r.book_id, ...found[0], line: r.line, link_type: r.link_type });
+  }
+  lineLinks.sort((x, y) => x.book_id - y.book_id || x.line - y.line);
   const explicit = new Set(lineLinks.map((r) => r.book_id + ':' + r.line));
   const out = [];
   const seen = new Set();
   const blocks = [];
   for (const u of await fetchUnitLinks(db, bookId, line)) {
     const end = Math.min(u.otherEnd, u.otherStart + MAX_BLOCK_LINES);
-    const rows = await a.all(
+    const rows = await adapterForBook(db, u.otherBookId).all(
       `SELECT p.book_id, ${ENTRY_COLUMNS}, p.line_index AS line, p.display_text, p.toc_path, p.is_heading, t.title AS heading_title
          FROM paragraphs p JOIN books b ON b.id = p.book_id LEFT JOIN categories c ON c.id = b.category_id
          LEFT JOIN toc_nodes t ON p.is_heading <> 0 AND t.book_id = p.book_id AND t.start_line = p.line_index

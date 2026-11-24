@@ -24,9 +24,10 @@ import { openDatabaseAsync } from 'expo-sqlite';
 import { AppState } from 'react-native';
 
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
-import { checkFreeSpace, cloudManifestUrl, createMemoryIO, downloadRangeChunks, existingBytes, formatBytes, partName, requiredFreeBytes, stageCloudLibrary, validateCloudManifest, type CloudManifest, type PartsIO } from '../../shared/multipart';
+import { runStagedFlow, STAGE_TITLES, type InstalledState, type Plan } from '../../shared/libraryRelease';
+import { checkFreeSpace, cloudManifestUrl, createMemoryIO, downloadRangeChunks, formatBytes, packageOf, planPackages, requiredFreeBytesForPlan, stageCloudLibrary, validateCloudManifest, type CloudManifest, type CloudPackageView, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
-import { coreInfoFromMeta, CORE_TMP_DB, dbFile, isWeb, removeDbFiles, toAdapter } from '../db/library';
+import { coreInfoFromMeta, CORE_TMP_DB, dbFile, EXTENDED_TMP_DB, isWeb, removeDbFiles, toAdapter } from '../db/library';
 import { CancelledError, useLibraryJobs } from '../state/libraryJobs';
 import * as importService from './importForegroundService';
 import { withKeepAwake } from './keepAwake';
@@ -76,12 +77,13 @@ export interface StorageVerdict {
   message: string | null;
 }
 
-/** "free < zip + db + 500 MB" -> a Hebrew warning; ok otherwise. */
-export function storageVerdict(m: CloudManifest, free: number | null = freeDiskBytes()): StorageVerdict {
-  const v = checkFreeSpace(m, free);
+/** "free < zips + dbs + 500 MB" of one plan -> a Hebrew warning; ok otherwise. */
+export function storageVerdict(m: CloudManifest, plan: Plan = 'core', free: number | null = freeDiskBytes()): StorageVerdict {
+  const p = planPackages(m, plan);
+  const v = checkFreeSpace({ ...m, totalZipBytes: p.totalZipBytes, uncompressedDbBytes: p.uncompressedDbBytes }, free);
   return {
     ...v,
-    message: v.ok ? null : `אין מספיק מקום פנוי: נדרשים ${formatBytes(v.required)} (הורדה ${formatBytes(m.totalZipBytes)} + חילוץ ${formatBytes(m.uncompressedDbBytes)} + 500 MB רזרבה), פנויים ${formatBytes(v.free ?? 0)}.`,
+    message: v.ok ? null : `אין מספיק מקום פנוי: נדרשים ${formatBytes(v.required)} (הורדה ${formatBytes(p.totalZipBytes)} + חילוץ ${formatBytes(p.uncompressedDbBytes)} + 500 MB רזרבה), פנויים ${formatBytes(v.free ?? 0)}.`,
   };
 }
 
@@ -136,7 +138,7 @@ function whenForeground(isCancelled: () => boolean): Promise<void> {
 /** expo-file-system backend of shared/multipart.js. Parts live in Documents/core_library_parts. */
 export function nativePartsIO(isCancelled: () => boolean): PartsIO {
   const dir = partsDir();
-  const file = (name: string) => (name === CORE_TMP_DB ? dbFile(name) : new File(dir, name));
+  const file = (name: string) => (name === CORE_TMP_DB || name === EXTENDED_TMP_DB ? dbFile(name) : new File(dir, name));
   return {
     size: (name) => {
       const f = file(name);
@@ -228,27 +230,42 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
   };
 }
 
-/** Parts already on disk with the exact size of the manifest (the card's "ההורדה תמשיך" hint). */
-export function countPartsOnDisk(m: CloudManifest): number {
-  if (isWeb) return 0;
+/** Parts of a plan already on disk with the exact size of the manifest (the card's "ההורדה תמשיך" hint). */
+export function countPartsOnDisk(m: CloudManifest, plan: Plan = 'full'): { onDisk: number; total: number } {
+  const pkgs = planPackages(m, plan).packages.map((k) => packageOf(m, k));
+  const total = pkgs.reduce((a, p) => a + p.parts.length, 0);
+  if (isWeb) return { onDisk: 0, total };
   try {
     const dir = new Directory(Paths.document, PARTS_DIR);
-    if (!dir.exists) return 0;
-    return m.parts.filter((p) => {
-      const f = new File(dir, partName(Number(/part-(\d+)$/.exec(p.name)?.[1])));
-      return f.exists && f.size === p.sizeBytes;
-    }).length;
+    if (!dir.exists) return { onDisk: 0, total };
+    let onDisk = 0;
+    for (const pkg of pkgs) {
+      for (const p of pkg.parts) {
+        const f = new File(dir, p.name);
+        if (f.exists && f.size === p.sizeBytes) onDisk++;
+      }
+    }
+    return { onDisk, total };
   } catch {
-    return 0;
+    return { onDisk: 0, total };
   }
 }
 
-/** Removes downloaded parts / a half-assembled zip (after a successful install). */
-export function clearCloudParts(): void {
+/** Removes the downloaded parts (and their partial / id / chunk side files) of finished packages. */
+export function clearCloudParts(pkgs?: CloudPackageView[]): void {
   if (isWeb) return;
   try {
     const dir = new Directory(Paths.document, PARTS_DIR);
-    if (dir.exists) dir.delete();
+    if (!dir.exists) return;
+    if (!pkgs) return dir.delete();
+    for (const pkg of pkgs) {
+      for (const p of pkg.parts) {
+        for (const suffix of ['', '.partial', '.partial.id', '.chunk']) {
+          const f = new File(dir, p.name + suffix);
+          if (f.exists) f.delete();
+        }
+      }
+    }
   } catch (e) {
     console.warn('could not remove cloud library parts', e);
   }
@@ -258,28 +275,24 @@ function report(p: { stage: string; fraction: number | null; detail: string | nu
   useLibraryJobs.getState().update(p);
 }
 
+const tmpDbOf = (kind: 'core' | 'extended') => (kind === 'extended' ? EXTENDED_TMP_DB : CORE_TMP_DB);
+
 /**
- * Downloads, assembles, extracts and validates the cloud library into SQLite/core_library.db.tmp.
- * Returns its version; the caller installs it with installCore().
+ * Downloads, assembles, extracts and validates ONE package (core or extended) into its staging database
+ * (SQLite/core_library.db.tmp | extended_library.db.tmp). `win` maps its download bytes onto the unified bar of the
+ * whole flow. Resumes from the parts on disk (chunked Range, SHA-256 per part and for the whole zip).
  */
-export async function downloadAndStageCloud(manifest: CloudManifest, manifestUrl: string): Promise<string> {
-  if (isWeb) throw new Error('הורדת ספרייה אינה נתמכת בתצוגה המקדימה בדפדפן');
-  const free = freeDiskBytes();
-  if (free != null && free < requiredFreeBytes(manifest) * 0.5) {
-    // The card already warned; this only stops a run that cannot possibly fit.
-    throw new Error(storageVerdict(manifest, free).message ?? 'אין מספיק מקום פנוי');
-  }
+async function stagePackage(pkg: CloudPackageView, manifest: CloudManifest, manifestUrl: string, win: { offset: number; total: number; label: string }): Promise<void> {
   const cancelled = () => useLibraryJobs.getState().cancelRequested;
   const io = nativePartsIO(cancelled);
-  removeDbFiles(CORE_TMP_DB);
+  const tmp = tmpDbOf(pkg.kind);
+  removeDbFiles(tmp);
   try {
-    // A retry shows the saved percentage at once (bytes already on disk), never a flash of 0%.
-    const saved = manifest.totalZipBytes ? Math.min(1, (await existingBytes(io, manifest)) / manifest.totalZipBytes) : 0;
-    report({ stage: 'מוריד…', fraction: saved, detail: null });
     try {
-      await stageCloudLibrary(io, manifest, {
+      await stageCloudLibrary(io, pkg, {
         manifestUrl,
-        dbName: CORE_TMP_DB,
+        dbName: tmp,
+        window: win,
         isCancelled: cancelled,
         report,
         isBackgrounded,
@@ -290,17 +303,18 @@ export async function downloadAndStageCloud(manifest: CloudManifest, manifestUrl
       if (cancelled()) throw new CancelledError();
       throw e;
     }
-    report({ stage: 'בודק את מסד הנתונים…', fraction: null, detail: null });
-    return await validateStagedCloud(manifest.version);
+    report({ stage: 'בודק את מסד הנתונים…', fraction: null, detail: win.label });
+    // A release with an extended pack stamps its core database `part = core`; an older one-database release has no part.
+    await validateStagedCloud(manifest.version, tmp, pkg.kind === 'extended' ? 'extended' : manifest.extended ? 'core' : null);
   } catch (e) {
-    removeDbFiles(CORE_TMP_DB); // the parts stay: the next attempt resumes
+    removeDbFiles(tmp); // the parts stay: the next attempt resumes
     throw e;
   }
 }
 
-/** quick_check + meta + schema of the staged DB (returns its version). */
-export async function validateStagedCloud(expectedVersion: string): Promise<string> {
-  const db = await openDatabaseAsync(CORE_TMP_DB);
+/** quick_check + meta + schema of a staged DB (returns its version). `part` = the expected `meta.part` (null: none). */
+export async function validateStagedCloud(expectedVersion: string, dbName: string = CORE_TMP_DB, part: 'core' | 'extended' | null = null): Promise<string> {
+  const db = await openDatabaseAsync(dbName);
   try {
     await db.execAsync('PRAGMA query_only = ON;');
     const check = await db.getAllAsync<Record<string, string>>('PRAGMA quick_check');
@@ -310,6 +324,7 @@ export async function validateStagedCloud(expectedVersion: string): Promise<stri
     if (!info) throw new Error('הקובץ אינו ספריית kodeshRead (חסרה טבלת meta)');
     if (info.scriptVersion > SCHEMA_VERSION) throw new Error('הספרייה דורשת גרסה חדשה יותר של האפליקציה');
     if (info.version !== expectedVersion) throw new Error(`גרסת הספרייה (${info.version}) אינה תואמת ל-manifest (${expectedVersion})`);
+    if (part && info.part !== part) throw new Error(`סוג הספרייה (${info.part ?? 'ללא'}) אינו תואם למצופה (${part})`);
     const row = await db.getFirstAsync<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name IN ('books', 'paragraphs', 'toc_nodes', 'paragraphs_fts', 'links', 'ref_links')");
     if (!row || row.n < 6) throw new Error('מבנה מסד הנתונים חסר');
     return info.version;
@@ -321,21 +336,58 @@ export async function validateStagedCloud(expectedVersion: string): Promise<stri
 /** True when the browser preview runs the download flow against in-memory storage (e2e only). */
 export const isPreviewCloudDownload = () => isWeb && !!(globalThis as { __KODESHREAD_E2E_CLOUD__?: boolean }).__KODESHREAD_E2E_CLOUD__;
 
-/**
- * Browser e2e: the same pipeline (download parts, assemble, extract) over in-memory storage.
- * Resolves with the manifest version once the extracted bytes are a SQLite database; nothing is
- * installed (the preview has no file system).
- */
-export async function stageCloudForPreview(manifest: CloudManifest, manifestUrl: string): Promise<string> {
+/** Browser e2e: the same pipeline over in-memory storage for ONE package; resolves once the bytes are a SQLite database. */
+async function stagePackageForPreview(pkg: CloudPackageView, manifestUrl: string, win: { offset: number; total: number; label: string }): Promise<void> {
   const io = createMemoryIO();
   const cancelled = () => useLibraryJobs.getState().cancelRequested;
   try {
-    await stageCloudLibrary(io, manifest, { manifestUrl, dbName: CORE_TMP_DB, isCancelled: cancelled, report });
+    await stageCloudLibrary(io, pkg, { manifestUrl, dbName: tmpDbOf(pkg.kind), window: win, isCancelled: cancelled, report });
   } catch (e) {
     if (cancelled()) throw new CancelledError();
     throw e;
   }
-  const head = io.files.get(CORE_TMP_DB)?.subarray(0, 15);
+  const head = io.files.get(tmpDbOf(pkg.kind))?.subarray(0, 15);
   if (!head || String.fromCharCode(...head) !== 'SQLite format 3') throw new Error('הקובץ שחולץ אינו מסד SQLite');
-  return manifest.version;
+}
+
+export interface CloudFlowHooks {
+  installCore: () => Promise<void>;
+  installExtended: () => Promise<void>;
+  /** Called after a stage is installed (the browser preview records it instead of installing). */
+  onInstalled: (kind: 'core' | 'extended', version: string) => void;
+}
+
+/**
+ * The staged cloud download of one plan (see shared/libraryRelease.js flowOf):
+ *   core      ספריית יסוד only
+ *   extended  only the expansion pack (core.db is never downloaded again)
+ *   full      core -> extended in ONE flow with ONE progress bar (total = the combined bytes of the packages left);
+ *             a fresh install installs core as soon as it is staged, so a cancellation keeps it usable and the next run
+ *             only finishes the extended pack; an UPDATE stages both first and swaps them back to back.
+ * Every package is resumable (parts on disk, Range chunks) and SHA-256 verified. Returns the installed book count.
+ */
+export async function runCloudFlow(manifest: CloudManifest, manifestUrl: string, plan: Plan, state: InstalledState, hooks: CloudFlowHooks): Promise<{ books: number; kinds: ('core' | 'extended')[] }> {
+  const preview = isPreviewCloudDownload();
+  if (isWeb && !preview) throw new Error('הורדת ספרייה אינה נתמכת בתצוגה המקדימה בדפדפן');
+  const free = freeDiskBytes();
+  if (!preview && free != null && free < requiredFreeBytesForPlan(manifest, plan) * 0.5) {
+    // The card already warned; this only stops a run that cannot possibly fit.
+    throw new Error(storageVerdict(manifest, plan, free).message ?? 'אין מספיק מקום פנוי');
+  }
+  const r = await runStagedFlow({
+    state,
+    manifest,
+    plan,
+    stage: (p: CloudPackageView, win) => (preview ? stagePackageForPreview(p, manifestUrl, win) : stagePackage(p, manifest, manifestUrl, win)),
+    install: async (p: CloudPackageView) => {
+      useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: STAGE_TITLES[p.kind] });
+      if (!preview) {
+        // The DB swap (drain readers, close, rename) must not be cut short by the device sleeping.
+        await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => (p.kind === 'core' ? hooks.installCore() : hooks.installExtended()));
+        clearCloudParts([p]);
+      }
+      hooks.onInstalled(p.kind, manifest.version);
+    },
+  });
+  return { books: r.books, kinds: r.kinds };
 }

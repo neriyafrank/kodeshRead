@@ -60,9 +60,9 @@ interface LibrarySettingsState {
   /** Library screen: the ספרי התחלה section is expanded (persisted; collapsed = just its header). */
   starterOpen: boolean;
   setStarterOpen: (open: boolean) => void;
-  /** Version of the cloud library the app last installed (older builds also stored an `edition`: ignored). */
-  installedCloud: { version: string } | null;
-  setInstalledCloud: (version: string) => void;
+  /** Cloud version + stage the app last installed (older builds also stored an `edition`: ignored). */
+  installedCloud: { version: string; stage?: 'core' | 'full' } | null;
+  setInstalledCloud: (version: string, stage?: 'core' | 'full') => void;
   setManifestUrl: (url: string | null) => void;
   dismissOnboarding: (dismissed?: boolean) => void;
 }
@@ -76,7 +76,7 @@ export const useLibrarySettings = create<LibrarySettingsState>()(
       starterOpen: true,
       setStarterOpen: (starterOpen) => set({ starterOpen }),
       installedCloud: null,
-      setInstalledCloud: (version) => set({ installedCloud: { version } }),
+      setInstalledCloud: (version, stage) => set({ installedCloud: stage ? { version, stage } : { version } }),
       setManifestUrl: (url) => set({ manifestUrl: url && url.trim() ? url.trim() : null }),
       dismissOnboarding: (dismissed = true) => set({ onboardingDismissed: dismissed }),
     }),

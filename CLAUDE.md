@@ -195,14 +195,18 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > ערוך". Audit: `node scripts/audit-parallels.js [--db=…]` (also in `build-library.yml`). Self-tested (section 16),
 > e2e in `e2e:commentary` / `e2e:library` (sample `משנה שבת` excerpt).
 
-> **One complete cloud library:** there is no basic / full distinction. `shared/libraryRelease.js` (pure) names the single release
-> (`all` scope -> `library-latest`; `libraryAction` = install / current / update; `normalizeInstalledCloud` migrates the persisted
-> `installedCloud` of older builds `{ edition, version }` -> `{ version }`, `libraryStore` version 2). `build-library.yml` has no matrix or
-> `editions` input and builds / publishes the one library (+ `starter-latest`, `audit-parallels.js`). Manifests carry `releaseTag` (a legacy
-> `edition` field is dropped on validation). A DB installed from the older `classical_full` build is a partial scope: the card offers
-> `עדכן ספרייה` to the complete one (`LibraryContext.installCore` remaps tabs). `CloudLibraryCard.tsx` = one card, one button, no badges
-> or switching. (`build-db.js --scope=classical_full` remains only as a developer filter, never used by CI or the app.) Self-tested
-> (section 12 "library release"), `e2e:library`.
+> **Two-stage cloud library (core + extended):** `shared/coreLibrary.js` selects the foundational books (`selectCoreBooks`: Tanakh + רש"י /
+> רמב"ן / אבן עזרא / אונקלוס / מצודות, Mishnah + ברטנורא, Bavli + רש"י / תוספות, Mishneh Torah, Shulchan Aruch + Rema + משנה ברורה);
+> `scripts/split-library.js` (CI, after the full `all` build) writes two DISJOINT databases with their own FTS + meta (`part`): `core_library.db`
+> (ids as built) and `extended_library.db` (every id shifted by `EXTENDED_ID_BASE` = 500,000,000; `ref_links` / `links` live with their commentary
+> / first book and may point across). `shared/sources.js` routes by id range (core 0 / extended 5e8 / user 1e9; no ATTACH, no on-device merge);
+> `loadCatalog` folds equal folder paths, `shared/commentary.js` consults every installed database for link rows and reads each linked block from
+> the database owning it. One `library-manifest.json` (top level = core package, `extended` = the expansion, each with parts + SHA-256).
+> `shared/libraryRelease.js`: `libraryState` (none / core / full / partial; a monolithic older install = full, `classical_full` = partial),
+> `libraryAction` (choose: ספריית יסוד | ספרייה מלאה; expand: ONLY the extended size; update; current), `flowOf` / `runStagedFlow` (fresh full:
+> core -> extended, core installed as soon as staged; update: stage both, then swap), one overall progress bar (`stageCloudLibrary` `window`).
+> App: `LibraryContext` (`extended` source, `installExtended`, a new core drops a stale extended), `CloudLibraryCard.tsx`, `runCloudFlow`.
+> `installedCloud` = `{ version, stage? }` (store v2 migrates older `{ edition, version }`). Self-tested (section 12 "two-stage"), `e2e:library`.
 
 > **Resilient cloud download:** `shared/multipart.js` `downloadParts` writes each part to `<part>.partial` and renames it when it
 > has the manifest size; the partial is never deleted on an error, the retry continues it with an HTTP Range request

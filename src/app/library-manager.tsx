@@ -127,6 +127,9 @@ export default function LibraryManagerScreen() {
             <Stat label="פסקאות" value={num(info.paragraphs)} />
             <Stat label="קישורי פרשנים" value={num(info.links)} />
             {info.size != null ? <Stat label="גודל" value={`${formatMB(info.size)} MB`} /> : null}
+            <Stat label="שלב" value={info.part === 'core' ? (lib.extended ? 'ספרייה מלאה' : 'ספריית יסוד') : 'ספרייה מלאה'} />
+            {lib.extended ? <Stat label="הרחבה: ספרים" value={num(lib.extended.info.books)} /> : null}
+            {lib.extended?.info.size != null ? <Stat label="הרחבה: גודל" value={`${formatMB(lib.extended.info.size)} MB`} /> : null}
           </View>
         ) : (
           <Text style={s.empty}>לא מותקנת ספריית ליבה. הורידו ספרייה מוכנה או בנו אחת מתיקייה במכשיר.</Text>

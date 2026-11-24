@@ -28,6 +28,14 @@ import { webSeed } from './webSeed';
 export const CORE_DB = 'core_library.db';
 export const USER_DB = 'user_library.db';
 /**
+ * The optional expansion pack (ספריית יסוד -> ספרייה מלאה, shared/coreLibrary.js): a second read-only
+ * database of the same schema next to core_library.db, ids >= EXTENDED_ID_BASE. Queried through the router,
+ * never merged into the core file.
+ */
+export const EXTENDED_DB = 'extended_library.db';
+/** Staging name of a downloaded extended DB before its atomic swap. */
+export const EXTENDED_TMP_DB = 'extended_library.db.tmp';
+/**
  * Cloud starter books (src/services/starterLibrary.ts): a small writable library with the exact
  * schema of the core DB, filled one book at a time from GitHub Releases. Exists only until the full
  * core library is installed (it is deleted then; settings, tabs and personal books live elsewhere).
@@ -74,8 +82,10 @@ export interface CoreInfo {
   /** Size of core_library.db in bytes (null on web). */
   size: number | null;
   scriptVersion: number;
-  /** build-db.js --scope the library was built with (`classical_full` | `all`); null = unknown (older / on-device builds). */
+  /** build-db.js --scope the library was built with (`classical_full` | `all`, or `core` | `extended` for a stage); null = unknown (older / on-device builds). */
   scope: string | null;
+  /** 'core' (ספריית יסוד) | 'extended' (expansion pack); null for a monolithic library (older builds / on-device build). */
+  part: 'core' | 'extended' | null;
 }
 
 /** Meta row values as a CoreInfo, or null when this is not a valid core library. */
@@ -91,6 +101,7 @@ export function coreInfoFromMeta(meta: Record<string, string> | null, size: numb
     size,
     scriptVersion: Number(meta.script_version ?? 0),
     scope: meta.scope ? meta.scope : null,
+    part: meta.part === 'core' || meta.part === 'extended' ? meta.part : null,
   };
 }
 
@@ -251,7 +262,7 @@ async function openWebSeed(): Promise<{ db: SQLiteDatabase; info: CoreInfo } | n
  * A rename inside one directory is atomic, so a crash leaves either the old or the new library.
  * If anything fails before the rename, the staged file is untouched (a build stays resumable).
  */
-export async function installStagedCore<T>(o: { from?: string; closeCore: () => Promise<void>; reopenCore: () => Promise<T>; warn?: (w: { step: string; message: string }) => void }): Promise<T> {
+export async function installStagedCore<T>(o: { from?: string; to?: string; closeCore: () => Promise<void>; reopenCore: () => Promise<T>; warn?: (w: { step: string; message: string }) => void }): Promise<T> {
   return installFile(
     {
       exists: (name) => dbFile(name).exists,
@@ -260,7 +271,7 @@ export async function installStagedCore<T>(o: { from?: string; closeCore: () => 
       closeCore: o.closeCore,
       reopenCore: o.reopenCore,
     },
-    { from: o.from ?? CORE_TMP_DB, to: CORE_DB, warn: o.warn },
+    { from: o.from ?? CORE_TMP_DB, to: o.to ?? CORE_DB, warn: o.warn },
   );
 }
 
@@ -272,6 +283,49 @@ export async function deleteCoreDatabase(): Promise<void> {
     return;
   }
   removeDbFiles(CORE_DB);
+}
+
+// --- extended ------------------------------------------------------------------
+
+/**
+ * Opens extended_library.db when it is installed and is a valid extended library of this schema; null otherwise
+ * (a file that is not an extended library is removed, a transient failure keeps it for the next attempt).
+ */
+export async function openExtendedDatabase(): Promise<{ db: SQLiteDatabase; info: CoreInfo } | null> {
+  if (isWeb) return null;
+  removeDbFiles(EXTENDED_TMP_DB); // a staging file left by an interrupted download is never trusted
+  const file = dbFile(EXTENDED_DB);
+  if (!file.exists) return null;
+  let db: SQLiteDatabase | null = null;
+  try {
+    db = await openReadOnly(EXTENDED_DB);
+    const rows = await db.getAllAsync<{ key: string; value: string }>('SELECT key, value FROM meta', []);
+    const meta: Record<string, string> = {};
+    for (const r of rows) meta[r.key] = r.value;
+    const info = coreInfoFromMeta(meta, file.size);
+    if (!info || info.part !== 'extended' || info.scriptVersion > SCHEMA_VERSION) {
+      await closeQuietly(db);
+      console.warn('extended_library.db is not a usable extended library, removing it');
+      removeDbFiles(EXTENDED_DB);
+      return null;
+    }
+    return { db, info };
+  } catch (e) {
+    await closeQuietly(db);
+    if (/no such table: meta/i.test(describeError(e)) || isCorruption(e)) removeDbFiles(EXTENDED_DB);
+    else console.warn('extended_library.db could not be opened now (kept for the next attempt):', e);
+    return null;
+  }
+}
+
+/** Removes the expansion pack (core and personal libraries are untouched). Close its connection first. */
+export function deleteExtendedDatabase(): void {
+  if (!isWeb) removeDbFiles(EXTENDED_DB);
+}
+
+/** Atomic swap of a verified EXTENDED_TMP_DB over extended_library.db (same steps as installStagedCore). */
+export function installStagedExtended<T>(o: { closeExtended: () => Promise<void>; reopenExtended: () => Promise<T>; warn?: (w: { step: string; message: string }) => void }): Promise<T> {
+  return installStagedCore({ from: EXTENDED_TMP_DB, to: EXTENDED_DB, closeCore: o.closeExtended, reopenCore: o.reopenExtended, warn: o.warn });
 }
 
 // --- starter -------------------------------------------------------------------
