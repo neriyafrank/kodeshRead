@@ -6229,6 +6229,7 @@ async function parallelWorksTests() {
     assert.ok(/pill: \{[^}]*height: 28/.test(pane), '28px chips');
     assert.ok(/focusRow: \{[^}]*height: 28/.test(pane), 'ultra-slim focus row');
     assert.ok(/pillParallel: \{[^}]*borderStyle: 'dashed'/.test(pane));
+    assert.ok(pane.includes('{g.block || par ? null : ('), 'no per-paragraph path in a block / parallel unit (named once in the header)');
     assert.ok(!/(paddingLeft|paddingRight|marginLeft|marginRight)/.test(pane), 'RTL-safe styles');
     const reader = fs.readFileSync(path.join(ROOT, 'src/components/reader/BookReader.tsx'), 'utf8');
     assert.ok(reader.includes('parallelMember(adapter, bookId)') && reader.includes('parallelRef.current && !row.is_heading'), 'a parallel-only book opens the drawer');

@@ -335,13 +335,8 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                 style={[s.entry, g.block && e.direct ? { borderStartWidth: 3, borderStartColor: c.accent } : null]}
                 testID={par ? 'parallel-entry' : e.direct && g.block ? 'commentary-entry-direct' : 'commentary-entry'}
               >
-                {g.block && !par ? null : par ? (
-                  e.toc_path ? (
-                    <Text style={s.entryPath} numberOfLines={1}>
-                      {e.toc_path.split(' > ').join(' · ')}
-                    </Text>
-                  ) : null
-                ) : (
+                {/* A block / parallel unit is named once in the card header: never repeated per paragraph. */}
+                {g.block || par ? null : (
                   <Text style={s.entryPath} numberOfLines={1}>
                     {e.toc_path ? e.toc_path.split(' > ').join(' · ') : g.bookTitle}
                   </Text>

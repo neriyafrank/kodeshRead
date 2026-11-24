@@ -580,6 +580,10 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="parallel-entry"]').length > 0);
     const plain = (t) => t.replace(/[\u0591-\u05C7]/g, '');
     assert.ok(plain(await tid('parallel-entry').first().innerText()).includes('יציאות השבת'), `the overview opens on Mishnah 1:1: ${await tid('parallel-entry').first().innerText()}`);
+    // The book / unit is named once (card header + focus row): no heading path repeated above each paragraph.
+    const entryTexts = await tid('parallel-entry').allInnerTexts();
+    assert.ok(entryTexts.length >= 3, 'several paragraphs');
+    for (const t of entryTexts) assert.ok(!/משנה שבת|פרק א/.test(plain(t).split('\n').slice(0, 1).join('')), `no repeated title above a paragraph: ${t.slice(0, 40)}`);
     const openBg = await tid('parallel-open').evaluate((e) => getComputedStyle(e).backgroundColor);
     assert.ok(openBg !== 'rgba(0, 0, 0, 0)' && openBg !== 'transparent', 'prominent filled action');
     await shot('12-parallel-focus');
@@ -599,6 +603,7 @@ try {
     assert.strictEqual(await tid('parallel-group-header').getAttribute('aria-expanded'), 'true', 'only parallels: they open');
     assert.ok(/^מקבילים \(1\)/.test((await tid('commentary-title').innerText()).trim()), await tid('commentary-title').innerText());
     assert.ok(plain(await tid('parallel-entry').first().innerText()).includes('יציאות השבת'), `the Bavli perek opens on its Mishnah: ${await tid('parallel-entry').first().innerText()}`);
+    for (const t of await tid('parallel-entry').allInnerTexts()) assert.ok(!/דף ב\./.test(t), `no repeated daf title above a paragraph: ${t.slice(0, 40)}`);
     await shot('13-mishna-to-bavli');
     await tid('parallel-open').click();
     await page.waitForFunction(() => /^\s*שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''), null, { timeout: 15000 });
