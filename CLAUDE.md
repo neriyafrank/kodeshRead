@@ -80,7 +80,7 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 >
 > **Long-press paragraph toolbar (reader + commentary drawer):** `CopyToolbar.tsx` (`useCopyMode`: idle -> actions -> select,
 > `ParagraphToolbar`, `useCopyToast` = clipboard + `הועתק ללוח`) is used by `BookReader.tsx` and `CommentaryPane.tsx`. A long-press
-> opens `העתק עם ציטוט` / `העתק ללא ציטוט` / `בחירת טקסט` (the drawer adds `פתח בספר` for that exact paragraph); a tap never opens it
+> opens `העתק` / `העתק עם מקור` / `בחירת טקסט` (the drawer adds `פתח בספר` for that exact paragraph); a tap never opens it
 > (the reader tap still opens the drawer). `בחירת טקסט`: native-selectable text, taps toggle paragraphs, a long-press selects the range
 > from the last one, `סיום` leaves. The per-paragraph `↗` icons are gone (the card-level `פתח בספר ↗` stays). Text/citation formatting:
 > `shared/copyFormat.js` (`plainText`, `formatCopy`: `«text»\n— book, location`). Self-tested (`copy:` checks), `e2e:reader` / `e2e:commentary`.

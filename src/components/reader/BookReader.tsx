@@ -563,12 +563,12 @@ export function BookReader({ tab, onOpenToc }: Props) {
           actions={
             copyMode.state.mode === 'select'
               ? [
-                  { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
-                  { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+                  { key: 'plain', label: 'העתק', onPress: () => doCopy(false), testID: 'copy-plain' },
+                  { key: 'cite', label: 'העתק עם מקור', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
                 ]
               : [
-                  { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
-                  { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+                  { key: 'plain', label: 'העתק', onPress: () => doCopy(false), testID: 'copy-plain' },
+                  { key: 'cite', label: 'העתק עם מקור', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: true },
                   { key: 'select', label: 'בחירת טקסט', onPress: copyMode.startSelect, testID: 'copy-select' },
                 ]
           }

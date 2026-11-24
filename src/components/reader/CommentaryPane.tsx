@@ -590,8 +590,8 @@ export function CommentaryPane({ bookId, bookTitle, line, tocPath, areaHeight, h
                   },
                 ]
               : []),
-            { key: 'cite', label: 'העתק עם ציטוט', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: copyMode.state.mode === 'select' },
-            { key: 'plain', label: 'העתק ללא ציטוט', onPress: () => doCopy(false), testID: 'copy-plain' },
+            { key: 'plain', label: 'העתק', onPress: () => doCopy(false), testID: 'copy-plain' },
+            { key: 'cite', label: 'העתק עם מקור', onPress: () => doCopy(true), testID: 'copy-with-citation', primary: copyMode.state.mode === 'select' },
             ...(copyMode.state.mode === 'actions' ? [{ key: 'select', label: 'בחירת טקסט', onPress: copyMode.startSelect, testID: 'copy-select' }] : []),
           ]}
           closeLabel={copyMode.state.mode === 'select' ? 'סיום' : undefined}

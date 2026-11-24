@@ -675,7 +675,7 @@ try {
     assert.strictEqual(await all('commentary-pane').count(), 0, 'a long-press does not open the commentary drawer');
     for (const id of ['copy-with-citation', 'copy-plain', 'copy-select']) assert.strictEqual(await all(id).count(), 1, `${id} in the toolbar`);
     assert.strictEqual(await all('copy-open-in-book').count(), 0, 'פתח בספר is a commentary-drawer action only');
-    assert.deepStrictEqual((await tid('para-toolbar').locator('button, [role="button"]').allInnerTexts()).filter((x) => x !== '✕'), ['העתק עם ציטוט', 'העתק ללא ציטוט', 'בחירת טקסט']);
+    assert.deepStrictEqual((await tid('para-toolbar').locator('button, [role="button"]').allInnerTexts()).filter((x) => x !== '✕'), ['העתק', 'העתק עם מקור', 'בחירת טקסט']);
     await shot('r9a-copy-toolbar');
     await tid('copy-with-citation').click();
     await tid('copy-toast').waitFor();

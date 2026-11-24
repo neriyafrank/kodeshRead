@@ -281,7 +281,7 @@ try {
     await lp_hold(paraEntries.first());
     await lp_toolbar.waitFor();
     for (const id of ['copy-open-in-book', 'copy-with-citation', 'copy-plain', 'copy-select']) assert.strictEqual(await rawTid(id).count(), 1, `${id} in the toolbar`);
-    assert.deepStrictEqual(await rawTid('para-toolbar').locator('button, [role="button"]').allInnerTexts().then((t) => t.filter((x) => x !== '✕')), ['פתח בספר', 'העתק עם ציטוט', 'העתק ללא ציטוט', 'בחירת טקסט']);
+    assert.deepStrictEqual(await rawTid('para-toolbar').locator('button, [role="button"]').allInnerTexts().then((t) => t.filter((x) => x !== '✕')), ['פתח בספר', 'העתק', 'העתק עם מקור', 'בחירת טקסט']);
     await shot('10a-para-toolbar');
     // copy with citation: «text» + — book, location
     await rawTid('copy-with-citation').click();
@@ -314,7 +314,7 @@ try {
     await rawTid('copy-select').click();
     await rawTid('para-toolbar-close').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="para-toolbar"]'));
-    step('drawer: no per-paragraph ↗; a long-press (not a tap) opens פתח בספר / העתק עם ציטוט / העתק ללא ציטוט / בחירת טקסט; copy + toast; multi-paragraph selection');
+    step('drawer: no per-paragraph ↗; a long-press (not a tap) opens פתח בספר / העתק / העתק עם מקור / בחירת טקסט; copy + toast; multi-paragraph selection');
     await lp_hold(paraEntries.first());
     await tid('commentary-chip').filter({ hasText: 'רש"י' }).click(); // back to the רש"י focus
     await page.waitForFunction(() => !!document.querySelector('[data-testid="commentary-focus-row"]'));
