@@ -77,6 +77,8 @@ function viewOf(state, key, idle) {
 function scopeSearchLabel(scope) {
   if (!scope || scope.kind === 'all') return 'מחפש בכל הספרייה…';
   if (scope.kind === 'book') return `מחפש בספר ${scope.title}…`;
+  // Preset corpora carry their book count in the name: "מחפש בבבלי (37 ספרים)…".
+  if (scope.kind === 'books' && scope.corpora && scope.corpora.length) return `מחפש ב${scope.name}…`;
   if (scope.kind === 'books') {
     const n = scope.ids.length;
     return n === 1 ? 'מחפש בספר נבחר…' : `מחפש ב-${n} ספרים נבחרים…`;

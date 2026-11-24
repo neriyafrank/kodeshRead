@@ -22,7 +22,7 @@ export interface PlanResults {
 }
 
 export const scopeKey = (s: SearchScope) =>
-  s.kind === 'all' ? 'all' : s.kind === 'category' ? `c:${s.path}` : s.kind === 'corpus' ? `k:${s.ids.join(',')}` : s.kind === 'books' ? `m:${s.ids.join(',')}` : `b:${s.bookId}`;
+  s.kind === 'all' ? 'all' : s.kind === 'category' ? `c:${s.path}` : s.kind === 'books' ? `m:${s.ids.join(',')}` : `b:${s.bookId}`;
 
 export const planKey = (plan: SearchPlan | null, scope: SearchScope) =>
   plan && !plan.empty ? JSON.stringify([plan.match, plan.exact?.match ?? null, plan.terms, plan.needsVerify, plan.proximity, scopeKey(scope)]) : '';

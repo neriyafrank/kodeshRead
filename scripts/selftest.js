@@ -766,6 +766,8 @@ async function main() {
   await libraryCatalogTests();
   // 13. Search progress UI: lifecycle state machine, cancellation, elapsed formatting.
   await searchProgressTests();
+  // 15. Preset corpora: base-book hygiene on messy Otzaria folders, Simple == Advanced.
+  await corporaTests();
   // 14. Instant cloud starter: starter pack export / import round trip, idempotence, upgrade.
   await starterPackTests();
 
@@ -1144,6 +1146,230 @@ async function starterPackTests() {
     return require('../shared/libraryCatalog').buildLibraryCatalog(data);
   }
 }
+/**
+ * Preset corpora (section 15): shared/corpora.js picks ONLY base books for תנ"ך / משנה / בבלי / ירושלמי / משנה תורה /
+ * שולחן ערוך, whatever the (messy) Otzaria folder hierarchy, and Simple Search and Advanced Search resolve identical
+ * book ids from it. Wiring of both screens + the progress banner is checked on the sources.
+ */
+async function corporaTests() {
+  const corpora = require('../shared/corpora');
+  const lc = require('../shared/libraryCatalog');
+  const lifecycle = require('../shared/searchLifecycle');
+
+  /** Books from "dir/dir/title" paths (the catalog input of loadCatalog). */
+  const library = (paths) => {
+    const books = paths.map((p, i) => {
+      const parts = p.split('/');
+      const title = parts.pop();
+      return { id: i + 1, title, categoryPath: parts.join('/') };
+    });
+    return { books, idOf: (p) => paths.indexOf(p) + 1 };
+  };
+  const catalogOf = (books) => {
+    const categories = [];
+    const cid = new Map();
+    const cat = (p) => {
+      if (!p) return null;
+      if (cid.has(p)) return cid.get(p);
+      const parts = p.split('/');
+      const parent = parts.length > 1 ? cat(parts.slice(0, -1).join('/')) : null;
+      categories.push({ id: categories.length + 1, parent_id: parent, name: parts[parts.length - 1], path: p });
+      cid.set(p, categories.length);
+      return categories.length;
+    };
+    return lc.buildLibraryCatalog({
+      categories,
+      books: books.map((b) => ({ id: b.id, category_id: cat(b.categoryPath), title: b.title, aliases: generateBookAliases(b.categoryPath.split('/'), b.title).join('|') })),
+    });
+  };
+  const setOf = (lib, ids, opts) => new Set(corpora.resolveCorpusBooks(lib.books, ids, opts).map((id) => lib.books[id - 1].categoryPath + '/' + lib.books[id - 1].title));
+
+  await check('corpora: תנ"ך = canonical Torah / Neviim / Ketuvim only, on messy folders', () => {
+    const lib = library([
+      'אוצריא/תנך/תורה/בראשית',
+      'תנ"ך/חומש/בראשית',
+      'תנך/נביאים/שמואל א',
+      'תנך/כתובים/שיר השירים',
+      'תנך/מפרשים/רשי על בראשית',
+      'תנך/מפרשים/ראשונים/רמבן על בראשית',
+      'תנ"ך/מפרשים/רמב"ן על בראשית',
+      'תנך/תרגומים/תרגום אונקלוס על בראשית',
+      'תנך/תרגומים/אונקלוס',
+      'תנך/תורה/הערות על בראשית',
+      'תנך/מפרשים/אבן עזרא על בראשית',
+      'תנך/מפרשים/מצודות/ישעיהו',
+      'תנך/אחרונים/אבי עזר/תורה/אבי עזר',
+      'תנך/דרשות ודרושים/בראשית',
+      'תלמוד בבלי/סדר מועד/שבת',
+      'מדרש/מדרש רבה/בראשית רבה',
+      'מדרש/אגדה/ילקוט שמעוני על התורה',
+    ]);
+    const got = setOf(lib, ['tanach']);
+    assert.deepStrictEqual([...got].sort(), ['אוצריא/תנך/תורה/בראשית', 'תנ"ך/חומש/בראשית', 'תנך/כתובים/שיר השירים', 'תנך/נביאים/שמואל א'].sort());
+  });
+
+  await check('corpora: בבלי / משנה / ירושלמי never overlap (same tractate names, different roots)', () => {
+    const lib = library([
+      'תלמוד בבלי/סדר מועד/שבת',
+      'תלמוד בבלי/סדר מועד/ראש השנה',
+      'תלמוד בבלי/סדר זרעים/ברכות',
+      'אוצריא/תלמוד בבלי/סדר נשים/יבמות',
+      'תלמוד בבלי/ראשונים/רשי/סדר מועד/רשי על שבת',
+      'תלמוד בבלי/מפרשים/רשי על שבת',
+      'תלמוד בבלי/מפרשים/תוספות על שבת',
+      'תלמוד בבלי/ראשונים/ריף/שבת',
+      'תלמוד בבלי/ראשונים/רא"ש/שבת',
+      'תלמוד בבלי/אחרונים/מהרשא/חידושי הלכות ואגדות על שבת',
+      'תלמוד בבלי/גמרא נוחה/גמרא נוחה מסכת שבת',
+      'תלמוד בבלי/סדר מועד/משנה שבת',
+      'משנה/סדר מועד/משנה שבת',
+      'משנה/סדר מועד/משנה ראש השנה',
+      'משנה/סדר זרעים/משנה ביכורים',
+      'משנה/ראשונים/רעב/משנה/סדר מועד/ברטנורא על משנה שבת',
+      'משנה/אחרונים/תוספות יום טוב על משנה שבת',
+      'תוספתא/דפוס וילנא/תוספתא שבת',
+      'תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שבת',
+      'תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי בכורים',
+      'תלמוד ירושלמי/מפרשים/פני משה על תלמוד ירושלמי שבת',
+      'תלמוד ירושלמי/מפרשים/קרבן העדה',
+    ]);
+    assert.deepStrictEqual([...setOf(lib, ['bavli'])].sort(), ['אוצריא/תלמוד בבלי/סדר נשים/יבמות', 'תלמוד בבלי/סדר זרעים/ברכות', 'תלמוד בבלי/סדר מועד/ראש השנה', 'תלמוד בבלי/סדר מועד/שבת'].sort());
+    assert.deepStrictEqual([...setOf(lib, ['mishna'])].sort(), ['משנה/סדר זרעים/משנה ביכורים', 'משנה/סדר מועד/משנה ראש השנה', 'משנה/סדר מועד/משנה שבת'].sort());
+    assert.deepStrictEqual([...setOf(lib, ['yerushalmi'])].sort(), ['תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי בכורים', 'תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שבת'].sort());
+    // "משנה שבת" is the Mishnah's, even when it is stored in the Bavli folder: never a Bavli book.
+    assert.ok(!setOf(lib, ['bavli']).has('תלמוד בבלי/סדר מועד/משנה שבת'));
+  });
+
+  await check('corpora: משנה תורה = Rambam halachot only; שולחן ערוך = the 4 parts only', () => {
+    const lib = library([
+      'הלכה/משנה תורה/ספר מדע/משנה תורה, הלכות דעות',
+      'אוצריא/הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת',
+      'הלכה/משנה תורה/ספר מדע/משנה תורה, הלכות יסודי התורה',
+      'הלכה/משנה תורה/הקדמה/משנה תורה, מצוות עשה',
+      'הלכה/משנה תורה/ספר זמנים/הלכות עירובין',
+      'הלכה/משנה תורה/מפרשים/כסף משנה על משנה תורה',
+      'הלכה/משנה תורה/מפרשים/השגות הראב"ד',
+      'הלכה/משנה תורה/ספר זמנים/כסף משנה על הלכות שבת',
+      'הלכה/משנה תורה/ספר זמנים/מגיד משנה על הלכות שבת',
+      'הלכה/משנה תורה/ספר זמנים/לחם משנה',
+      'הלכה/משנה תורה/אחרונים/מעשה רקח על משנה תורה, הלכות שבת',
+      'הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת (הגהות)',
+      'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים',
+      'אוצריא/הלכה/שולחן ערוך/שולחן ערוך, יורה דעה',
+      'הלכה/שולחן ערוך/שולחן ערוך, אבן העזר',
+      'הלכה/שולחן ערוך/שולחן ערוך, חושן משפט',
+      'הלכה/שולחן ערוך/שולחן ערוך, הקדמה',
+      'הלכה/שולחן ערוך/מפרשים/מגן אברהם',
+      'הלכה/שולחן ערוך/מפרשים/משנה ברורה',
+      'הלכה/שולחן ערוך/פרי מגדים על אורח חיים',
+      'הלכה/שולחן ערוך/ט"ז',
+      'הלכה/שולחן ערוך/ש"ך',
+      'הלכה/שולחן ערוך/באר היטב',
+      'הלכה/שולחן ערוך הרב/שולחן ערוך הרב',
+      'הלכה/טור/טור',
+    ]);
+    assert.deepStrictEqual(
+      [...setOf(lib, ['rambam'])].sort(),
+      ['אוצריא/הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת', 'הלכה/משנה תורה/הקדמה/משנה תורה, מצוות עשה', 'הלכה/משנה תורה/ספר זמנים/הלכות עירובין', 'הלכה/משנה תורה/ספר מדע/משנה תורה, הלכות דעות', 'הלכה/משנה תורה/ספר מדע/משנה תורה, הלכות יסודי התורה'].sort(),
+    );
+    assert.deepStrictEqual(
+      [...setOf(lib, ['shulchan-aruch'])].sort(),
+      ['אוצריא/הלכה/שולחן ערוך/שולחן ערוך, יורה דעה', 'הלכה/שולחן ערוך/שולחן ערוך, אבן העזר', 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', 'הלכה/שולחן ערוך/שולחן ערוך, חושן משפט'].sort(),
+    );
+  });
+
+  await check('corpora: strict exclusion also catches a commentary the folder alone would not reveal', () => {
+    // A canonical title inside a commentary folder, a commentator name, a catalog-flagged commentary.
+    const lib = library(['תנך/מפרשים/בראשית', 'תנך/תורה/רשי', 'תלמוד בבלי/סדר מועד/תוספות', 'תנך/תורה/בראשית', 'תלמוד בבלי/סדר מועד/שבת']);
+    assert.deepStrictEqual([...setOf(lib, ['tanach', 'bavli'])].sort(), ['תלמוד בבלי/סדר מועד/שבת', 'תנך/תורה/בראשית'].sort());
+    const flagged = setOf(lib, ['tanach'], { isCommentary: (id) => id === lib.idOf('תנך/תורה/בראשית') });
+    assert.strictEqual(flagged.size, 0, 'a book the catalog flags as a commentary is never a base book');
+    assert.ok(corpora.isCommentaryTitle('רש"י על בראשית') && corpora.isCommentaryTitle('תרגום אונקלוס') && corpora.isCommentaryTitle('כסף משנה') && corpora.isCommentaryTitle('משנה ברורה') && corpora.isCommentaryTitle('פירוש הרא"ש'));
+    assert.ok(!corpora.isCommentaryTitle('ראש השנה') && !corpora.isCommentaryTitle('משנה שבת') && !corpora.isCommentaryTitle('משנה תורה, הלכות דעות') && !corpora.isCommentaryTitle('שיר השירים'));
+    // Personal imports are never part of a library preset.
+    assert.strictEqual(corpora.resolveCorpusBooks([{ id: 1000000001, title: 'שבת', categoryPath: 'תלמוד בבלי/סדר מועד' }], ['bavli']).length, 0);
+  });
+
+  await check('corpora: "מפרשים" = commentary folders + catalog commentaries, none of the base books', () => {
+    const lib = library(['תנך/תורה/בראשית', 'תנך/מפרשים/רשי על בראשית', 'תנך/תרגומים/אונקלוס', 'תלמוד בבלי/ראשונים/רשי/רשי על שבת', 'תלמוד בבלי/סדר מועד/שבת']);
+    assert.deepStrictEqual([...setOf(lib, ['mefarshim'])].sort(), ['תלמוד בבלי/ראשונים/רשי/רשי על שבת', 'תנך/מפרשים/רשי על בראשית', 'תנך/תרגומים/אונקלוס'].sort());
+    const counts = corpora.corpusCounts(lib.books);
+    assert.deepStrictEqual([counts.tanach, counts.bavli, counts.mefarshim], [1, 1, 3]);
+  });
+
+  await check('corpora: the REAL Otzaria map - every preset is clean (no commentary, right corpus, sane counts)', () => {
+    const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+    if (!fs.existsSync(indexPath)) return console.warn('! otzaria_index_only.txt missing; skipping the real-map corpora checks.');
+    const paths = fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''));
+    const lib = library(paths);
+    const counts = corpora.corpusCounts(lib.books);
+    const rows = (id) => corpora.resolveCorpusBooks(lib.books, [id]).map((x) => paths[x - 1]);
+    // Canonical sizes: 39 Tanach books (Otzaria splits Samuel / Kings / Chronicles / Ezra-Nehemiah), 63 mishnaic tractates, 37 Bavli tractates,
+    // Rambam's 83 halachot (+ the 4 introductory works), the 4 parts of SA.
+    assert.strictEqual(counts.tanach, 39, 'tanach ' + counts.tanach);
+    assert.strictEqual(counts.mishna, 63, 'mishna ' + counts.mishna);
+    assert.strictEqual(counts.bavli, 37, 'bavli ' + counts.bavli);
+    assert.ok(counts.yerushalmi >= 38 && counts.yerushalmi <= 39, 'yerushalmi ' + counts.yerushalmi);
+    assert.ok(counts.rambam >= 83 && counts.rambam <= 90, 'rambam ' + counts.rambam);
+    assert.strictEqual(counts['shulchan-aruch'], 4, 'sa ' + counts['shulchan-aruch']);
+    assert.ok(counts.mefarshim > 3000, 'mefarshim ' + counts.mefarshim);
+    const rootOf = (p) => p.split('/')[0];
+    for (const id of ['tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch']) {
+      for (const p of rows(id)) {
+        const f = corpora.folderFacts(p.split('/').slice(0, -1).join('/'));
+        assert.ok(!f.rest.some(corpora.isCommentaryDir), `${id}: ${p} sits in a commentary folder`);
+        assert.ok(!corpora.isCommentaryTitle(p.split('/').pop()), `${id}: ${p} has a commentary title`);
+        assert.ok({ tanach: 'תנך', mishna: 'משנה', bavli: 'תלמוד בבלי', yerushalmi: 'תלמוד ירושלמי', rambam: 'הלכה', 'shulchan-aruch': 'הלכה' }[id] === rootOf(p), `${id}: ${p} in the wrong corpus`);
+      }
+    }
+    // No book is in two base presets; none is both base and "מפרשים".
+    const seen = new Map();
+    for (const id of ['tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) for (const x of corpora.resolveCorpusBooks(lib.books, [id])) assert.ok(!seen.has(x), `${paths[x - 1]} in ${seen.get(x)} and ${id}`), seen.set(x, id);
+    // Spot checks on the real titles.
+    const rb = new Set(rows('rambam'));
+    assert.ok([...rb].every((p) => /\/משנה תורה, /.test('/' + p)), 'every Rambam hit is a "משנה תורה, ..." work');
+    assert.ok(rows('shulchan-aruch').every((p) => /^הלכה\/שולחן ערוך\/שולחן ערוך, /.test(p)));
+    assert.ok(rows('bavli').every((p) => /^תלמוד בבלי\/סדר [^/]+\/[^/]+$/.test(p)));
+  });
+
+  await check('corpora: Simple Search and Advanced Search resolve identical bookIds for every preset (sample + catalog flags)', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kr-corpora-'));
+    const lib = library([
+      'תנך/תורה/בראשית', 'תנך/תורה/שמות', 'תנך/מפרשים/רשי על בראשית', 'תלמוד בבלי/סדר מועד/שבת', 'תלמוד בבלי/מפרשים/רשי על שבת',
+      'משנה/סדר מועד/משנה שבת', 'הלכה/משנה תורה/ספר זמנים/משנה תורה, הלכות שבת', 'הלכה/שולחן ערוך/שולחן ערוך, אורח חיים', 'תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שבת',
+    ]);
+    const cat = catalogOf(lib.books);
+    const opts = { isCommentary: cat.isCommentary };
+    for (const c of corpora.CORPORA) {
+      // Simple Search: toggles one preset (scope from the strip). Advanced Search: chips -> scopeOf -> the same function.
+      const simple = corpora.corpusScope(cat.bookInfos, [c.id], opts);
+      const advanced = corpora.corpusScope(cat.bookInfos, [c.id], opts);
+      assert.deepStrictEqual(simple, advanced, c.id);
+      assert.deepStrictEqual(simple.ids, corpora.resolveCorpusBooks(lib.books, [c.id], opts), c.id);
+      assert.deepStrictEqual(simple.corpora, [c.id]);
+      assert.strictEqual(simple.name, `${c.label} (${corpora.countText(simple.ids.length)})`);
+    }
+    assert.deepStrictEqual(corpora.corpusScope(cat.bookInfos, [], opts), { kind: 'all' });
+    assert.deepStrictEqual(corpora.corpusScope(cat.bookInfos, ['tanach', 'bavli'], opts).ids, [lib.idOf('תנך/תורה/בראשית'), lib.idOf('תנך/תורה/שמות'), lib.idOf('תלמוד בבלי/סדר מועד/שבת')]);
+    // The real commentary flag agrees with the strict exclusion.
+    assert.ok(corpora.resolveCorpusBooks(lib.books, ['tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch'], opts).every((id) => cat.isBase(id)));
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await check('corpora: the progress banner names the preset and its book count; both screens use the shared module', () => {
+    const lib = library(['תלמוד בבלי/סדר מועד/שבת', 'תלמוד בבלי/סדר מועד/ראש השנה', 'תנך/תורה/בראשית']);
+    const scope = corpora.corpusScope(lib.books, ['bavli']);
+    assert.strictEqual(lifecycle.scopeSearchLabel(scope), 'מחפש בבבלי (2 ספרים)…');
+    assert.strictEqual(lifecycle.scopeSearchLabel(corpora.corpusScope(lib.books, ['tanach'])), 'מחפש בתנ"ך (ספר אחד)…');
+    assert.strictEqual(lifecycle.scopeSearchLabel({ kind: 'books', ids: [1, 2, 3], name: 'נבחרו 3 ספרים' }), 'מחפש ב-3 ספרים נבחרים…', 'hand-picked books keep their label');
+    const simple = fs.readFileSync(path.join(ROOT, 'src/app/search.tsx'), 'utf8');
+    const adv = fs.readFileSync(path.join(ROOT, 'src/app/advanced-search.tsx'), 'utf8');
+    for (const src of [simple, adv]) assert.ok(src.includes("from '../../shared/corpora'") && src.includes('useCorpora') && src.includes('CorpusPresets'));
+    assert.ok(simple.includes('corpus-chip') && adv.includes('adv-corpus'));
+    assert.ok(!fs.readFileSync(path.join(ROOT, 'shared/search.js'), 'utf8').includes('corpusCondition'), 'no second (SQL folder pattern) definition of the presets');
+  });
+}
+
 /**
  * Search progress (section 13): shared/searchLifecycle.js state machine, request-id race safety,
  * abort + real progress in shared/search.js, Hebrew/RTL elapsed formatting, UI wiring.
@@ -1732,7 +1958,7 @@ async function advancedSearchTests() {
     for (const id of ['adv-query', 'adv-any', 'adv-exclude', 'adv-submit', 'adv-reset', 'adv-back', 'adv-ordered']) assert.ok(advSrc.includes(id), id);
     for (const label of ['חיפוש מתקדם', 'חזרה לחיפוש רגיל', 'מילות החיפוש / ביטוי', 'אחת מהמילים · או', 'ללא המילים · שלילה', 'תחיליות וסופיות', 'כתיב מלא/חסר', 'ראשי תיבות', 'עברית ↔ ארמית', 'קרבת מילים', 'שמור על סדר המילים', 'סינון לפי מדור', 'נקה הכל', 'הספר הנוכחי']) assert.ok(advSrc.includes(label), label);
     assert.ok(/input: \{[^}]*\.\.\.inputAlignRight/.test(advSrc) && /label: \{[^}]*\.\.\.alignRight/.test(advSrc), 'RTL alignment helpers');
-    assert.deepStrictEqual(search.CORPORA.map((c) => c.label), ['תנ"ך', 'משנה', 'בבלי', 'רמב"ם', 'שולחן ערוך', 'מפרשים']);
+    assert.deepStrictEqual(require('../shared/corpora').CORPORA.map((c) => c.label), ['תנ"ך', 'משנה', 'בבלי', 'ירושלמי', 'משנה תורה', 'שולחן ערוך', 'מפרשים']);
   });
 
   await check('hebrewSearch: grammatical prefixes (מש"ה וכל"ב) and real suffixes', () => {
@@ -1955,21 +2181,24 @@ async function advancedSearchTests() {
       }
     });
 
-    await check('sample: corpus chips and the current book restrict results', async () => {
+    await check('sample: corpus presets (shared/corpora.js -> books scope) restrict results, FTS5 == fallback', async () => {
+      const corpora = require('../shared/corpora');
+      const cat = require('../shared/libraryCatalog').buildLibraryCatalog(await sources.loadCatalog(db));
+      const opts = { isCommentary: cat.isCommentary };
       const paths = new Map((await db.all("SELECT b.id AS id, COALESCE(c.path, '') AS path FROM books b LEFT JOIN categories c ON c.id = b.category_id", [])).map((r) => [r.id, r.path + '/']));
       const plan = hs.buildQuery('אמר');
       const total = (await search.countPlan(db, plan, { cap: 100000 })).count;
-      const by = async (ids, fts) => all(plan, { scope: { kind: 'corpus', ids, name: '' }, fts });
+      const by = async (ids, fts) => all(plan, { scope: corpora.corpusScope(cat.bookInfos, ids, opts), fts });
       const tanach = await by(['tanach']);
-      assert.ok(tanach.length > 0 && tanach.every((r) => /^תנך\/(תורה|נביאים|כתובים)\//.test(paths.get(r.book_id))));
+      assert.ok(tanach.length > 0 && tanach.every((r) => /^תנך\/(תורה|נביאים|כתובים)\//.test(paths.get(r.book_id))), 'only the base books of תנ"ך (no Rashi / Onkelos / Ramban)');
       const bavli = await by(['bavli']);
-      assert.ok(bavli.length > 0 && bavli.every((r) => paths.get(r.book_id).startsWith('תלמוד בבלי/סדר ')));
+      assert.ok(bavli.length > 0 && bavli.every((r) => paths.get(r.book_id).startsWith('תלמוד בבלי/סדר ')), 'no Rashi / Tosafot on Shabbat');
       const mef = await by(['mefarshim']);
       assert.ok(mef.length > 0 && mef.every((r) => paths.get(r.book_id).includes('מפרשים')));
       assert.strictEqual(tanach.length + bavli.length + mef.length, total, 'sample library = base texts + commentaries');
-      assert.strictEqual((await by(['tanach', 'bavli'])).length, tanach.length + bavli.length, 'chips are OR-ed');
-      assert.strictEqual((await by(['mishna'])).length, 0);
-      assert.deepStrictEqual((await by(['tanach'], false)).map((r) => r.id), tanach.map((r) => r.id), 'corpus scope in the web fallback');
+      assert.strictEqual((await by(['tanach', 'bavli'])).length, tanach.length + bavli.length, 'presets are OR-ed');
+      assert.strictEqual((await by(['mishna'])).length, 0, 'a preset with no books is an empty scope, never "all"');
+      assert.deepStrictEqual((await by(['tanach'], false)).map((r) => r.id), tanach.map((r) => r.id), 'preset scope in the web fallback');
       const shabbat = (await db.all("SELECT id FROM books WHERE title = 'שבת'", []))[0].id;
       const inBook = await all(adv('שבת'), { scope: { kind: 'book', bookId: shabbat, title: 'שבת' } });
       assert.ok(inBook.length > 0 && inBook.every((r) => r.book_id === shabbat));

@@ -36,7 +36,7 @@ export interface ProximityOptions {
   ordered: boolean;
 }
 
-/** 'all' | 'book' (the open book) | corpus ids (shared/search.js CORPORA), several allowed. */
+/** 'all' | 'book' (the open book) | corpus ids (shared/corpora.js CORPORA), several allowed. */
 export type CorpusSelection = string[];
 
 export interface AdvancedState {
@@ -121,7 +121,7 @@ export const useSearch = create<SearchState>()(
 );
 
 export function scopeLabel(scope: SearchScope): string {
-  if (scope.kind === 'category' || scope.kind === 'corpus' || scope.kind === 'books') return scope.name;
+  if (scope.kind === 'category' || scope.kind === 'books') return scope.name;
   if (scope.kind === 'book') return scope.title;
   return 'כל הספרייה';
 }

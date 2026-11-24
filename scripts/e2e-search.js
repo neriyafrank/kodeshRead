@@ -206,6 +206,57 @@ try {
         src,
         { timeout: 30000 },
       );
+    // ---- Preset corpora (Simple Search): same presets as Advanced Search, with matched book counts ------
+    await setDelay(0, 0);
+    await tid('search-input').fill('אמר');
+    for (const id of ['all', 'tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) await tid(`corpus-chip-${id}`).waitFor();
+    assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
+    // Counts resolve once the catalog is built: 2 Tanach books, 3 Bavli tractates, no Mishnah in the sample.
+    const chipCount = (id) => page.waitForFunction((x) => !!document.querySelector(`[data-testid="corpus-chip-${x}-count"]`) && document.querySelector(`[data-testid="corpus-chip-${x}-count"]`).textContent !== '…', id, { timeout: 30000 });
+    await chipCount('bavli');
+    assert.deepStrictEqual(
+      await Promise.all(['tanach', 'mishna', 'bavli', 'rambam', 'shulchan-aruch'].map((id) => tid(`corpus-chip-${id}-count`).innerText())),
+      ['2', '0', '3', '0', '0'],
+      'matched book counts of the presets (base books only: no Rashi / Tosafot / Ramban / Onkelos)',
+    );
+    assert.ok(Number(await tid('corpus-chip-mefarshim-count').innerText()) >= 8, 'the commentary preset counts the commentaries');
+    // בבלי: only Bavli base tractates, never Rashi / Tosafot; the scope button names the preset + count.
+    await tid('corpus-chip-bavli').click();
+    await allResults('^(שבת|ראש השנה|תענית)');
+    assert.strictEqual(await tid('corpus-chip-bavli').getAttribute('aria-checked'), 'true');
+    assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'false');
+    assert.ok((await tid('scope-button').innerText()).includes('בבלי (3 ספרים)'), await tid('scope-button').innerText());
+    for (const t of await tid('search-result').allInnerTexts()) assert.ok(!/^(רש"י|תוספות)/.test(t), `no commentary: ${t.slice(0, 20)}`);
+    await shot('1-simple-corpus');
+    // An unmatched preset is an honest empty scope, never "all".
+    await tid('corpus-chip-bavli').click();
+    await tid('corpus-chip-mishna').click();
+    await tid('search-empty').waitFor({ timeout: 30000 });
+    assert.ok((await tid('search-empty').innerText()).includes('משנה'), 'empty state names the scope');
+    await tid('corpus-chip-mishna').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
+    assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
+    // The progress banner names the preset; switching presets mid-run supersedes the running search; cancel works.
+    await setDelay(2200, 0);
+    await tid('corpus-chip-tanach').click();
+    await tid('search-status').waitFor({ timeout: 3000 });
+    assert.strictEqual(await tid('search-stage').innerText(), 'מחפש בתנ"ך (2 ספרים)…');
+    await tid('corpus-chip-bavli').click();
+    await page.waitForFunction(() => (document.querySelector('[data-testid="search-stage"]') || {}).innerText === 'מחפש בתנ"ך · בבלי (5 ספרים)…', null, { timeout: 5000 });
+    await tid('search-cancel').click();
+    await tid('search-cancelled').waitFor({ timeout: 2000 });
+    await page.waitForTimeout(2400);
+    assert.strictEqual(await tid('search-result').count(), 0, 'results of the superseded / cancelled preset search are discarded');
+    await setDelay(0, 0);
+    await tid('search-retry').click();
+    await allResults('^(בראשית|במדבר|שבת|ראש השנה|תענית)');
+    // ✕ clears the preset back to the whole library.
+    await tid('scope-reset').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="scope-button"]').innerText.includes('כל הספרייה'));
+    assert.strictEqual(await tid('corpus-chip-tanach').getAttribute('aria-checked'), 'false');
+    assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
+    step('Simple Search preset corpora: counts, base books only, progress banner, switch / cancel / clear');
+
     const openSheet = async () => {
       await tid('scope-button').click();
       await tid('scope-sheet').waitFor();
@@ -356,7 +407,7 @@ try {
     for (const d of [3, 5, 10]) await tid(`adv-dist-${d}`).waitFor();
     assert.strictEqual(await checked('adv-ordered'), 'false');
     await tid('adv-prox-paragraph').click();
-    for (const id of ['all', 'book', 'tanach', 'mishna', 'bavli', 'rambam', 'shulchan-aruch', 'mefarshim']) await tid(`adv-corpus-${id}`).waitFor();
+    for (const id of ['all', 'book', 'tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) await tid(`adv-corpus-${id}`).waitFor();
     assert.strictEqual(await checked('adv-corpus-all'), 'true');
     // RTL: labels and inputs are right-aligned.
     const align = await page.evaluate(() => getComputedStyle(document.querySelector('[data-testid="adv-query"]')).textAlign);
@@ -411,6 +462,7 @@ try {
     await tid('adv-exclude').fill('חסדא');
     await tid('adv-corpus-bavli').click();
     assert.strictEqual(await checked('adv-corpus-all'), 'false');
+    assert.strictEqual(await tid('adv-corpus-bavli-count').innerText(), '3', 'Advanced Search shows the same matched counts');
     await tid('adv-submit').click();
     await page.waitForFunction(
       () => {
@@ -480,7 +532,7 @@ try {
     await tid('adv-submit').click();
     await advTid('search-progress-track').waitFor({ timeout: 2000 });
     await advTid('adv-status').waitFor({ timeout: 3000 });
-    assert.strictEqual(await advTid('adv-stage').innerText(), 'מחפש בבבלי…', 'the stage names the active corpus scope');
+    assert.strictEqual(await advTid('adv-stage').innerText(), 'מחפש בבבלי (3 ספרים)…', 'the stage names the active corpus scope and its book count');
     assert.ok(/\d+\.\d שניות|שנייה/.test(plain(await advTid('adv-elapsed').innerText())));
     assert.strictEqual(await advTid('adv-empty').count(), 0);
     await advTid('adv-cancel').click();

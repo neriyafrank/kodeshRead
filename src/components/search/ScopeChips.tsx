@@ -18,7 +18,8 @@ interface Props {
 
 export function ScopeChips({ scope, onChange }: Props) {
   const s = useThemedStyles(createStyles);
-  if (scope.kind !== 'books') return null;
+  // A preset-corpus scope is shown (and edited) by the preset strip, not as book chips.
+  if (scope.kind !== 'books' || scope.corpora?.length) return null;
   const picks = scope.picks ?? scope.ids.map((id) => ({ id, title: String(id) }));
   const clear = () => onChange({ kind: 'all' });
   if (picks.length > MAX_CHIPS)

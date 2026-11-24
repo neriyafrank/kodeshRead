@@ -37,6 +37,8 @@ export interface LibraryCatalog {
   commentarySections: CatalogNode[];
   generalCommentaries: { bookId: number; title: string }[];
   bookCount: number;
+  /** Every book (core + personal) with its folder path: the input of shared/corpora.js. */
+  bookInfos: { id: number; title: string; categoryPath: string; personal: boolean }[];
   /** "is_commentary = 1" (derived; no schema change). */
   isCommentary(id: number): boolean;
   isBase(id: number): boolean;

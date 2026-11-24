@@ -114,6 +114,15 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > "רש"י על שבת ‹ דף ב. ‹ שורה ה". The sample `רש"י על שבת` uses this format. Self-tested (gematria, fixtures, sample dibur
 > hamatchil <-> Gemara paragraph) and in `e2e:commentary`.
 
+> **Preset corpora (Simple + Advanced Search):** `shared/corpora.js` is the single source of truth for the presets
+> (תנ"ך, משנה, בבלי, ירושלמי, משנה תורה, שולחן ערוך = base books only; מפרשים = commentaries). It never matches exact folder paths:
+> a book qualifies when its corpus root (first folder after wrapper folders like `אוצריא/`) is recognised, its title is a canonical
+> book of THAT corpus (`libraryCatalog.CANON`), and strict commentary exclusion passes (commentary / translation folders, "X על Y" /
+> פירוש / תרגום titles, known commentators, the catalog's `isCommentary`). A selection resolves to a `books` scope
+> (`corpusScope`, `scope.corpora` remembers the presets; name "בבבלי (37 ספרים)" feeds the progress banner) - the SQL folder-pattern
+> scope is gone. UI: `CorpusPresets.tsx` + `src/db/useCorpora.ts` (counts per preset). Self-tested (section 15, incl. the real
+> `otzaria_index_only.txt`: 39 / 63 / 37 / 39 / 83+ / 4 books), e2e in `e2e:search`.
+
 > **Cloud library (multi-part release):** `.github/workflows/build-library.yml` (workflow_dispatch: `source_repo`,
 > `library_scope` = `classical_full` | `all`) builds `core_library.db` on a runner (`scripts/ci/fetch-otzaria-source.sh`,
 > `build-db.js --scope --lean`, `scripts/cloud-release.js validate|manifest`), zips it, splits it into 1.5 GB

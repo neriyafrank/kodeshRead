@@ -500,6 +500,8 @@ function assembleCatalog(split, pairResults) {
     commentarySections,
     generalCommentaries: general.map((g) => ({ bookId: g.id, title: g.title })),
     bookCount: infos.length,
+    /** Every book as { id, title, categoryPath, personal } (input of shared/corpora.js). */
+    bookInfos: infos.map((i) => ({ id: i.id, title: i.title, categoryPath: i.categoryPath, personal: i.personal })),
     isCommentary: (id) => isCommentarySet.has(id),
     isBase: (id) => byId.has(id) && !isCommentarySet.has(id),
     /** Root base book a commentary belongs to (null: general or not a commentary). */

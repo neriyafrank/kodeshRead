@@ -21,7 +21,7 @@
  *     in canonical book order (rowid = paragraphs.id, inserted in library order).
  *  2b. searchPlan() / countPlan(): run a shared/hebrewSearch.js plan (Simple + Advanced Search):
  *     FTS5 candidates, exact evaluation per row when the plan needs it, exact matches first
- *     ({ phase, afterId } cursor), corpus scopes (CORPORA) and an identical no-FTS5 fallback.
+ *     ({ phase, afterId } cursor), preset-corpus scopes (shared/corpora.js -> `books`) and an identical no-FTS5 fallback.
  *  3. buildKwic() / markTerms(): hit highlighting. `terms` entries are plain tokens
  *     ("שבת"), prefix patterns ("ושלחנ*") or multi-word phrases ("בית דינ"), so the
  *     result card and the reader mark the variant that actually matched.
@@ -318,46 +318,9 @@ function likeEscape(s) {
   return String(s).replace(/[\\%_]/g, (c) => '\\' + c);
 }
 
-/**
- * Corpus sections of the Advanced Search ("סינון לפי מדור"), as Otzaria folder patterns on
- * category_path (which always ends with "/"). Base texts and their commentaries are separate:
- * "מפרשים" is every commentary / rishonim / acharonim folder.
- */
-const CORPORA = [
-  { id: 'tanach', label: 'תנ"ך', include: ['תנך/תורה/%', 'תנך/נביאים/%', 'תנך/כתובים/%'] },
-  { id: 'mishna', label: 'משנה', include: ['משנה/סדר %'] },
-  { id: 'bavli', label: 'בבלי', include: ['תלמוד בבלי/סדר %'] },
-  { id: 'rambam', label: 'רמב"ם', include: ['הלכה/משנה תורה/%'], exclude: ['הלכה/משנה תורה/מפרשים/%'] },
-  { id: 'shulchan-aruch', label: 'שולחן ערוך', include: ['הלכה/שולחן ערוך/'] },
-  { id: 'mefarshim', label: 'מפרשים', include: ['%מפרשים%', '%/ראשונים/%', '%/אחרונים/%', '%/תרגומים/%', '%/מחברי זמננו/%', '%/מחברי זמנינו/%'] },
-];
-
-/** SQL condition on a category_path expression for a set of corpus ids. */
-function corpusCondition(ids, col) {
-  const params = [];
-  const parts = [];
-  for (const c of CORPORA.filter((x) => (ids || []).includes(x.id))) {
-    let sql = '(' + c.include.map(() => `${col} LIKE ?`).join(' OR ') + ')';
-    params.push(...c.include);
-    if (c.exclude && c.exclude.length) {
-      sql += ' AND NOT (' + c.exclude.map(() => `${col} LIKE ?`).join(' OR ') + ')';
-      params.push(...c.exclude);
-    }
-    parts.push('(' + sql + ')');
-  }
-  return parts.length ? { sql: '(' + parts.join(' OR ') + ')', params } : { sql: '0', params: [] };
-}
-
-/** category_path of a paragraph's book (no-FTS fallback, where the FTS column is unavailable). */
-const P_CATEGORY_PATH = "(SELECT COALESCE(c.path || '/', '') FROM books b LEFT JOIN categories c ON c.id = b.category_id WHERE b.id = p.book_id)";
-
 /** WHERE fragment + params for a scope (category_path always ends with "/"). */
 function scopeClause(scope) {
   if (!scope || scope.kind === 'all') return { sql: '', params: [] };
-  if (scope.kind === 'corpus') {
-    const c = corpusCondition(scope.ids, 'f.category_path');
-    return { sql: ' AND ' + c.sql, params: c.params };
-  }
   if (scope.kind === 'category') {
     const p = String(scope.path).replace(/\/+$/, '');
     return { sql: " AND f.category_path LIKE ? ESCAPE '\\'", params: [likeEscape(p) + '/%'] };
@@ -419,10 +382,6 @@ function matchSource(q, opts) {
     params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
   } else if (scope && scope.kind === 'books') {
     const c = bookIdsCondition('p.book_id', scopeBookIds(scope));
-    sql += ' AND ' + c.sql;
-    params.push(...c.params);
-  } else if (scope && scope.kind === 'corpus') {
-    const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
     sql += ' AND ' + c.sql;
     params.push(...c.params);
   }
@@ -588,10 +547,6 @@ function planSource(phase, opts) {
     params.push(likeEscape(String(scope.path).replace(/\/+$/, '')) + '/%');
   } else if (scope && scope.kind === 'books') {
     const c = bookIdsCondition('p.book_id', scopeBookIds(scope));
-    sql += ' AND ' + c.sql;
-    params.push(...c.params);
-  } else if (scope && scope.kind === 'corpus') {
-    const c = corpusCondition(scope.ids, P_CATEGORY_PATH);
     sql += ' AND ' + c.sql;
     params.push(...c.params);
   }
@@ -870,7 +825,6 @@ function formatTocPath(tocPath) {
 }
 
 module.exports = {
-  CORPORA,
   searchPlan,
   countPlan,
   FTS_RESERVED_RE,

@@ -18,12 +18,15 @@ import { useCallback, useMemo, useState } from 'react';
 import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { ADVANCED_DEFAULTS, NEAR_DISTANCES, buildQuery, type ProximityMode, type SearchPlan } from '../../shared/hebrewSearch';
-import { CORPORA, type SearchRow, type SearchScope } from '../../shared/search';
+import { CORPORA } from '../../shared/corpora';
+import type { SearchRow, SearchScope } from '../../shared/search';
+import { CorpusPresets } from '../components/search/CorpusPresets';
 import { ResultCard } from '../components/search/ResultCard';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
 import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
+import { useCorpora } from '../db/useCorpora';
 import { alignRight, inputAlignRight } from '../lib/direction';
 import { advancedDefaults, scopeLabel, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
@@ -47,14 +50,13 @@ interface CurrentBook {
   title: string;
 }
 
-/** Corpus chips -> search scope ("book" needs an open book; several corpora are OR-ed). */
-function scopeOf(corpora: string[], book: CurrentBook | null, picked: SearchScope): SearchScope {
+/** Corpus chips -> search scope ("book" needs an open book; several presets are OR-ed into one `books` scope). */
+function scopeOf(corpora: string[], book: CurrentBook | null, picked: SearchScope, scopeFor: (ids: string[]) => SearchScope): SearchScope {
   // Books / commentaries picked in the scope picker take precedence over the corpus chips.
-  if (picked.kind === 'books') return picked;
+  if (picked.kind === 'books' && !picked.corpora) return picked;
   if (corpora.includes('book') && book) return { kind: 'book', bookId: book.bookId, title: book.title };
   const ids = corpora.filter((id) => CORPORA.some((c) => c.id === id));
-  if (!ids.length) return { kind: 'all' };
-  return { kind: 'corpus', ids, name: CORPORA.filter((c) => ids.includes(c.id)).map((c) => c.label).join(' · ') };
+  return ids.length ? scopeFor(ids) : { kind: 'all' };
 }
 
 function planOf(a: AdvancedState): SearchPlan {
@@ -72,6 +74,7 @@ export default function AdvancedSearchScreen() {
   const picked = useSearch((x) => x.scope);
   const setPicked = useSearch((x) => x.setScope);
   const [scopeOpen, setScopeOpen] = useState(false);
+  const presets = useCorpora();
   const remember = useSearch((x) => x.remember);
   const openBook = useTabs((x) => x.openBook);
   const activeTab = useTabs(selectActiveTab);
@@ -92,23 +95,28 @@ export default function AdvancedSearchScreen() {
   const setOption = (k: keyof LinguisticOptions) => setAdvanced({ options: { ...advanced.options, [k]: !advanced.options[k] } });
   const setProximity = (p: Partial<AdvancedState['proximity']>) => setAdvanced({ proximity: { ...advanced.proximity, ...p } });
 
+  // A preset picked in Simple Search (a `books` scope remembering its presets) carries over to the chips.
+  const pickedBooks = picked.kind === 'books' && !picked.corpora ? picked : null;
+  const effective = useMemo(() => (picked.kind === 'books' && picked.corpora ? picked.corpora : advanced.corpora), [picked, advanced.corpora]);
   const toggleCorpus = (id: string) => {
     if (picked.kind === 'books') setPicked({ kind: 'all' });
     if (id === 'all' || id === 'book') return setAdvanced({ corpora: [id] });
-    const rest = advanced.corpora.filter((x) => x !== 'all' && x !== 'book');
+    const rest = effective.filter((x) => x !== 'all' && x !== 'book');
     const next = rest.includes(id) ? rest.filter((x) => x !== id) : [...rest, id];
     setAdvanced({ corpora: next.length ? next : ['all'] });
   };
-  const corpora = useMemo(() => (advanced.corpora.includes('book') && !book ? ['all'] : advanced.corpora), [advanced.corpora, book]);
+  const corpora = useMemo(() => (effective.includes('book') && !book ? ['all'] : effective), [effective, book]);
+  const needsPresets = corpora.some((id) => CORPORA.some((c) => c.id === id));
+  const waiting = needsPresets && !pickedBooks && !presets.ready;
 
   const onSearch = useCallback(() => {
     Keyboard.dismiss();
     const plan = planOf(advanced);
     if (plan.empty) return;
     remember(advanced.fields.query || advanced.fields.anyOf);
-    setSubmitted({ plan, scope: scopeOf(corpora, book, picked) });
+    setSubmitted({ plan, scope: scopeOf(corpora, book, picked, presets.scopeFor) });
     setFormOpen(false);
-  }, [advanced, book, corpora, picked, remember]);
+  }, [advanced, book, corpora, picked, presets.scopeFor, remember]);
 
   const onReset = useCallback(() => {
     resetAdvanced();
@@ -254,29 +262,23 @@ export default function AdvancedSearchScreen() {
       ) : null}
 
       <Text style={s.section}>סינון לפי מדור</Text>
-      <View style={s.chips}>
-        {[{ id: 'all', label: 'הכל' }, ...(book ? [{ id: 'book', label: `הספר הנוכחי${book.title ? ` · ${book.title}` : ''}` }] : []), ...CORPORA].map((k) => {
-          const on = picked.kind !== 'books' && corpora.includes(k.id);
-          return (
-            <Pressable
-              key={k.id}
-              onPress={() => toggleCorpus(k.id)}
-              style={[s.chip, on && s.chipOn]}
-              accessibilityRole="checkbox"
-              aria-checked={on}
-              testID={`adv-corpus-${k.id}`}
-            >
-              <Text style={[s.chipText, on && s.chipTextOn]} numberOfLines={1}>
-                {k.label}
-              </Text>
-            </Pressable>
-          );
-        })}
+      <View>
+        <CorpusPresets
+          wrap
+          items={[
+            { id: 'all', label: 'הכל' },
+            ...(book ? [{ id: 'book', label: `הספר הנוכחי${book.title ? ` · ${book.title}` : ''}` }] : []),
+            ...CORPORA.map((c) => ({ id: c.id, label: c.label, count: presets.counts ? presets.counts[c.id] : null })),
+          ]}
+          selected={pickedBooks ? [] : corpora}
+          onToggle={toggleCorpus}
+          testIDPrefix="adv-corpus"
+        />
       </View>
 
-      <Pressable onPress={() => setScopeOpen(true)} style={({ pressed }) => [s.scopeBtn, picked.kind === 'books' && s.chipOn, pressed && s.pressed]} accessibilityRole="button" testID="adv-scope-button">
-        <Text style={[s.chipText, picked.kind === 'books' && s.chipTextOn]} numberOfLines={1}>
-          {picked.kind === 'books' ? `ספרים ופרשנים: ${scopeLabel(picked)}` : 'בחירת ספרים ופרשנים…'}
+      <Pressable onPress={() => setScopeOpen(true)} style={({ pressed }) => [s.scopeBtn, pickedBooks && s.chipOn, pressed && s.pressed]} accessibilityRole="button" testID="adv-scope-button">
+        <Text style={[s.chipText, pickedBooks && s.chipTextOn]} numberOfLines={1}>
+          {pickedBooks ? `ספרים ופרשנים: ${scopeLabel(pickedBooks)}` : 'בחירת ספרים ופרשנים…'}
         </Text>
         <Text style={s.chipText}>▾</Text>
       </Pressable>
@@ -285,8 +287,8 @@ export default function AdvancedSearchScreen() {
       <View style={s.actions}>
         <Pressable
           onPress={onSearch}
-          disabled={draftPlan.empty}
-          style={({ pressed }) => [s.primary, draftPlan.empty && s.disabled, pressed && s.pressed]}
+          disabled={draftPlan.empty || waiting}
+          style={({ pressed }) => [s.primary, (draftPlan.empty || waiting) && s.disabled, pressed && s.pressed]}
           accessibilityRole="button"
           aria-disabled={draftPlan.empty}
           testID="adv-submit"
@@ -324,7 +326,7 @@ export default function AdvancedSearchScreen() {
                 {summary}
               </Text>
               <Text style={s.summaryMeta} numberOfLines={1}>
-                {submitted.scope.kind === 'all' ? 'כל הספרייה' : submitted.scope.kind === 'book' ? submitted.scope.title : submitted.scope.kind === 'corpus' || submitted.scope.kind === 'books' ? submitted.scope.name : ''}
+                {submitted.scope.kind === 'all' ? 'כל הספרייה' : submitted.scope.kind === 'book' ? submitted.scope.title : submitted.scope.kind === 'books' ? submitted.scope.name : ''}
                 {submitted.plan.hasExpansions ? ' · כולל צורות נוספות' : ''}
               </Text>
             </View>

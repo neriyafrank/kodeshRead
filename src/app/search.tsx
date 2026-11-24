@@ -4,7 +4,8 @@
  *  - literal FTS5 matching (shared/hebrewSearch.js SIMPLE_DEFAULTS): every word is matched as
  *    typed — no prefixes / suffixes, no plene / defective spelling, no acronyms, no Aramaic;
  *    words are AND-ed and "quoted text" is an exact phrase. Punctuation never breaks a query;
- *  - scope: Entire Library / folder / book (ScopeSheet);
+ *  - scope: Entire Library / folder / book (ScopeSheet), or a preset base-book corpus strip (הכל, תנ"ך, משנה,
+ *    בבלי, ... with the matched book count; shared/corpora.js, the same presets as Advanced Search);
  *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the line and
  *    highlights it for 2 seconds;
  *  - "חיפוש מתקדם" opens the dedicated Advanced Search screen (/advanced-search) with the query.
@@ -17,14 +18,17 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { CORPORA } from '../../shared/corpora';
 import { buildQuery } from '../../shared/hebrewSearch';
 import type { SearchRow } from '../../shared/search';
 import { SearchIcon, SlidersIcon } from '../components/Icons';
+import { CorpusPresets } from '../components/search/CorpusPresets';
 import { ResultCard } from '../components/search/ResultCard';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
 import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
+import { useCorpora } from '../db/useCorpora';
 import { alignRight, inputAlignRight } from '../lib/direction';
 import { scopeLabel, useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
@@ -54,6 +58,25 @@ export default function SearchScreen() {
     const id = Number(params.bookId);
     if (Number.isFinite(id) && id > 0) setScope({ kind: 'book', bookId: id, title: params.title ?? '' });
   }, [params.bookId, params.title, setScope]);
+
+  // Preset corpora: the scope keeps its preset ids, and is re-resolved when the library changes.
+  const corpora = useCorpora();
+  const presetIds = useMemo(() => (scope.kind === 'books' && scope.corpora ? scope.corpora : []), [scope]);
+  const toggleCorpus = useCallback(
+    (id: string) => {
+      if (id === 'all') return setScope({ kind: 'all' });
+      const next = presetIds.includes(id) ? presetIds.filter((x) => x !== id) : [...presetIds, id];
+      // Switching / clearing a preset changes the scope key, which aborts the running search (usePlanResults).
+      setScope(next.length ? corpora.scopeFor(next) : { kind: 'all' });
+    },
+    [corpora, presetIds, setScope],
+  );
+  useEffect(() => {
+    if (!corpora.ready || !presetIds.length || scope.kind !== 'books') return;
+    const fresh = corpora.scopeFor(presetIds);
+    if (fresh.kind === 'books' && (fresh.ids.length !== scope.ids.length || fresh.ids.some((id, i) => id !== scope.ids[i]))) setScope(fresh);
+  }, [corpora, presetIds, scope, setScope]);
+  const presetItems = useMemo(() => [{ id: 'all', label: 'כל הספרייה' }, ...CORPORA.map((c) => ({ id: c.id, label: c.label, count: corpora.counts ? corpora.counts[c.id] : null }))], [corpora.counts]);
 
   // Literal plan: no expansion, no operators.
   const plan = useMemo(() => buildQuery(query), [query]);
@@ -142,6 +165,7 @@ export default function SearchScreen() {
             </Text>
           ) : null}
         </View>
+        <CorpusPresets items={presetItems} selected={presetIds.length ? presetIds : scope.kind === 'all' ? ['all'] : []} onToggle={toggleCorpus} testIDPrefix="corpus-chip" />
         <ScopeChips scope={scope} onChange={setScope} />
       </View>
       {plan.empty ? null : <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} scope={scope} progress={progress} onCancel={cancel} onRetry={rerun} />}

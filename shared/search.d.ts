@@ -6,17 +6,7 @@ export type SearchScope =
   | { kind: 'category'; path: string; name: string }
   | { kind: 'book'; bookId: number; title: string }
   /** Multi-select scope picker: any mix of base books and commentaries (book ids; an empty selection is `all`). */
-  | { kind: 'books'; ids: number[]; name: string; picks?: { id: number; title: string }[] }
-  /** Advanced Search corpus chips (CORPORA ids, OR-ed). */
-  | { kind: 'corpus'; ids: string[]; name: string };
-
-export interface Corpus {
-  id: string;
-  label: string;
-  include: string[];
-  exclude?: string[];
-}
-export const CORPORA: Corpus[];
+  | { kind: 'books'; ids: number[]; name: string; picks?: { id: number; title: string }[]; /** Preset corpus ids (shared/corpora.js) this scope was resolved from. */ corpora?: string[] };
 
 /** Cancellation + real progress for a plan run: `signal.aborted` -> AbortError; `onProgress` per JS verification batch. */
 export interface PlanRunHooks {
