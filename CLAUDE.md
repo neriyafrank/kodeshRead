@@ -50,7 +50,9 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > (⭐ pins from `src/state/commentaryStore.ts` -> base text -> per-corpus canonical core lists -> Otzaria era
 > folders תרגומים/ראשונים/אחרונים/מחברי זמננו -> alphabetical), assigns tier badges, picks the default-open
 > cards (pins + top 3) and filters by name with Torah abbreviations. `CommentaryPane.tsx` renders collapsible
-> cards with a sticky filter / chips / pill-strip header. Regression-tested in `scripts/selftest.js`.
+> cards with a sticky filter / chips / pill-strip header. The drawer shows NO עיקריים / נוספים
+> distinction (uniform cards and pills, no tier badge, no primary-only view): canonical order is the only priority signal; only
+> תרגומים / מקבילים / מקור are badged. Regression-tested in `scripts/selftest.js`.
 
 > **Reading typography & themes:** `shared/typography.js` (font keys, vocalization-aware line height:
 > slider = plain leading 1.55x, +0.2 niqqud / +0.3 te'amim; margin verse numbers via `splitVerseMarker`;
