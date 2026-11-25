@@ -44,6 +44,7 @@ jobs:
             for (const sec of ['oc', 'yd', 'eh', 'cm']) {
               const list = d[kind] && d[kind][sec];
               if (!Array.isArray(list) || list.length === 0) problems.push(`${kind}.${sec} has 0 topics`);
+              else if (list[list.length - 1].to > { oc: 697, yd: 403, eh: 178, cm: 427 }[sec]) problems.push(`${kind}.${sec} ranges run past the section's last siman (topics of another section mixed in)`);
               else console.log(`${kind}.${sec}: ${list.length} topics, simanim ${list[0].from}-${list[list.length - 1].to}, e.g. ${list[0].t} (${list[0].from}-${list[0].to})`);
             }
           }

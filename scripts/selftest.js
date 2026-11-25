@@ -431,6 +431,10 @@ async function main() {
               assert.ok(t.from > prev, `${kind}.${k} ${t.t}: ranges ascend without overlap`);
               prev = t.to;
             }
+            if (list.length) {
+              const MAX = { oc: 697, yd: 403, eh: 178, cm: 427 };
+              assert.ok(prev <= MAX[k], `${kind}.${k}: ranges stay within the section's ${MAX[k]} simanim (got ${prev}): topics of another section mixed in`);
+            }
           }
         }
       };

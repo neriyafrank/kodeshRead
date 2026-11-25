@@ -37,6 +37,18 @@ const TITLES = {
     cm: ['Tur, Choshen Mishpat'],
   },
 };
+/** Section named inside a Sefaria ref ("Tur, Yoreh De'ah 1-28" -> 'yd'); null when the ref names none. */
+function sectionOfRef(ref) {
+  const r = String(ref || '');
+  if (/orach\s*chay?i?m/i.test(r)) return 'oc';
+  if (/yoreh\s*de/i.test(r)) return 'yd';
+  if (/even\s*ha-?\s*ezer/i.test(r)) return 'eh';
+  if (/choshen\s*mishpat/i.test(r)) return 'cm';
+  return null;
+}
+
+/** Number of simanim per section (Shulchan Aruch and Tur share them): a larger topic range means the wrong section's topics. */
+const MAX_SIMAN = { oc: 697, yd: 403, eh: 178, cm: 427 };
 const PREFERRED = ['topic', 'topics', 'subject', 'subjects'];
 
 function getJson(url) {
@@ -86,21 +98,23 @@ function collect(nodes, out) {
   for (const n of nodes || []) {
     const range = nodeRange(n);
     const t = heTitleOf(n);
-    if (t && range) out.push({ t, from: range.from, to: range.to });
+    if (t && range) out.push({ t, from: range.from, to: range.to, sec: sectionOfRef(n.wholeRef || (Array.isArray(n.refs) && n.refs[0])) });
     else if (Array.isArray(n.nodes)) collect(n.nodes, out);
   }
   return out;
 }
 
 /** Topic list of one index response, or [] (no alt_structs / nothing usable). */
-function topicsOf(index) {
+function topicsOf(index, sec) {
   const alt = index && index.alt_structs && typeof index.alt_structs === 'object' ? index.alt_structs : null;
   if (!alt) return [];
   const names = Object.keys(alt).sort((a, b) => PREFERRED.indexOf(a.toLowerCase()) - PREFERRED.indexOf(b.toLowerCase()));
   const ordered = [...names.filter((k) => PREFERRED.includes(k.toLowerCase())), ...names.filter((k) => !PREFERRED.includes(k.toLowerCase()))];
   for (const k of ordered) {
     const list = collect(alt[k] && alt[k].nodes, []);
-    if (list.length) return clean(list);
+    // Sefaria's Tur alt_structs can hold the topics of all four parts: keep only the requested section's (refs name their part).
+    const mine = sec ? list.filter((t) => !t.sec || t.sec === sec) : list;
+    if (mine.length) return clean(mine.map(({ t, from, to }) => ({ t, from, to })));
   }
   return [];
 }
@@ -161,7 +175,8 @@ async function main() {
   const out = { source: 'Sefaria Index API (alt_structs)', fetched: new Date().toISOString().slice(0, 10), pending: false, sa: {}, tur: {}, turFallback: [] };
   for (const sec of SECTIONS) {
     const sa = await load('sa', sec, dir);
-    out.sa[sec] = topicsOf(sa.index);
+    out.sa[sec] = topicsOf(sa.index, sec);
+    if (out.sa[sec].length && out.sa[sec][out.sa[sec].length - 1].to > MAX_SIMAN[sec]) throw new Error(`Shulchan Aruch ${sec}: topic ranges run past siman ${MAX_SIMAN[sec]}`);
     if (!out.sa[sec].length) {
       console.error(`--- Sefaria response for ${sa.title} ---\n${describe(sa.index)}`);
       throw new Error(`Shulchan Aruch ${sec}: no topical alt_structs found (see the structure above)`);
@@ -170,7 +185,7 @@ async function main() {
   for (const sec of SECTIONS) {
     let topics = [];
     try {
-      topics = topicsOf((await load('tur', sec, dir)).index);
+      topics = topicsOf((await load('tur', sec, dir)).index, sec);
     } catch (e) {
       console.warn(`! Tur ${sec}: ${e.message}`);
     }
@@ -180,6 +195,8 @@ async function main() {
       console.warn(`! Tur ${sec}: no alt_structs, using the Shulchan Aruch ranges`);
     }
     out.tur[sec] = topics;
+    const max = MAX_SIMAN[sec];
+    if (topics[topics.length - 1].to > max) throw new Error(`Tur ${sec}: topic ranges run past siman ${max} (${topics[topics.length - 1].t} ${topics[topics.length - 1].from}-${topics[topics.length - 1].to}): the alt_structs mix sections`);
   }
   for (const kind of ['sa', 'tur']) for (const sec of SECTIONS) console.log(`${kind}/${sec}: ${out[kind][sec].length} topics, simanim ${out[kind][sec][0].from}-${out[kind][sec][out[kind][sec].length - 1].to}`);
   if (!dry) {
@@ -194,4 +211,4 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-module.exports = { topicsOf, rangeOf, clean, describe };
+module.exports = { MAX_SIMAN, sectionOfRef, topicsOf, rangeOf, clean, describe };
