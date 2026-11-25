@@ -1,0 +1,7 @@
+{
+  "name": "cloud-download",
+  "version": "1.0.0",
+  "description": "OS-managed background download of the cloud library parts (Android WorkManager: resumable Range transfer, network-constrained, foreground dataSync).",
+  "private": true,
+  "main": "index.ts"
+}

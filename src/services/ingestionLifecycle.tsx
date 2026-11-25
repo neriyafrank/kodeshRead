@@ -10,6 +10,9 @@
  *    import continues automatically (or, if it was still finishing its book, the pause is
  *    simply withdrawn). If the OS killed the app meanwhile, the checkpoint says
  *    'in_progress' and the resume card offers to continue on the next launch.
+ *  - <CloudDownloadLifecycle/> re-attaches to a cloud download that was still running when the app was killed (the
+ *    Android WorkManager transfer may still be going, or have finished, without the app): on launch it continues the
+ *    saved flow from its bytes. A download the user paused (or that failed) waits for "המשך הורדה" on the card.
  *  - useInterruptedImports() lists the checkpoints of imports that did not finish, for the
  *    "המשך בנייה שנעצרה" card (Library screen + manager).
  */
@@ -19,6 +22,7 @@ import { AppState, type AppStateStatus } from 'react-native';
 import { useLibrary } from '../db/LibraryContext';
 import { useLibraryJobs } from '../state/libraryJobs';
 import * as importService from './importForegroundService';
+import { pendingCloudDownload, shouldAutoResumeCloudDownload } from './cloudLibrary';
 import { useLibraryActions } from './libraryActions';
 import { findInterruptedImports, reopenSource, type InterruptedImport } from './localIndexer';
 
@@ -92,5 +96,21 @@ export function IngestionLifecycle() {
     })();
   }, [appState, job, autoPaused, result, lib.user, actions]);
 
+  return null;
+}
+
+/** On launch: continue a cloud download that was running (not paused / failed) when the app went away. */
+export function CloudDownloadLifecycle() {
+  const actions = useLibraryActions();
+  const done = useRef(false);
+  useEffect(() => {
+    if (done.current) return;
+    done.current = true; // once per app launch (also under StrictMode's double effect)
+    (async () => {
+      const p = await pendingCloudDownload();
+      if (!p || useLibraryJobs.getState().job || !(await shouldAutoResumeCloudDownload(p))) return;
+      void actions.downloadCloud(p.manifest, p.manifestUrl, p.plan);
+    })().catch((e) => console.warn('saved cloud download unreadable', e));
+  }, [actions]);
   return null;
 }

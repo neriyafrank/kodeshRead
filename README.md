@@ -499,7 +499,7 @@ Each database has its own FTS5 index and meta (`part` = `core` / `extended`). Th
 may cross databases), cross-references and full-text search combine both. The library manager offers, on a fresh install,
 **ספריית יסוד** (core size) or **ספרייה מלאה** (combined size: core then extended in one flow, one progress bar; core is installed as
 soon as it is downloaded, so a cancellation keeps it usable); with core installed one button **הרחב לספרייה מלאה** downloads ONLY the
-extended size. Both stages use the resumable chunked-Range download with per-part and whole-zip SHA-256. Older monolithic
+extended size. Both stages use the resumable, pausable background download (below) with per-part and whole-zip SHA-256. Older monolithic
 `core_library.db` installs (and the classic build) keep working and are offered the two-stage update.
 
 Pipeline (each step deletes its input first, so the runner never holds two multi-GB copies; 35 GB free are enforced):
@@ -512,10 +512,14 @@ parts[{name,sizeBytes,sha256}]`) → release upload (old manifest removed first,
 
 In the app: *ניהול ספרייה ועדכונים* → **הורד ספרייה מוכנה מהענן**. The card shows books, size, parts and build date, warns
 when free storage is below zip + extracted DB + 500 MB, and downloads the parts one by one
-(`חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%`). Valid parts already on disk (size + SHA-256) are skipped after a dropped
-connection or restart; parts are appended into one zip in 1 MB chunks (each deleted once appended), verified against
+(`חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%`). On Android the transfer is an OS-managed WorkManager job
+(`modules/cloud-download`): it keeps running with the screen off, the app in the background or closed, waits for the
+network (`ממתין לחיבור לרשת…`) and continues every part from the exact byte already on disk (HTTP Range, redirects followed
+so the Range header is never lost). **השהה** stops it with its progress saved; **המשך הורדה** on the card continues from
+there, also after a restart or reboot. Every part's SHA-256 is verified before it counts; a fatal error shows a readable
+reason plus a copyable diagnostic (HTTP status, bytes downloaded vs. expected, host). Parts are appended into one zip in 1 MB chunks (each deleted once appended), verified against
 `fullZipSha256`, streamed into `core_library.db.tmp`, checked (`PRAGMA quick_check` + meta) and installed with the
-awaited `File.move()` swap. Logic: `shared/multipart.js` (self-tested), UI `src/components/library/CloudLibraryCard.tsx`.
+awaited `File.move()` swap. Logic: `shared/cloudDownload.js` + `shared/multipart.js` (self-tested), UI `src/components/library/CloudLibraryCard.tsx`.
 
 `paragraphs_fts` is already an FTS5 *external-content* table (`content='paragraphs_fts_source'`), so paragraph text is
 stored once; `npm test` asserts it returns the same rows as a duplicated-content table at ~1/4 of the FTS storage.

@@ -1,35 +1,37 @@
 /**
- * Multi-part cloud library: the pre-indexed core_library.db built by the "Build cloud library"
- * GitHub Action and published as `library-latest`: library-manifest.json + core_library.db.zip.part-NN (shared/libraryRelease.js).
+ * Multi-part cloud library: the pre-indexed core_library.db (+ the optional extended_library.db) built by the "Build
+ * cloud library" GitHub Action and published as `library-latest`: library-manifest.json + <db>.zip.part-NN
+ * (shared/libraryRelease.js).
  *
  *   1. library-manifest.json (book count, sizes, SHA-256 of every part and of the whole zip)
  *   2. free-space check: zip + extracted DB + 500 MB
- *   3. parts are downloaded one after the other into Documents/core_library_parts/ (as `<part>.partial`,
- *      continued with an HTTP Range request after any interruption; transient network errors retry with
- *      exponential backoff, and the run resumes when the app returns to the foreground). A part that is
- *      already there with the right size + SHA-256 is skipped, so an interrupted download resumes.
- *      The whole job runs under the Android foreground service (libraryActions.runJob) so Android keeps
- *      the network alive in the background / with the screen off
+ *   3. the parts are downloaded into Documents/core_library_parts/ by the device's transfer engine
+ *      (backgroundDownload.ts: Android WorkManager = OS-managed, continues in the background / screen off / after the
+ *      app was killed or the phone rebooted; iOS background NSURLSession). Each part goes to `<part>.partial`, is
+ *      continued with an HTTP Range request after any interruption and renamed once complete; the controller
+ *      (shared/cloudDownload.js) verifies its SHA-256, persists the state in cloud-download.json (pause / resume across
+ *      restarts) and reports monotonic progress plus the states downloading / waiting_for_network / verifying / paused
  *   4. parts are appended into one zip in 1 MB chunks (each part deleted once appended), the zip is
  *      verified against fullZipSha256, then streamed (fflate) into SQLite/core_library.db.tmp
  *   5. the staged DB is checked (PRAGMA quick_check + meta) and installed by LibraryController.installCore()
  *      (awaited same-directory File.move), exactly like the single-file download in coreLibrary.ts
  *
- * The orchestration is shared/multipart.js (pure, self-tested in Node); this file only supplies the
- * expo-file-system storage backend and the app wiring.
+ * The orchestration is shared (pure, self-tested in Node); this file supplies the expo-file-system storage
+ * backend, the engine and the app wiring.
  */
 import Constants from 'expo-constants';
 import { Directory, File, FileMode, Paths } from 'expo-file-system';
 import { openDatabaseAsync } from 'expo-sqlite';
-import { AppState } from 'react-native';
 
 import { readMeta, SCHEMA_VERSION } from '../../shared/indexer';
 import { runStagedFlow, STAGE_TITLES, type InstalledState, type Plan } from '../../shared/libraryRelease';
-import { checkFreeSpace, cloudManifestUrl, createMemoryIO, downloadRangeChunks, formatBytes, packageOf, planPackages, requiredFreeBytesForPlan, stageCloudLibrary, validateCloudManifest, type CloudManifest, type CloudPackageView, type PartsIO } from '../../shared/multipart';
+import { clearDownloadState, createHttpEngine, patchDownloadState, readDownloadState, type Connectivity, type DownloadState, type PersistedDownload } from '../../shared/cloudDownload';
+import { checkFreeSpace, cloudManifestUrl, createMemoryIO, formatBytes, packageOf, planPackages, requiredFreeBytesForPlan, stageCloudLibrary, validateCloudManifest, type CloudManifest, type CloudPackageView, type PartsIO } from '../../shared/multipart';
 import { closeQuietly } from '../db/dbUtils';
 import { coreInfoFromMeta, CORE_TMP_DB, dbFile, EXTENDED_TMP_DB, isWeb, removeDbFiles, toAdapter } from '../db/library';
 import { CancelledError, useLibraryJobs } from '../state/libraryJobs';
-import * as importService from './importForegroundService';
+import { deviceDownloadEngine, hasNativeBackgroundDownloads, nativeTransferWasStopped, stopNativeDownload } from './backgroundDownload';
+import { withJobService } from './jobService';
 import { withKeepAwake } from './keepAwake';
 
 const DEFAULT_REPO = 'neriyafrank/kodeshRead';
@@ -93,60 +95,10 @@ function partsDir(): Directory {
   return dir;
 }
 
-/**
- * Appends `chunk` to `target` (1 MB at a time), or moves it there when the target is empty / missing; deletes the chunk.
- *
- * IMPORTANT (the "0 -> 4 MB loop" bug): `File.move()` of expo-file-system UPDATES the `uri` of the File object it is called on,
- * so after moving the first chunk that object points at the .partial file. A chunk File object kept for the next chunk would
- * then alias the partial: `discardChunk()` deleted the partial and the "download" wrote over it, so every chunk restarted at 0.
- * Callers therefore pass FRESH File objects (see `chunkFile()` / `targetFile()` in nativePartsIO) and never reuse one after a move.
- * The appended size is verified so a silent failure is an error, not a retry of the same offset.
- */
-async function absorbChunk(chunk: File, target: File): Promise<void> {
-  if (!chunk.exists) return;
-  const size = chunk.size;
-  if (size > 0 && !target.exists) await chunk.move(target, { overwrite: true });
-  else if (size > 0) {
-    const start = target.size;
-    const input = chunk.open(FileMode.ReadOnly);
-    // FileMode.Append: the cursor starts at the end of the partial (no truncation, no manual seek).
-    const output = target.open(FileMode.Append);
-    try {
-      for (let left = size; left > 0; ) {
-        const bytes = await input.readBytes(Math.min(1 << 20, left));
-        if (!bytes.length) break;
-        await output.writeBytes(bytes);
-        left -= bytes.length;
-      }
-    } finally {
-      input.close();
-      output.close();
-    }
-    if (target.size !== start + size) throw new Error(`DOWNLOAD_APPEND_MISMATCH: partial is ${target.size} bytes after appending ${size} to ${start}`);
-  }
-  if (chunk.exists) chunk.delete();
-}
-
-/** The OS may have revoked the network: only when no foreground service keeps the app alive. */
-const isBackgrounded = () => AppState.currentState !== 'active' && !importService.isActive();
-
-/** Resolves once the app is in the foreground again (or the job was cancelled). */
-function whenForeground(isCancelled: () => boolean): Promise<void> {
-  return new Promise((resolve) => {
-    if (AppState.currentState === 'active') return resolve();
-    const done = () => {
-      sub.remove();
-      clearInterval(poll);
-      resolve();
-    };
-    const sub = AppState.addEventListener('change', (s) => s === 'active' && done());
-    const poll = setInterval(() => isCancelled() && done(), 1000);
-  });
-}
-
-/** expo-file-system backend of shared/multipart.js. Parts live in Documents/core_library_parts. */
-export function nativePartsIO(isCancelled: () => boolean): PartsIO {
+/** expo-file-system storage of shared/multipart.js. Parts live in Documents/core_library_parts; staged DBs in SQLite/. */
+export function nativePartsIO(): PartsIO {
   const dir = partsDir();
+  // Fresh File objects on every use: File.move() re-points the object it is called on.
   const file = (name: string) => (name === CORE_TMP_DB || name === EXTENDED_TMP_DB ? dbFile(name) : new File(dir, name));
   return {
     size: (name) => {
@@ -159,68 +111,16 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
     },
     sha256: async (name) => (await file(name).digest('SHA-256')).toLowerCase(),
     rename: async (from, to) => {
-      const dst = file(to);
-      if (dst.exists) dst.delete();
-      await file(from).move(dst, { overwrite: true }); // File.move() is async: always awaited
+      await file(from).move(file(to), { overwrite: true }); // File.move() is async: always awaited
     },
-    download: async (url, name, onProgress, _isCancelled, resume) => {
-      // Chunked Range download: each <= 4 MB chunk goes to its own temp file and is appended to the .partial only
-      // when complete, so a hard network drop on Android loses at most one chunk. downloadAsync never targets
-      // the .partial itself. Fresh File objects on every use: move() re-points the object it is called on.
-      const targetFile = () => file(name);
-      const chunkFile = () => new File(dir, `${name}.chunk`);
-      const expected = resume?.expectedBytes ?? 0;
-      if (!expected) throw new Error('גודל החלק לא ידוע');
-      await absorbChunk(chunkFile(), targetFile()); // legacy chunk from an older build / process death: a valid prefix
-      await downloadRangeChunks(
-        {
-          partialSize: () => {
-            const t = targetFile();
-            return t.exists ? t.size : 0;
-          },
-          // Resolve the final CDN URL ourselves (fetch follows the 302 keeping Range): the native downloader
-          // then talks to the CDN directly and cannot lose the header on the redirect.
-          resolve: async (start: number, end: number) => {
-            const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` }, cache: 'no-store' });
-            try {
-              void res.body?.cancel?.();
-            } catch {
-              // body already consumed / unsupported
-            }
-            return { url: res.url || url, status: res.status };
-          },
-          fetchChunk: async (finalUrl: string, range: string | null, onBytes: (n: number) => void) => {
-            const task = File.createDownloadTask(finalUrl, chunkFile(), {
-              headers: range ? { Range: range } : undefined,
-              onProgress: ({ bytesWritten }) => {
-                if (isCancelled()) task.cancel();
-                onBytes(bytesWritten);
-              },
-            });
-            const got = await task.downloadAsync();
-            if (!got) throw new Error('ההורדה נכשלה');
-          },
-          chunkSize: () => {
-            const c = chunkFile();
-            return c.exists ? c.size : null;
-          },
-          discardChunk: () => {
-            const c = chunkFile();
-            if (c.exists) c.delete();
-          },
-          appendChunk: () => absorbChunk(chunkFile(), targetFile()),
-          adoptChunk: async () => {
-            const t = targetFile();
-            if (t.exists) t.delete();
-            await chunkFile().move(targetFile(), { overwrite: true });
-          },
-          resetPartial: () => {
-            const t = targetFile();
-            if (t.exists) t.delete();
-          },
-        },
-        { expectedBytes: expected, isCancelled, onProgress },
-      );
+    readText: (name) => file(name).text(),
+    writeText: async (name, text) => {
+      // Atomic: a crash mid-write never leaves a truncated state file (the partials would look stale).
+      const tmp = file(`${name}.tmp`);
+      if (tmp.exists) tmp.delete();
+      tmp.create();
+      await tmp.write(text);
+      await tmp.move(file(name), { overwrite: true });
     },
     openRead: (name) => {
       const f = file(name);
@@ -248,6 +148,23 @@ export function nativePartsIO(isCancelled: () => boolean): PartsIO {
   };
 }
 
+/** True when the browser preview runs the download flow against in-memory storage (e2e only). */
+export const isPreviewCloudDownload = () => isWeb && !!(globalThis as { __KODESHREAD_E2E_CLOUD__?: boolean }).__KODESHREAD_E2E_CLOUD__;
+
+/** Browser preview: ONE in-memory store for the session, so a paused download resumes from its bytes. */
+let previewIO: (PartsIO & { files: Map<string, Uint8Array> }) | null = null;
+const previewStore = () => (previewIO ??= createMemoryIO());
+
+/** The storage of the cloud download on this platform (null: none, e.g. the plain browser preview). */
+function cloudIO(): PartsIO | null {
+  if (isPreviewCloudDownload()) return previewStore();
+  if (isWeb) return null;
+  return nativePartsIO();
+}
+
+/** Browser connectivity (Playwright `setOffline` flips it): offline -> "ממתין לחיבור לרשת…". */
+const browserConnectivity: Connectivity = { isOnline: () => typeof navigator === 'undefined' || navigator.onLine !== false };
+
 /** Parts of a plan already on disk with the exact size of the manifest (the card's "ההורדה תמשיך" hint). */
 export function countPartsOnDisk(m: CloudManifest, plan: Plan = 'full'): { onDisk: number; total: number } {
   const pkgs = planPackages(m, plan).packages.map((k) => packageOf(m, k));
@@ -269,16 +186,19 @@ export function countPartsOnDisk(m: CloudManifest, plan: Plan = 'full'): { onDis
   }
 }
 
-/** Removes the downloaded parts (and their partial / id / chunk side files) of finished packages. */
+/** Removes the downloaded parts (and their partial / resume side files) of finished packages; no argument: everything. */
 export function clearCloudParts(pkgs?: CloudPackageView[]): void {
-  if (isWeb) return;
+  if (isWeb) {
+    if (!pkgs) previewIO = null;
+    return;
+  }
   try {
     const dir = new Directory(Paths.document, PARTS_DIR);
     if (!dir.exists) return;
     if (!pkgs) return dir.delete();
     for (const pkg of pkgs) {
       for (const p of pkg.parts) {
-        for (const suffix of ['', '.partial', '.partial.id', '.chunk']) {
+        for (const suffix of ['', '.partial', '.partial.resume.json']) {
           const f = new File(dir, p.name + suffix);
           if (f.exists) f.delete();
         }
@@ -289,33 +209,39 @@ export function clearCloudParts(pkgs?: CloudPackageView[]): void {
   }
 }
 
-function report(p: { stage: string; fraction: number | null; detail: string | null }) {
+function report(p: { stage: string; fraction: number | null; detail: string | null; download?: DownloadState }) {
   useLibraryJobs.getState().update(p);
 }
 
 const tmpDbOf = (kind: 'core' | 'extended') => (kind === 'extended' ? EXTENDED_TMP_DB : CORE_TMP_DB);
+const cancelled = () => useLibraryJobs.getState().cancelRequested;
+const pauseRequested = () => useLibraryJobs.getState().stopRequested === 'pause';
 
 /**
  * Downloads, assembles, extracts and validates ONE package (core or extended) into its staging database
  * (SQLite/core_library.db.tmp | extended_library.db.tmp). `win` maps its download bytes onto the unified bar of the
- * whole flow. Resumes from the parts on disk (chunked Range, SHA-256 per part and for the whole zip).
+ * whole flow. Throws DownloadPausedError on a pause (the bytes stay for the next run), DownloadError on a fatal failure.
  */
 async function stagePackage(pkg: CloudPackageView, manifest: CloudManifest, manifestUrl: string, win: { offset: number; total: number; label: string }): Promise<void> {
-  const cancelled = () => useLibraryJobs.getState().cancelRequested;
-  const io = nativePartsIO(cancelled);
+  const io = nativePartsIO();
   const tmp = tmpDbOf(pkg.kind);
   removeDbFiles(tmp);
-  try {
+  // WorkManager runs the transfer in its own foreground service; the JS steps after it (assembly, extraction) run under
+  // the job's. Without the native module (Expo Go) the whole stage needs the job's service.
+  const native = hasNativeBackgroundDownloads();
+  await adoptLegacyPartials(io, pkg);
+  const run = async () => {
     try {
       await stageCloudLibrary(io, pkg, {
         manifestUrl,
+        engine: deviceDownloadEngine(partsDir()),
         dbName: tmp,
         window: win,
         isCancelled: cancelled,
+        isPauseRequested: pauseRequested,
         report,
-        isBackgrounded,
-        whenForeground: () => whenForeground(cancelled),
-        keepAwake: (fn) => withKeepAwake(CLOUD_KEEP_AWAKE_TAG, fn),
+        pollMs: 500,
+        keepAwake: (fn) => withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => (native ? withJobService('מרכיב את הספרייה…', fn) : fn())),
       });
     } catch (e) {
       if (cancelled()) throw new CancelledError();
@@ -324,10 +250,34 @@ async function stagePackage(pkg: CloudPackageView, manifest: CloudManifest, mani
     report({ stage: 'בודק את מסד הנתונים…', fraction: null, detail: win.label });
     // A release with an extended pack stamps its core database `part = core`; an older one-database release has no part.
     await validateStagedCloud(manifest.version, tmp, pkg.kind === 'extended' ? 'extended' : manifest.extended ? 'core' : null);
+  };
+  try {
+    await (native ? run() : withJobService('מוריד ספרייה מהענן…', run));
   } catch (e) {
     removeDbFiles(tmp); // the parts stay: the next attempt resumes
     throw e;
   }
+}
+
+/**
+ * Builds before the WorkManager engine kept `<part>.partial` + a `.partial.id` sidecar (the part's SHA-256) and 4 MB
+ * `.chunk` temp files. A partial whose sidecar matches this release is adopted (continued; SHA-256 still verified at
+ * the end), the side files are removed.
+ */
+async function adoptLegacyPartials(io: PartsIO, pkg: CloudPackageView): Promise<void> {
+  const saved = await readDownloadState(io);
+  const known = (saved?.packages as Record<string, { release?: string } | null> | undefined)?.[pkg.kind];
+  let adopt = false;
+  for (const p of pkg.parts) {
+    const id = `${p.name}.partial.id`;
+    if ((await io.size(id)) != null) {
+      const sha = String(await io.readText(id)).trim();
+      if (sha === p.sha256 && !known) adopt = true;
+      await io.remove(id);
+    }
+    await io.remove(`${p.name}.chunk`);
+  }
+  if (adopt) await patchDownloadState(io, { packages: { [pkg.kind]: { release: pkg.fullZipSha256, verified: {}, corrupt: {} } } });
 }
 
 /** quick_check + meta + schema of a staged DB (returns its version). `part` = the expected `meta.part` (null: none). */
@@ -351,21 +301,29 @@ export async function validateStagedCloud(expectedVersion: string, dbName: strin
   }
 }
 
-/** True when the browser preview runs the download flow against in-memory storage (e2e only). */
-export const isPreviewCloudDownload = () => isWeb && !!(globalThis as { __KODESHREAD_E2E_CLOUD__?: boolean }).__KODESHREAD_E2E_CLOUD__;
-
-/** Browser e2e: the same pipeline over in-memory storage for ONE package; resolves once the bytes are a SQLite database. */
+/** Browser e2e: the same pipeline over the session's in-memory storage for ONE package; resolves once the bytes are a SQLite database. */
 async function stagePackageForPreview(pkg: CloudPackageView, manifestUrl: string, win: { offset: number; total: number; label: string }): Promise<void> {
-  const io = createMemoryIO();
-  const cancelled = () => useLibraryJobs.getState().cancelRequested;
+  const io = previewStore();
+  const delay = (globalThis as { __KODESHREAD_E2E_POLL_MS__?: number }).__KODESHREAD_E2E_POLL_MS__;
   try {
-    await stageCloudLibrary(io, pkg, { manifestUrl, dbName: tmpDbOf(pkg.kind), window: win, isCancelled: cancelled, report });
+    await stageCloudLibrary(io, pkg, {
+      manifestUrl,
+      engine: createHttpEngine({ io, connectivity: browserConnectivity, backoffBaseMs: 300, backoffCapMs: 1200, onlinePollMs: 200 }),
+      dbName: tmpDbOf(pkg.kind),
+      window: win,
+      isCancelled: cancelled,
+      isPauseRequested: pauseRequested,
+      report,
+      pollMs: typeof delay === 'number' ? delay : 50,
+    });
   } catch (e) {
     if (cancelled()) throw new CancelledError();
     throw e;
   }
-  const head = io.files.get(tmpDbOf(pkg.kind))?.subarray(0, 15);
+  const db = io.files.get(tmpDbOf(pkg.kind));
+  const head = db?.subarray(0, 15);
   if (!head || String.fromCharCode(...head) !== 'SQLite format 3') throw new Error('הקובץ שחולץ אינו מסד SQLite');
+  io.remove(tmpDbOf(pkg.kind)); // "installed" (the preview records it instead)
 }
 
 export interface CloudFlowHooks {
@@ -375,6 +333,56 @@ export interface CloudFlowHooks {
   onInstalled: (kind: 'core' | 'extended', version: string) => void;
 }
 
+/** A cloud download that did not finish (paused, failed, or interrupted by a kill): the card's "המשך הורדה". */
+export interface PendingCloudDownload {
+  status: DownloadState;
+  plan: Plan;
+  manifest: CloudManifest;
+  manifestUrl: string;
+  progress: { done: number; total: number } | null;
+  error: { code: string; message: string; diagnostic: string } | null;
+  updatedAt: string | null;
+}
+
+/** The saved, unfinished cloud download (null when there is none). */
+export async function pendingCloudDownload(): Promise<PendingCloudDownload | null> {
+  const io = cloudIO();
+  if (!io) return null;
+  const s: PersistedDownload | null = await readDownloadState(io);
+  if (!s || !s.manifest || !s.plan || !s.manifestUrl) return null;
+  const status = (s.status ?? 'paused') as DownloadState;
+  if (status === 'idle' || status === 'completed') return null;
+  let manifest: CloudManifest;
+  try {
+    manifest = validateCloudManifest(s.manifest);
+  } catch {
+    return null;
+  }
+  return { status, plan: s.plan as Plan, manifest, manifestUrl: String(s.manifestUrl), progress: s.progress ?? null, error: s.error ?? null, updatedAt: s.updatedAt ?? null };
+}
+
+/**
+ * On launch: should the saved download continue by itself? Only one that was running when the app went away, and not
+ * paused from the notification meanwhile (then it is recorded as paused and waits for "המשך הורדה").
+ */
+export async function shouldAutoResumeCloudDownload(p: PendingCloudDownload): Promise<boolean> {
+  if (p.status !== 'downloading' && p.status !== 'waiting_for_network' && p.status !== 'verifying') return false;
+  if (await nativeTransferWasStopped()) {
+    const io = cloudIO();
+    if (io) await patchDownloadState(io, { status: 'paused' });
+    return false;
+  }
+  return true;
+}
+
+/** Stops a background transfer and deletes every downloaded byte + the saved state ("בטל הורדה"). */
+export async function discardCloudDownload(): Promise<void> {
+  await stopNativeDownload();
+  const io = cloudIO();
+  if (io) await clearDownloadState(io);
+  clearCloudParts();
+}
+
 /**
  * The staged cloud download of one plan (see shared/libraryRelease.js flowOf):
  *   core      ספריית יסוד only
@@ -382,30 +390,45 @@ export interface CloudFlowHooks {
  *   full      core -> extended in ONE flow with ONE progress bar (total = the combined bytes of the packages left);
  *             a fresh install installs core as soon as it is staged, so a cancellation keeps it usable and the next run
  *             only finishes the extended pack; an UPDATE stages both first and swaps them back to back.
- * Every package is resumable (parts on disk, Range chunks) and SHA-256 verified. Returns the installed book count.
+ * Every package is resumable (parts on disk, Range), pausable and SHA-256 verified; the flow is recorded in
+ * cloud-download.json so a pause, a kill or a reboot continues it. Returns the installed book count.
  */
 export async function runCloudFlow(manifest: CloudManifest, manifestUrl: string, plan: Plan, state: InstalledState, hooks: CloudFlowHooks): Promise<{ books: number; kinds: ('core' | 'extended')[] }> {
   const preview = isPreviewCloudDownload();
-  if (isWeb && !preview) throw new Error('הורדת ספרייה אינה נתמכת בתצוגה המקדימה בדפדפן');
+  const io = cloudIO();
+  if (!io) throw new Error('הורדת ספרייה אינה נתמכת בתצוגה המקדימה בדפדפן');
   const free = freeDiskBytes();
   if (!preview && free != null && free < requiredFreeBytesForPlan(manifest, plan) * 0.5) {
     // The card already warned; this only stops a run that cannot possibly fit.
     throw new Error(storageVerdict(manifest, plan, free).message ?? 'אין מספיק מקום פנוי');
   }
-  const r = await runStagedFlow({
-    state,
-    manifest,
-    plan,
-    stage: (p: CloudPackageView, win) => (preview ? stagePackageForPreview(p, manifestUrl, win) : stagePackage(p, manifest, manifestUrl, win)),
-    install: async (p: CloudPackageView) => {
-      useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: STAGE_TITLES[p.kind] });
-      if (!preview) {
-        // The DB swap (drain readers, close, rename) must not be cut short by the device sleeping.
-        await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => (p.kind === 'core' ? hooks.installCore() : hooks.installExtended()));
-        clearCloudParts([p]);
-      }
-      hooks.onInstalled(p.kind, manifest.version);
-    },
-  });
-  return { books: r.books, kinds: r.kinds };
+  // (A saved download of another release is never continued: the controller drops partials of another fullZipSha256.)
+  await patchDownloadState(io, { manifest, manifestUrl, plan, status: 'downloading', error: null });
+  try {
+    const r = await runStagedFlow({
+      state,
+      manifest,
+      plan,
+      stage: (p: CloudPackageView, win) => (preview ? stagePackageForPreview(p, manifestUrl, win) : stagePackage(p, manifest, manifestUrl, win)),
+      install: async (p: CloudPackageView) => {
+        useLibraryJobs.getState().update({ stage: 'מתקין…', fraction: null, detail: STAGE_TITLES[p.kind], download: 'completed' });
+        if (!preview) {
+          // The DB swap (drain readers, close, rename) must not be cut short by the device sleeping or the OS.
+          await withKeepAwake(CLOUD_KEEP_AWAKE_TAG, () => withJobService('מתקין את הספרייה…', () => (p.kind === 'core' ? hooks.installCore() : hooks.installExtended())));
+          clearCloudParts([p]);
+        }
+        hooks.onInstalled(p.kind, manifest.version);
+      },
+    });
+    await clearDownloadState(io);
+    return { books: r.books, kinds: r.kinds };
+  } catch (e) {
+    if (e instanceof CancelledError || cancelled()) await clearDownloadState(io);
+    else if (!(e as { paused?: boolean })?.paused) {
+      const cur = await readDownloadState(io);
+      // A DownloadError was recorded by the controller with its diagnostic; any later failure is recorded here.
+      if (cur && cur.status !== 'error') await patchDownloadState(io, { status: 'error', error: { code: 'stage', message: e instanceof Error ? e.message : String(e), diagnostic: e instanceof Error ? e.message : String(e) } });
+    }
+    throw e;
+  }
 }

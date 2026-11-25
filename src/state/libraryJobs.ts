@@ -6,10 +6,13 @@
  *
  * Ingestion jobs (buildCore / importFiles / importFolder) are `resumable`: "pause" (or the app
  * going to the background) stops them after the current book commits; "cancel" stops them
- * the same way and then discards the partial import.
+ * the same way and then discards the partial import. Cloud downloads are `pausable`: "pause" stops
+ * the transfer with its bytes and state saved on disk (shared/cloudDownload.js), "cancel" deletes them.
  */
 import { Platform } from 'react-native';
 import { create } from 'zustand';
+
+import type { DownloadState } from '../../shared/cloudDownload';
 
 export type JobKind = 'download' | 'buildCore' | 'importFiles' | 'importFolder' | 'delete';
 
@@ -23,6 +26,10 @@ export interface JobProgress {
   detail: string | null;
   /** Ingestion job: can be paused and resumed later. */
   resumable: boolean;
+  /** Cloud download: "השהה" stops it with its bytes saved; "המשך הורדה" continues from them (also after a restart). */
+  pausable?: boolean;
+  /** Cloud download: the engine state (downloading / waiting_for_network / verifying / paused / ...). */
+  download?: DownloadState | null;
   /** Ingestion phase (scan / books / links / finalize), for the Android progress notification. */
   phase?: string | null;
   /** Items done / total of the current phase (null when unknown). */
@@ -59,7 +66,7 @@ interface JobsState {
   autoPaused: boolean;
   /** Bumped whenever a checkpoint may have changed (resume card re-reads it). */
   checkpointGeneration: number;
-  start: (kind: JobKind, stage: string, opts?: { resumable?: boolean }) => boolean;
+  start: (kind: JobKind, stage: string, opts?: { resumable?: boolean; pausable?: boolean }) => boolean;
   update: (patch: Partial<Omit<JobProgress, 'kind'>>) => void;
   finish: (result: Omit<JobResult, 'kind'>) => void;
   requestCancel: () => void;
@@ -86,7 +93,7 @@ export const useLibraryJobs = create<JobsState>()((set, get) => ({
   checkpointGeneration: 0,
   start: (kind, stage, opts) => {
     if (get().job) return false;
-    set({ job: { kind, stage, fraction: null, detail: null, resumable: !!opts?.resumable }, result: null, cancelRequested: false, stopRequested: null, autoPaused: false });
+    set({ job: { kind, stage, fraction: null, detail: null, resumable: !!opts?.resumable, pausable: !!opts?.pausable, download: null }, result: null, cancelRequested: false, stopRequested: null, autoPaused: false });
     return true;
   },
   update: (patch) => set((s) => (s.job ? { job: { ...s.job, ...patch } } : s)),
@@ -99,7 +106,8 @@ export const useLibraryJobs = create<JobsState>()((set, get) => ({
       result: { kind: s.job?.kind ?? 'delete', ...r },
     })),
   requestCancel: () => set((s) => ({ cancelRequested: true, stopRequested: s.job?.resumable ? 'cancel' : s.stopRequested, autoPaused: false })),
-  requestPause: (auto = false) => set((s) => (s.job?.resumable && s.stopRequested !== 'cancel' ? { stopRequested: 'pause', autoPaused: auto } : s)),
+  // A download is paused only by the user (never automatically: it continues in the background).
+  requestPause: (auto = false) => set((s) => ((s.job?.resumable || (s.job?.pausable && !auto)) && s.stopRequested !== 'cancel' ? { stopRequested: 'pause', autoPaused: auto } : s)),
   setAutoPaused: (v) => set({ autoPaused: v }),
   // autoPaused stays set: if the job had already seen the pause, it finishes as paused and
   // IngestionLifecycle resumes it; if not, it simply keeps running.

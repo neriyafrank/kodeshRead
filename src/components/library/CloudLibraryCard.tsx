@@ -6,6 +6,9 @@
  *   newer cloud build   update (the stages that are installed)
  * Every size is the exact size from the manifest. Progress: "ספריית יסוד · חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%" in
  * the job card above (one bar for the whole flow). Warns when the free storage is below zips + DBs + 500 MB.
+ *
+ * An unfinished download (paused, failed, or cut by a kill / reboot; cloud-download.json) shows its saved progress with
+ * "המשך הורדה" (continues from the saved bytes; with a newer cloud build it starts that one instead) and "בטל הורדה".
  */
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
@@ -15,11 +18,13 @@ import { formatBytes, packageOf, planPackages, type CloudManifest } from '../../
 import { useLibrary } from '../../db/LibraryContext';
 import { isWeb } from '../../db/library';
 import { alignRight, isolateLtr } from '../../lib/direction';
-import { countPartsOnDisk, defaultCloudManifestUrl, fetchCloudManifest, isPreviewCloudDownload, storageVerdict } from '../../services/cloudLibrary';
+import { countPartsOnDisk, defaultCloudManifestUrl, fetchCloudManifest, isPreviewCloudDownload, pendingCloudDownload, storageVerdict, type PendingCloudDownload } from '../../services/cloudLibrary';
 import { useLibraryActions } from '../../services/libraryActions';
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { useLibrarySettings } from '../../state/libraryStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
+import { ErrorDetails } from './ErrorDetails';
+import { ProgressBar } from './JobStatus';
 
 type State = { status: 'loading' } | { status: 'ready'; manifest: CloudManifest } | { status: 'error'; message: string };
 
@@ -54,6 +59,8 @@ export function CloudLibraryCard() {
   const lib = useLibrary();
   const actions = useLibraryActions();
   const busy = useLibraryJobs((x) => !!x.job);
+  const generation = useLibraryJobs((x) => x.checkpointGeneration);
+  const [pending, setPending] = useState<PendingCloudDownload | null>(null);
   const recorded = useLibrarySettings((x) => x.installedCloud);
   const manifestUrl = defaultCloudManifestUrl();
   const [state, setState] = useState<State>({ status: 'loading' });
@@ -76,6 +83,19 @@ export function CloudLibraryCard() {
     setAttempt((n) => n + 1);
   };
 
+  // The saved, unfinished download (re-read whenever a job ends: paused, failed, cancelled, done).
+  useEffect(() => {
+    if (busy) return;
+    let live = true;
+    pendingCloudDownload().then(
+      (p) => live && setPending(p),
+      () => live && setPending(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [busy, generation]);
+
   const manifest = state.status === 'ready' ? state.manifest : null;
   const installed = libraryState({ coreInfo: lib.core?.info ?? null, extendedInfo: lib.extended?.info ?? null, recorded });
   const action = manifest ? libraryAction({ state: installed, manifest }) : null;
@@ -88,6 +108,18 @@ export function CloudLibraryCard() {
     if (!verdict.ok) confirmAnyway('אין מספיק מקום פנוי', `${verdict.message ?? ''}\n\nלהמשיך בכל זאת?`, 'המשך', go);
     else go();
   };
+
+  /** "המשך הורדה": the saved plan from its bytes; a newer cloud build replaces the saved one (its old bytes are dropped). */
+  const resume = () => {
+    if (!pending) return;
+    const m = manifest ?? pending.manifest;
+    const plan: Plan = pending.plan !== 'core' && !m.extended ? 'core' : pending.plan;
+    void actions.downloadCloud(m, pending.manifestUrl, plan);
+  };
+  const discard = () =>
+    confirmAnyway('לבטל את ההורדה?', 'כל מה שירד עד עכשיו יימחק.', 'בטל הורדה', () => {
+      void actions.discardCloudDownload().then(() => setPending(null));
+    });
 
   const core = manifest ? packageOf(manifest, 'core') : null;
   const ext = manifest?.extended ? packageOf(manifest, 'extended') : null;
@@ -120,6 +152,8 @@ export function CloudLibraryCard() {
             <Row label="גרסה" value={`\u2066${manifest.version}\u2069`} />
           </View>
         ) : null}
+
+        {pending && !busy ? <PendingDownload pending={pending} newer={!!manifest && manifest.version !== pending.manifest.version} onResume={resume} onDiscard={discard} disabled={!canDownload} /> : null}
 
         {installed.stage !== 'none' ? (
           <Text style={s.installedLine} testID="cloud-installed-stage">
@@ -194,6 +228,44 @@ export function CloudLibraryCard() {
   );
 }
 
+function PendingDownload({ pending, newer, onResume, onDiscard, disabled }: { pending: PendingCloudDownload; newer: boolean; onResume: () => void; onDiscard: () => void; disabled: boolean }) {
+  const s = useThemedStyles(createStyles);
+  const done = pending.progress?.done ?? 0;
+  const total = pending.progress?.total ?? 0;
+  const fraction = total > 0 ? Math.min(1, done / total) : null;
+  const title = pending.status === 'paused' ? 'ההורדה מושהית' : pending.status === 'error' ? '⚠ ההורדה נעצרה' : 'ההורדה נקטעה — אפשר להמשיך';
+  return (
+    <View style={s.pending} testID="cloud-pending">
+      <Text style={s.pendingTitle} testID="cloud-pending-status">
+        {title}
+      </Text>
+      {total > 0 ? (
+        <>
+          <ProgressBar fraction={fraction} />
+          <Text style={s.hint} testID="cloud-pending-progress">
+            {isolateLtr(`${formatBytes(done)} / ${formatBytes(total)} · ${Math.floor((fraction ?? 0) * 100)}%`)}
+          </Text>
+        </>
+      ) : null}
+      {pending.error ? (
+        <View style={s.gap}>
+          <Text style={s.error} testID="cloud-pending-error">
+            {pending.error.message}
+          </Text>
+          <ErrorDetails diagnostic={pending.error.diagnostic} context="cloud download" testID="cloud-pending-details" />
+        </View>
+      ) : null}
+      {newer ? <Text style={s.hint}>בענן יש גרסה חדשה יותר: ״המשך״ יוריד אותה (החלקים של הגרסה הקודמת יימחקו).</Text> : null}
+      <Pressable onPress={onResume} disabled={disabled} style={({ pressed }) => [s.primary, disabled && s.disabled, pressed && s.pressed]} accessibilityRole="button" testID="cloud-resume">
+        <Text style={s.primaryText}>▶  המשך הורדה</Text>
+      </Pressable>
+      <Pressable onPress={onDiscard} disabled={disabled} accessibilityRole="button" testID="cloud-discard">
+        <Text style={s.link}>בטל הורדה ומחק את מה שירד</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 function Row({ label, value, testID }: { label: string; value: string; testID?: string }) {
   const s = useThemedStyles(createStyles);
   return (
@@ -209,6 +281,8 @@ function Row({ label, value, testID }: { label: string; value: string; testID?: 
 const createStyles = (c: Palette) =>
   StyleSheet.create({
     wrap: { gap: spacing.md, marginBottom: spacing.lg },
+    pending: { gap: spacing.sm, borderWidth: 1, borderColor: c.accent, borderRadius: radius.md, padding: spacing.md, backgroundColor: c.accentSoft },
+    pendingTitle: { fontSize: 15, fontWeight: '800', color: c.text, ...alignRight },
     installedLine: { fontSize: 14, fontWeight: '700', color: c.text, ...alignRight },
     secondary: { borderWidth: 1, borderColor: c.accent, borderRadius: radius.md, paddingVertical: spacing.sm, paddingHorizontal: spacing.lg },
     secondaryText: { color: c.accent, fontSize: 15, fontWeight: '700', ...alignRight },

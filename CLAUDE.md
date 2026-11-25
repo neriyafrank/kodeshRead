@@ -208,15 +208,25 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > App: `LibraryContext` (`extended` source, `installExtended`, a new core drops a stale extended), `CloudLibraryCard.tsx`, `runCloudFlow`.
 > `installedCloud` = `{ version, stage? }` (store v2 migrates older `{ edition, version }`). Self-tested (section 12 "two-stage"), `e2e:library`.
 
-> **Resilient cloud download:** `shared/multipart.js` `downloadParts` writes each part to `<part>.partial` and renames it when it
-> has the manifest size; the partial is never deleted on an error, the retry continues it with an HTTP Range request
-> (`PartsIO.download(..., { resumeFrom, expectedBytes })`, native backend in `cloudLibrary.ts`: Range probe -> `.chunk` file ->
-> appended to the partial, also after a process death). Transient errors (`isTransientNetworkError`: "Unable to resolve host",
-> ECONNRESET, timeouts, 5xx) retry 4x with exponential backoff (`backoffDelayMs` 2/4/8/16 s; budget refills when bytes
-> arrived) and show `הרשת נותקה זמנית — מנסה להמשיך הורדה…`; a failure while `AppState` is not active (and no foreground
-> service) waits for `active` and is not counted. `runJob('download')` starts the import foreground service
-> (`formatCloudNotification`: "מוריד ספרייה מהענן… 42%"); assembly + extraction (`keepAwake` option) and the DB swap run under
-> `withKeepAwake` (`src/services/keepAwake.ts`, released in `finally`). Self-tested (section 12, "resilient download").
+> **Cloud download engine (pause / resume / background):** `shared/cloudDownload.js` = the pure controller `downloadPackage`
+> (states `idle` / `downloading` / `waiting_for_network` / `verifying` / `paused` / `completed` / `error`, strictly monotonic
+> cumulative bytes, SHA-256 of every part before it counts (a corrupt part is re-fetched `verifyRetries` times, then
+> `CLOUD_DOWNLOAD_CHECKSUM`), state persisted in `cloud-download.json` next to the parts: partials of another `fullZipSha256` are
+> dropped) + the transfer-engine contract (`start` / `stop` / `poll`). Engines stream each part into `<part>.partial` with
+> `Range: bytes=<size on disk>-`, follow redirects BY HAND so the Range header reaches the CDN hop, back off 2/4/8/16/30 s (budget
+> of 8 attempts without a new byte, refilled by progress), treat offline as `waiting_for_network` (not an attempt), never delete
+> bytes on a network error, and fail fatal answers (4xx, size mismatch, disk) with a `DownloadError` whose `.diagnostic` is
+> `CLOUD_DOWNLOAD_<CODE> · part · HTTP n · bytes / expected · attempts · host · reason`. Engines: `createHttpEngine` (web preview,
+> self-tests); Android = WorkManager (`modules/cloud-download`: `CloudDownloadWorker` long-running worker, dataSync foreground
+> service + "השהה" notification action, CONNECTED constraint, unique work `kodeshread-cloud-download`, attach-don't-double;
+> `plugins/withCloudDownload.js` merges `SystemForegroundService` `foregroundServiceType="dataSync"`; `androidx.work:work-runtime`
+> in the module's build.gradle); iOS / Android without the module = expo-file-system `DownloadTask` (background session, resume
+> data persisted on pause) - all in `src/services/backgroundDownload.ts`. Pause = job `pausable` ("השהה" -> `DownloadPausedError`
+> -> paused result; the card's `cloud-pending` block offers "המשך הורדה" / "בטל הורדה"); cancel deletes the package's bytes;
+> `CloudDownloadLifecycle` re-attaches on launch to a download that was running when the app died. The JS chunk-and-append loop
+> (`downloadRangeChunks`, `.chunk` files) is gone (a legacy `.partial.id`-matched partial is adopted once). Assembly / extraction /
+> install run under the job foreground service (`src/services/jobService.ts`). Self-tested (section 12, "cloud download:"), `e2e:library`
+> (drop -> Range resume, pause, airplane mode, resume).
 
 > **APK on GitHub Actions:** `.github/workflows/build-android-apk.yml` (workflow_dispatch, `publish_release` input) builds the
 > arm64 APK on `ubuntu-latest` without EAS (`db:ensure` -> `expo prebuild` -> `assembleRelease` -> `kodeshRead-<short-sha>.apk`,

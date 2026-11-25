@@ -1,3 +1,5 @@
+import type { Connectivity, DownloadEngine, DownloadSnapshot, DownloadState, HttpRequest } from './cloudDownload';
+
 export interface CloudPart {
   name: string;
   sizeBytes: number;
@@ -48,27 +50,19 @@ export interface PartWriter {
   close(): void | Promise<void>;
 }
 
-/** Storage backend of the multi-part downloader (phone, node:fs or memory). */
+/** Storage backend of the multi-part pipeline (phone, node:fs or memory). Transfers go through a DownloadEngine. */
 export interface PartsIO {
   size(name: string): number | null | Promise<number | null>;
   remove(name: string): void | Promise<void>;
   sha256(name: string): Promise<string>;
   /** Moves `from` over `to` (the finished `.partial` -> the part name). */
   rename(from: string, to: string): void | Promise<void>;
-  /**
-   * Downloads into `name`. `resume.resumeFrom > 0`: `name` already holds that many bytes of the file and the
-   * download continues after them (HTTP Range); bytes received before an error must stay in `name`.
-   * `onProgress` reports the absolute bytes of the file.
-   */
-  download(
-    url: string,
-    name: string,
-    onProgress: (bytesWritten: number, totalBytes: number) => void,
-    isCancelled?: () => boolean,
-    resume?: { resumeFrom: number; expectedBytes: number },
-  ): Promise<void>;
   openRead(name: string): PartReader | Promise<PartReader>;
+  /** Writes must reach the file as they happen (an interrupted transfer keeps exactly the bytes it wrote). */
   openWrite(name: string, append: boolean): PartWriter | Promise<PartWriter>;
+  readText(name: string): string | Promise<string>;
+  /** Atomic (temp file + rename). */
+  writeText(name: string, text: string): void | Promise<void>;
 }
 
 export interface PartProgress {
@@ -98,40 +92,18 @@ export function requiredFreeBytes(m: CloudManifest): number;
 export function checkFreeSpace(m: CloudManifest, freeBytes: number | null): { ok: boolean; required: number; free: number | null };
 export function formatBytes(n: number): string;
 export function formatPartProgress(p: { partIndex: number; partCount: number; doneBytes: number; totalBytes: number; label?: string | null }): string;
-export function isValidPart(io: PartsIO, part: CloudPart): Promise<boolean>;
-export interface RetryEvent {
-  partIndex: number;
-  attempt: number;
-  maxAttempts: number;
-  delayMs: number;
-  error: unknown;
-  /** The failure happened while the app was not in the foreground (not counted as an attempt). */
-  background: boolean;
-}
-export interface ResilienceOptions {
-  /** Corrupt-part attempts (default 2). */
-  retries?: number;
-  /** Transient network retries per stall (default 4), exponential backoff. */
-  networkRetries?: number;
-  backoffBaseMs?: number;
-  backoffCapMs?: number;
-  sleep?: (ms: number) => Promise<void>;
-  isBackgrounded?: () => boolean;
-  whenForeground?: () => Promise<void>;
-}
 export const PARTIAL_SUFFIX: string;
-export function partialIdName(name: string): string;
-export function existingBytes(io: PartsIO, manifest: CloudPackage): Promise<number>;
-export const NETWORK_RETRY_STAGE: string;
 export function partialName(name: string): string;
-export function isTransientNetworkError(e: unknown): boolean;
-export function backoffDelayMs(attempt: number, baseMs?: number, capMs?: number): number;
+export const WAITING_STAGE: string;
+export const NETWORK_RETRY_STAGE: string;
+export const VERIFY_STAGE: string;
+export const PAUSED_STAGE: string;
+export function existingBytes(io: PartsIO, pkg: CloudPackage): Promise<number>;
 export function formatCloudNotification(stage: string, fraction: number | null, detail: string | null): { title: string; text: string; current: number; total: number };
-export function downloadParts(
-  io: PartsIO,
-  manifest: CloudPackage,
-  opts: ResilienceOptions & { manifestUrl: string; onRetry?: (e: RetryEvent) => void; onProgress?: (p: PartProgress) => void; isCancelled?: () => boolean },
-): Promise<{ downloaded: number; skipped: number }>;
+export function describeSnapshot(
+  snap: DownloadSnapshot,
+  ctx: { overall: (bytes: number) => number; total: number; label?: string | null },
+): { stage: string; fraction: number | null; detail: string | null };
 export function assembleParts(
   io: PartsIO,
   manifest: CloudPackage,
@@ -146,35 +118,29 @@ export function extractZip(
   opts?: { onProgress?: (p: { bytesIn: number; bytesOut: number; totalIn: number | null }) => void; isCancelled?: () => boolean },
 ): Promise<{ bytesIn: number; bytesOut: number; format: string; entry: string | null }>;
 
-export function createMemoryIO(opts?: { fetch?: typeof fetch }): PartsIO & { files: Map<string, Uint8Array> };
+export function createMemoryIO(): PartsIO & { files: Map<string, Uint8Array> };
 export function stageCloudLibrary(
   io: PartsIO,
-  manifest: CloudPackage & { zipName?: string; dbName?: string },
-  opts: ResilienceOptions & {
+  manifest: CloudPackage & { kind?: 'core' | 'extended'; zipName?: string; dbName?: string },
+  opts: {
     manifestUrl: string;
     zipName?: string;
     dbName?: string;
+    /** Transfer engine (default: the JS http engine over `io` + fetch). */
+    engine?: DownloadEngine;
+    request?: HttpRequest;
+    connectivity?: Connectivity;
     /** Two-stage flow: maps this package's download bytes onto one bar (offset = bytes of earlier packages, total = whole flow). */
     window?: { offset: number; total: number; label?: string };
-    /** Wraps assembly + extraction (wake lock); must run and await `fn`. */
+    /** Wraps assembly + extraction (wake lock / foreground service); must run and await `fn`. */
     keepAwake?: (fn: () => Promise<void>) => Promise<void>;
     isCancelled?: () => boolean;
-    report?: (p: { stage: string; fraction: number | null; detail: string | null }) => void;
+    isPauseRequested?: () => boolean;
+    report?: (p: { stage: string; fraction: number | null; detail: string | null; download?: DownloadState }) => void;
+    sleep?: (ms: number) => Promise<void>;
+    pollMs?: number;
+    verifyRetries?: number;
+    backoffBaseMs?: number;
+    backoffCapMs?: number;
   },
-): Promise<void>;
-
-export const RANGE_CHUNK_BYTES: number;
-export interface RangeChunkEnv {
-  partialSize(): number | Promise<number>;
-  resolve(start: number, end: number): Promise<{ url: string; status: number }>;
-  fetchChunk(url: string, range: string | null, onBytes: (n: number) => void): Promise<void>;
-  chunkSize(): number | null | Promise<number | null>;
-  discardChunk(): void | Promise<void>;
-  appendChunk(): void | Promise<void>;
-  adoptChunk(): void | Promise<void>;
-  resetPartial(): void | Promise<void>;
-}
-export function downloadRangeChunks(
-  env: RangeChunkEnv,
-  opts: { expectedBytes: number; chunkBytes?: number; isCancelled?: () => boolean; onProgress?: (written: number, total: number) => void },
 ): Promise<void>;

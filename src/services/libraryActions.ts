@@ -15,17 +15,18 @@ import { Directory, File } from 'expo-file-system';
 import { useMemo } from 'react';
 import { Alert, Platform } from 'react-native';
 
+import { isPausedError, DownloadError } from '../../shared/cloudDownload';
 import { describeError, StepError } from '../../shared/coreFinalize';
 import type { IngestionState } from '../../shared/indexer';
 import { useLibrary, useLibraryController } from '../db/LibraryContext';
 import { CORE_BUILD_DB } from '../db/library';
-import { CancelledError, useLibraryJobs, type JobKind, type JobProgress, type JobResult } from '../state/libraryJobs';
+import { CancelledError, useLibraryJobs, type JobKind, type JobResult } from '../state/libraryJobs';
 import { useLibrarySettings } from '../state/libraryStore';
 import { libraryState, STAGE_TITLES, type Plan } from '../../shared/libraryRelease';
-import { formatCloudNotification, type CloudManifest } from '../../shared/multipart';
-import { isPreviewCloudDownload, runCloudFlow } from './cloudLibrary';
+import { formatBytes, type CloudManifest } from '../../shared/multipart';
+import { discardCloudDownload, isPreviewCloudDownload, runCloudFlow } from './cloudLibrary';
 import { defaultManifestUrl, downloadAndStageCore, fetchReleaseInfo, type ReleaseInfo } from './coreLibrary';
-import * as importService from './importForegroundService';
+import { startJobService } from './jobService';
 import {
   buildCoreFromFolder,
   deleteUserBooks,
@@ -76,45 +77,26 @@ function notice(title: string, message: string): Promise<void> {
 
 type JobOutcome = string | Omit<JobResult, 'kind' | 'ok'>;
 
-/** Notification title / text of the running ingestion job ("מייבא ספרייה: 1,240 / 7,674"). */
-function notificationFor(job: JobProgress): [string, string, number, number] {
-  if (job.kind === 'download') {
-    // "מוריד ספרייה מהענן… 42%" with a per-mille progress bar
-    const n = formatCloudNotification(job.stage, job.fraction, job.detail);
-    return [n.title, n.text, n.current, n.total];
-  }
-  const count = importService.formatCount(job.current, job.total);
-  const title = job.phase === 'books' && count ? `${job.stage}: ${count}` : count ? `${job.stage} ${count}` : job.stage;
-  const name = job.detail && job.detail.includes(' · ') ? job.detail.slice(job.detail.lastIndexOf(' · ') + 3) : (job.detail ?? '');
-  return [title, name, job.current ?? 0, job.total ?? 0];
-}
-
-/**
- * Starts the Android foreground service for an ingestion job and mirrors the job's progress into
- * its notification. Returns the cleanup. Web / iOS: no-op (the lifecycle pauses on background).
- */
-async function startImportService(stage: string): Promise<() => Promise<void>> {
-  if (!importService.isAvailable()) return async () => undefined;
-  // Android 13+: ask before the bulk import; a refusal only hides the notification.
-  await importService.ensureNotificationPermission();
-  if (!(await importService.start(stage, '', 0, 0))) return async () => undefined;
-  const unsubscribe = useLibraryJobs.subscribe((s, prev) => {
-    if (s.job && s.job !== prev.job) importService.update(...notificationFor(s.job));
-  });
-  return async () => {
-    unsubscribe();
-    await importService.stop();
-  };
+interface JobOptions {
+  /** Ingestion job with a checkpoint (pause between books, auto-pause on background without the service). */
+  resumable?: boolean;
+  /** Cloud download: pause / resume from the saved bytes. */
+  pausable?: boolean;
+  /** Run the whole job under the job foreground service (default: ingestion jobs and single-file downloads). */
+  service?: boolean;
 }
 
 /** Runs one job at a time (device kept awake); returns false when another job is running. */
-async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome>, after?: () => Promise<void>, resumable = false): Promise<boolean> {
+async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome>, after?: () => Promise<void>, options: boolean | JobOptions = false): Promise<boolean> {
+  const opts: JobOptions = typeof options === 'boolean' ? { resumable: options } : options;
   const jobs = useLibraryJobs.getState();
-  if (!jobs.start(kind, stage, { resumable })) return false;
+  if (!jobs.start(kind, stage, { resumable: opts.resumable, pausable: opts.pausable })) return false;
   await activateKeepAwakeAsync(KEEP_AWAKE_TAG).catch((e) => console.warn('keep-awake unavailable', e));
   // Ingestion jobs and downloads run under the foreground service: Android 15/16 revokes the network of
-  // a backgrounded app (-> "Unable to resolve host") unless a foreground service keeps it alive.
-  const stopService = resumable || kind === 'download' ? await startImportService(stage).catch((e) => (console.warn('import service failed', e), async () => undefined)) : null;
+  // a backgrounded app (-> "Unable to resolve host") unless a foreground service keeps it alive. The cloud
+  // download brings its own (WorkManager's for the transfer, the job's for assembly / install: cloudLibrary.ts).
+  const wantService = opts.service ?? (!!opts.resumable || kind === 'download');
+  const stopService = wantService ? await startJobService(stage).catch((e) => (console.warn('import service failed', e), async () => undefined)) : null;
   try {
     const out = await fn();
     useLibraryJobs.getState().finish(typeof out === 'string' ? { ok: true, message: out } : { ok: true, ...out });
@@ -134,7 +116,14 @@ async function runJob(kind: JobKind, stage: string, fn: () => Promise<JobOutcome
  * native error / code) that the "העתק פרטי שגיאה" button copies.
  */
 function failureResult(kind: JobKind, e: unknown): Omit<JobResult, 'kind'> {
-  if (e instanceof CancelledError) return { ok: false, message: 'הפעולה בוטלה' };
+  if (e instanceof CancelledError) return { ok: false, message: kind === 'download' ? 'ההורדה בוטלה והקבצים שירדו נמחקו' : 'הפעולה בוטלה' };
+  if (isPausedError(e)) {
+    const s = e.snapshot;
+    const saved = s && s.totalBytes ? ` (${formatBytes(s.doneBytes)} מתוך ${formatBytes(s.totalBytes)}, ${Math.floor((s.doneBytes / s.totalBytes) * 100)}%)` : '';
+    return { ok: true, paused: true, message: `ההורדה הושהתה — ההתקדמות נשמרה${saved}. לחצו ״המשך הורדה״ כדי להמשיך מאותה נקודה, גם אחרי סגירת האפליקציה.` };
+  }
+  // A fatal download failure: the readable reason + the exact status / bytes / host for "העתק פרטי שגיאה".
+  if (e instanceof DownloadError) return { ok: false, message: e.message, diagnostic: e.diagnostic };
   const phase = useLibraryJobs.getState().job?.phase;
   if (e instanceof StepError) {
     const finishing = e.step.startsWith('finalize:');
@@ -246,6 +235,9 @@ export function useLibraryActions() {
     return {
       checkForUpdate: (url = manifestUrl): Promise<ReleaseInfo> => fetchReleaseInfo(url),
 
+      /** Stops and deletes an unfinished cloud download (the card's "בטל הורדה"). */
+      discardCloudDownload: () => discardCloudDownload().finally(() => useLibraryJobs.getState().bumpCheckpoint()),
+
       /** Downloads (manifest -> .gz/.zip -> verify -> extract) and installs the core library. */
       downloadCore: (release?: ReleaseInfo) =>
         runJob('download', 'בודק גרסה…', async () => {
@@ -260,25 +252,32 @@ export function useLibraryActions() {
        * Multi-part cloud library (library-latest), staged: plan `core` (ספריית יסוד), `extended` (only the expansion pack,
        * core.db is never downloaded again) or `full` (core -> extended, one flow, one progress bar). Resumable part
        * download -> assemble -> extract -> validate -> atomic install per package (shared/multipart.js,
-       * src/services/cloudLibrary.ts runCloudFlow).
+       * src/services/cloudLibrary.ts runCloudFlow). Pausable: "השהה" keeps the bytes; calling it again with the
+       * saved plan (the card's "המשך הורדה") continues from them, also after a restart.
        */
       downloadCloud: (manifest: CloudManifest, manifestUrl: string, plan: Plan = manifest.extended ? 'full' : 'core') =>
-        runJob('download', 'מתחיל הורדה…', async () => {
-          const state = libraryState({ coreInfo: lib.core?.info ?? null, extendedInfo: lib.extended?.info ?? null, recorded: useLibrarySettings.getState().installedCloud });
-          const { books } = await runCloudFlow(manifest, manifestUrl, plan, state, {
-            installCore: () => ctl.installCore(),
-            installExtended: () => ctl.installExtended(),
-            // Which cloud version / stage is installed (the DB's meta.version / meta.part say it too; this covers the preview).
-            onInstalled: (kind, version) => {
-              const g = globalThis as { __kodeshreadCloudInstalled?: string[] };
-              if (isPreviewCloudDownload()) g.__kodeshreadCloudInstalled = [...(g.__kodeshreadCloudInstalled ?? []), `${kind}:${version}`];
-              // A core installed while the expansion is still to come (or not wanted) is the "core" stage.
-              useLibrarySettings.getState().setInstalledCloud(version, kind === 'core' && manifest.extended ? 'core' : 'full');
-            },
-          });
-          const title = STAGE_TITLES[plan === 'extended' ? 'extended' : plan === 'core' ? 'core' : 'full'];
-          return `ספריית הליבה הותקנה מהענן — ${title} (גרסה ${manifest.version}): ${books.toLocaleString('he-IL')} ספרים`;
-        }),
+        runJob(
+          'download',
+          'מתחיל הורדה…',
+          async () => {
+            const state = libraryState({ coreInfo: lib.core?.info ?? null, extendedInfo: lib.extended?.info ?? null, recorded: useLibrarySettings.getState().installedCloud });
+            const { books } = await runCloudFlow(manifest, manifestUrl, plan, state, {
+              installCore: () => ctl.installCore(),
+              installExtended: () => ctl.installExtended(),
+              // Which cloud version / stage is installed (the DB's meta.version / meta.part say it too; this covers the preview).
+              onInstalled: (kind, version) => {
+                const g = globalThis as { __kodeshreadCloudInstalled?: string[] };
+                if (isPreviewCloudDownload()) g.__kodeshreadCloudInstalled = [...(g.__kodeshreadCloudInstalled ?? []), `${kind}:${version}`];
+                // A core installed while the expansion is still to come (or not wanted) is the "core" stage.
+                useLibrarySettings.getState().setInstalledCloud(version, kind === 'core' && manifest.extended ? 'core' : 'full');
+              },
+            });
+            const title = STAGE_TITLES[plan === 'extended' ? 'extended' : plan === 'core' ? 'core' : 'full'];
+            return `ספריית הליבה הותקנה מהענן — ${title} (גרסה ${manifest.version}): ${books.toLocaleString('he-IL')} ספרים`;
+          },
+          undefined,
+          { pausable: true, service: false },
+        ),
 
       /** Builds core_library.db on the device from a picked Otzaria folder (resumes the same folder). */
       buildCoreFromDevice: async () => {

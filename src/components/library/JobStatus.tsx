@@ -57,13 +57,13 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
             {job.stage}
             {pct}
           </Text>
-          {job.resumable ? (
+          {job.resumable || job.pausable ? (
             <Pressable onPress={() => requestPause(false)} disabled={!!stopRequested} hitSlop={8} accessibilityRole="button" testID="job-pause">
               <Text style={[s.pause, !!stopRequested && s.muted]}>{stopRequested === 'pause' ? 'משהה…' : 'השהה'}</Text>
             </Pressable>
           ) : null}
           {job.kind !== 'delete' ? (
-            <Pressable onPress={() => confirmCancel(job.resumable, requestCancel)} disabled={cancelRequested} hitSlop={8} accessibilityRole="button" testID="job-cancel">
+            <Pressable onPress={() => confirmCancel(job.resumable || !!job.pausable, requestCancel)} disabled={cancelRequested} hitSlop={8} accessibilityRole="button" testID="job-cancel">
               <Text style={[s.cancel, cancelRequested && s.muted]}>{cancelRequested ? 'מבטל…' : 'ביטול'}</Text>
             </Pressable>
           ) : null}
@@ -75,6 +75,11 @@ export function JobStatus({ compact, onPress }: { compact?: boolean; onPress?: (
           </Text>
         ) : null}
         {job.resumable ? <Text style={s.hint}>ההתקדמות נשמרת אחרי כל ספר — אפשר להשהות ולהמשיך גם אחרי סגירת האפליקציה.</Text> : null}
+        {job.pausable ? (
+          <Text style={s.hint} testID="job-download-hint">
+            ההורדה נמשכת גם ברקע ובמסך כבוי. אפשר להשהות ולהמשיך מאותה נקודה, גם אחרי סגירת האפליקציה או ניתוק מהרשת.
+          </Text>
+        ) : null}
       </View>
     );
   }

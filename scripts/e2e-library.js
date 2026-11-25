@@ -103,16 +103,34 @@ try {
   const cloudManifest = cloud.current;
   let cloudRequests = [];
   const partsByName = new Map(Object.values(stages).flatMap((st) => st.pkg.parts.map((p, i) => [p.name, st.chunks[i]])));
+  // Range-aware like GitHub's CDN: `Range: bytes=N-` -> 206 with the rest. `cloudNet.cutOnce` serves a part's FIRST
+  // request cut in half (a dropped connection); `cloudNet.holdMs` keeps a part "in flight" so the test can pause it.
+  const cloudNet = { cutOnce: new Set(), holdMs: new Map(), offline: false };
+  let cloudRanges = [];
   await page.route('**/releases/download/library-latest/**', async (route) => {
     const name = decodeURIComponent(route.request().url().split('/').pop());
-    const cors = { 'access-control-allow-origin': '*' };
+    const cors = { 'access-control-allow-origin': '*', 'access-control-expose-headers': 'content-range, content-length' };
     if (name === 'library-manifest.json') return route.fulfill({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(cloud.current) });
-    const body = partsByName.get(name);
-    if (!body) return route.fulfill({ status: 404, headers: cors, body: '' });
+    const full = partsByName.get(name);
+    if (!full) return route.fulfill({ status: 404, headers: cors, body: '' });
+    if (cloudNet.offline) return route.abort('internetdisconnected'); // airplane mode (routes answer even when the context is offline)
+    const range = route.request().headers().range || null;
     cloudRequests.push(name);
+    cloudRanges.push([name, range]);
     // The second part of each stage is "in flight" while the test reads the progress.
-    if (/part-02$/.test(name)) await new Promise((r) => setTimeout(r, name.startsWith('extended') ? 2500 : 1200));
-    return route.fulfill({ status: 200, contentType: 'application/octet-stream', headers: cors, body });
+    const hold = cloudNet.holdMs.get(name) ?? (/part-02$/.test(name) ? (name.startsWith('extended') ? 2500 : 1200) : 0);
+    if (hold) await new Promise((r) => setTimeout(r, hold));
+    const from = Number((/^bytes=(\d+)-$/.exec(range || '') || [])[1] || 0);
+    let body = full.subarray(from);
+    let end = full.length - 1;
+    if (cloudNet.cutOnce.delete(name)) {
+      body = body.subarray(0, Math.floor(body.length / 2)); // the connection drops half-way
+      end = from + body.length - 1;
+    }
+    const status = from > 0 || end < full.length - 1 ? 206 : 200;
+    const headers = status === 206 ? { ...cors, 'content-range': `bytes ${from}-${end}/${full.length}` } : cors;
+    // A paused / cancelled download aborted this request meanwhile: nothing to answer.
+    return route.fulfill({ status, contentType: 'application/octet-stream', headers, body }).catch(() => undefined);
   });
   // The old classic release is never requested any more.
   const classicRequests = [];
@@ -293,6 +311,57 @@ try {
     }
     assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.librarySettings')).state.installedCloud), { version: coreVersion, stage: 'full' });
     step('"הרחב לספרייה מלאה": one button with the extended size only; only the extended parts are downloaded, bar = extended size');
+
+    // 2b. Pause / network drop / airplane mode / resume of the expansion: the bytes are never fetched twice, the bar never
+    //     goes back, and the SHA-256 verified database is installed.
+    await setRecord({ version: coreVersion, stage: 'core' });
+    await reopenManager();
+    const [E1, E2] = stages.extended.pkg.parts.map((p) => p.name);
+    const E1_HALF = Math.floor(stages.extended.chunks[0].length / 2);
+    cloudRequests = [];
+    cloudRanges = [];
+    cloudNet.cutOnce.add(E1); // the first answer for part 1 is cut half-way
+    cloudNet.holdMs.set(E2, 4000); // part 2 stays in flight long enough to press "השהה"
+    await watchProgress();
+    await tid('cloud-download-expand').click();
+    await tid('job-status').waitFor();
+    assert.ok((await tid('job-download-hint').innerText()).includes('ברקע'), 'the job card says the download continues in the background');
+    await page.waitForFunction(() => /חלק 2 מתוך 2/.test((document.querySelector('[data-testid="job-status"]')?.innerText || '').replace(/[\u2066-\u2069]/g, '')), null, { timeout: 20000 });
+    assert.deepStrictEqual(cloudRanges.slice(0, 2), [[E1, null], [E1, `bytes=${E1_HALF}-`]], 'after the drop, part 1 continued at the exact byte (HTTP Range), not from 0');
+    await tid('job-pause').click();
+    await tid('job-result').waitFor({ timeout: 20000 });
+    const pausedText = await tid('job-result').innerText();
+    assert.ok(pausedText.includes('ההורדה הושהתה') && pausedText.includes('ההתקדמות נשמרה'), pausedText);
+    assert.deepStrictEqual(await installedList(), [], 'nothing is installed while paused');
+    await page.evaluate(() => globalThis.__kodeshreadJobs.getState().clearResult());
+    await tid('cloud-pending').waitFor();
+    const extPct = Math.floor((stages.extended.chunks[0].length / EXT_BYTES) * 100);
+    assert.ok((await tid('cloud-pending-status').innerText()).includes('ההורדה מושהית'));
+    assert.ok(clean(await tid('cloud-pending-progress').innerText()).endsWith(`· ${extPct}%`), `the card shows the saved progress (${extPct}%): ${await tid('cloud-pending-progress').innerText()}`);
+    await shot('cloud-paused');
+    step(`network drop mid-part resumed with Range at byte ${E1_HALF}; "השהה" keeps ${extPct}% and the card offers "המשך הורדה"`);
+
+    // Airplane mode, then "המשך הורדה": a clean waiting state; back online -> continues and installs.
+    await page.context().setOffline(true);
+    cloudNet.offline = true;
+    cloudNet.holdMs.set(E2, 0);
+    await tid('cloud-resume').click();
+    await tid('job-status').waitFor();
+    await page.waitForFunction(() => /ממתין לחיבור לרשת/.test(document.querySelector('[data-testid="job-status"]')?.innerText || ''), null, { timeout: 20000 }).catch(async (e) => {
+      throw new Error(`${e.message}\nonLine: ${await page.evaluate(() => navigator.onLine)}\njob: ${JSON.stringify(await page.evaluate(() => globalThis.__kodeshreadJobs.getState().job))}\nresult: ${await tid('job-result').innerText().catch(() => '-')}\nseen: ${await seenProgress()}`);
+    });
+    assert.strictEqual(await page.evaluate(() => globalThis.__kodeshreadJobs.getState().job?.download), 'waiting_for_network');
+    await shot('cloud-offline');
+    await page.context().setOffline(false);
+    cloudNet.offline = false;
+    await finishJob();
+    cloudNet.holdMs.clear();
+    assert.deepStrictEqual(cloudRequests.filter((n) => n === E1).length, 2, 'part 1 was never downloaded again after the pause (verified on disk)');
+    assert.deepStrictEqual(await installedList(), [`extended:${coreVersion}`], 'the resumed expansion is installed');
+    const resumedPcts = (await seenProgress()).split('\n').map((l) => /· (\d+)%/.exec(l)).filter(Boolean).map((m) => Number(m[1]));
+    assert.ok(resumedPcts.length > 2 && resumedPcts.every((v, i) => i === 0 || v >= resumedPcts[i - 1]), `monotonic across drop + pause + offline + resume: ${resumedPcts}`);
+    assert.strictEqual(await tid('cloud-pending').count(), 0, 'no pending download left after the install');
+    step('airplane mode -> "ממתין לחיבור לרשת…"; back online the resumed download completes, monotonic bar, installed');
 
     // 3. The expansion can be cancelled mid-way: nothing but extended parts were requested, the core record stays.
     await setRecord({ version: coreVersion, stage: 'core' });

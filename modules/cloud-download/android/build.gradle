@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.kodeshread'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.clouddownload"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+  }
+}
+
+dependencies {
+  // OS-managed background work: persisted across process death and reboots, network constraints,
+  // long-running workers in a foreground service (SystemForegroundService, type dataSync).
+  implementation "androidx.work:work-runtime:2.10.1"
+}

@@ -1,25 +1,31 @@
 /**
- * Multi-part cloud library (GitHub Release `library-latest`), shared by the app's downloader
- * (src/services/cloudLibrary.ts), scripts/cloud-release.js (the CI manifest writer) and
- * scripts/selftest.js.
+ * Multi-part cloud library (GitHub Release `library-latest`), shared by the app (src/services/cloudLibrary.ts),
+ * scripts/cloud-release.js (the CI manifest writer) and scripts/selftest.js.
  *
  * Release layout (one file per asset, each strictly under GitHub's 2 GB limit):
  *   library-manifest.json
  *   core_library.db.zip.part-01, .part-02, ...   (byte slices of one standard Deflate .zip)
  *
- * Everything here is pure and storage-agnostic: file access goes through an `io` object, so the
- * same code runs on expo-file-system (phone), node:fs (CI / self-tests) and memory (browser e2e).
+ * This file: manifest validation, sizes / labels, and the staging pipeline
+ *   download (shared/cloudDownload.js: resumable, SHA-256 verified, pause / resume, network-drop safe)
+ *   -> streaming assembly of the parts into one zip (whole-zip SHA-256) -> streaming extraction of the DB.
  *
- *   io.size(name)                    -> number | null   (null: missing)
- *   io.remove(name)                  -> void
- *   io.sha256(name)                  -> hex digest (native / streaming, never a whole-file buffer)
- *   io.download(url, name, onProgress(bytesWritten, totalBytes), isCancelled)  -> Promise<void>
- *   io.openRead(name)                -> { read(n) -> Uint8Array (empty at EOF), close() }
- *   io.openWrite(name, append)       -> { write(bytes) -> Promise<void>, close() }
+ * Everything is pure and storage-agnostic: file access goes through an `io` object (PartsIO), so the same
+ * code runs on expo-file-system (phone), node:fs (CI / self-tests) and memory (browser e2e):
+ *
+ *   io.size(name)               -> number | null   (null: missing)
+ *   io.remove(name)             -> void
+ *   io.rename(from, to)         -> void (replaces `to`)
+ *   io.sha256(name)             -> hex digest (native / streaming, never a whole-file buffer)
+ *   io.openRead(name)           -> { read(n) -> Uint8Array (empty at EOF), close() }
+ *   io.openWrite(name, append)  -> { write(bytes) -> Promise<void>, close() }
+ *   io.readText(name)           -> string
+ *   io.writeText(name, text)    -> void (atomic: temp file + rename)
  */
 'use strict';
 
 const releases = require('./libraryRelease');
+const dl = require('./cloudDownload');
 
 /** Release tag of the (single, complete) cloud library. */
 const CLOUD_RELEASE_TAG = releases.LIBRARY_TAG;
@@ -167,6 +173,16 @@ function formatBytes(n) {
   return `${Math.max(1, Math.round(v / 1024))} KB`;
 }
 
+const cancelledError = () => new Error('cancelled');
+
+/** "ממתין לחיבור לרשת…": the device is offline; the download continues by itself from the saved bytes. */
+const WAITING_STAGE = 'ממתין לחיבור לרשת…';
+/** "הרשת נותקה זמנית — מנסה להמשיך הורדה…": online, but the server / connection failed; retried with backoff. */
+const NETWORK_RETRY_STAGE = 'הרשת נותקה זמנית — מנסה להמשיך הורדה…';
+const VERIFY_STAGE = 'מאמת SHA-256…';
+const DOWNLOAD_STAGE = 'מוריד…';
+const PAUSED_STAGE = 'ההורדה הושהתה';
+
 /**
  * "חלק 2 מתוך 3 · 1.4 GB / 3.2 GB · 44%" (overall bytes across all parts). In a two-stage flow `label` names the
  * stage ("ספריית יסוד · חלק 2 מתוך 3 · ..."), and the bytes / percentage are those of the WHOLE flow.
@@ -183,220 +199,16 @@ function formatPartProgress({ partIndex, partCount, doneBytes, totalBytes, label
 function formatCloudNotification(stage, fraction, detail) {
   const pct = fraction == null ? null : Math.max(0, Math.min(100, Math.floor(fraction * 100)));
   let label = stage || '';
-  if (/^מוריד…?$|^ממשיך — חלק קיים$/.test(label)) label = 'מוריד ספרייה מהענן…';
+  if (label === DOWNLOAD_STAGE) label = 'מוריד ספרייה מהענן…';
   else if (label === 'מרכיב את החלקים…') label = 'מרכיב את הספרייה…';
   else if (label === 'מחלץ…') label = 'מחלץ את הספרייה…';
-  const showPct = pct != null && label !== NETWORK_RETRY_STAGE;
+  const showPct = pct != null && label !== NETWORK_RETRY_STAGE && label !== WAITING_STAGE;
   return { title: showPct ? `${label} ${pct}%` : label, text: detail || '', current: pct == null ? 0 : Math.round(Math.max(0, Math.min(1, fraction)) * 1000), total: pct == null ? 0 : 1000 };
 }
 
-const cancelledError = () => {
-  const e = new Error('cancelled');
-  return e;
-};
-
-/**
- * True when `name` is on disk with the manifest's size and SHA-256. A part that fails either
- * check is deleted (it is re-downloaded). Sizes are compared first: no hashing of a partial file.
- */
-async function isValidPart(io, part) {
-  const size = await io.size(part.name);
-  if (size == null) return false;
-  if (size !== part.sizeBytes) {
-    await io.remove(part.name);
-    return false;
-  }
-  if ((await io.sha256(part.name)).toLowerCase() !== part.sha256) {
-    await io.remove(part.name);
-    return false;
-  }
-  return true;
-}
-
-/** Suffix of an in-progress part: kept on disk across interruptions and resumed with an HTTP Range request. */
-const PARTIAL_SUFFIX = '.partial';
-const partialName = (name) => name + PARTIAL_SUFFIX;
-/** Sidecar of a partial: holds the part's manifest SHA-256, so a partial of another release is never continued. */
-const partialIdName = (name) => name + PARTIAL_SUFFIX + '.id';
-
-async function readPartialId(io, part) {
-  const idName = partialIdName(part.name);
-  if ((await io.size(idName)) == null) return null;
-  const r = await io.openRead(idName);
-  try {
-    return new TextDecoder().decode(await r.read(128)).trim();
-  } finally {
-    await r.close();
-  }
-}
-
-async function writePartialId(io, part) {
-  const w = await io.openWrite(partialIdName(part.name), false);
-  try {
-    await w.write(new TextEncoder().encode(part.sha256));
-  } finally {
-    await w.close();
-  }
-}
-
-/**
- * Bytes of the library already on disk (complete parts + the partial of each part, sizes only), for the
- * first progress report of a retry: the UI shows the saved percentage at once instead of 0%.
- */
-async function existingBytes(io, manifest) {
-  let sum = 0;
-  for (const part of manifest.parts) {
-    const full = await io.size(part.name);
-    if (full === part.sizeBytes) {
-      sum += full;
-      continue;
-    }
-    const partial = (await io.size(partialName(part.name))) || 0;
-    sum += Math.min(partial, part.sizeBytes);
-  }
-  return sum;
-}
-
-const TRANSIENT_RE =
-  /unable to resolve host|no address associated|unknownhost|enotfound|eai_again|econnreset|econnaborted|econnrefused|etimedout|ehostunreach|enetunreach|enetdown|epipe|time[d ]?-?out|connection (?:dropped|reset|closed|aborted|lost|refused)|connect(?:ion)? failed|failed to connect|software caused connection abort|unexpected end of stream|stream was reset|socket|network|offline|internet|ssl|handshake|premature|broken pipe|http (?:408|429|5\d\d)\b/i;
-
-/**
- * True for an error worth retrying: DNS / connectivity loss (Android revokes background network access
- * -> "Unable to resolve host"), resets, timeouts, 5xx / 429. HTTP 404 / 403, a full disk or a
- * cancellation are not transient and fail at once.
- */
-function isTransientNetworkError(e) {
-  const msg = e instanceof Error ? e.message : String(e == null ? '' : e);
-  if (!msg || /^cancelled$/i.test(msg)) return false;
-  return TRANSIENT_RE.test(msg);
-}
-
-/** Exponential backoff: base * 2^attempt (attempt 0-based), capped. 2 s, 4 s, 8 s, 16 s, ... 30 s. */
-function backoffDelayMs(attempt, baseMs = 2000, capMs = 30000) {
-  return Math.min(capMs, baseMs * Math.pow(2, Math.max(0, attempt)));
-}
-
-const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** Sleeps `ms` in slices of <= 500 ms so a cancel request ends the wait quickly. */
-async function sleepCancellable(sleep, ms, isCancelled) {
-  let left = ms;
-  while (left > 0) {
-    if (isCancelled && isCancelled()) throw cancelledError();
-    const step = Math.min(500, left);
-    await sleep(step);
-    left -= step;
-  }
-  if (isCancelled && isCancelled()) throw cancelledError();
-}
-
-/** "הרשת נותקה זמנית — מנסה להמשיך הורדה…" */
-const NETWORK_RETRY_STAGE = 'הרשת נותקה זמנית — מנסה להמשיך הורדה…';
-
-/**
- * Downloads every part sequentially, skipping parts that are already on disk and valid (resume
- * after a dropped connection / app restart).
- *
- * A part is written to `<part>.partial` and renamed once it has the manifest size. The partial file is
- * never deleted on an interruption: the next attempt (automatic retry, or a later run) continues with
- * `io.download(url, partial, onProgress, isCancelled, { resumeFrom, expectedBytes })`, i.e. an HTTP
- * Range request, instead of starting from 0%.
- *
- * Transient network errors (isTransientNetworkError) are retried `networkRetries` times with exponential
- * backoff; the budget is refilled whenever an attempt made progress, so a long download over a flaky link
- * is not abandoned. A failure while the app is in the background (the OS revoked network access) is not
- * counted: the loop waits for `whenForeground()` and resumes. One corrupt part is retried `retries` times.
- *
- * @param {object} opts { manifestUrl, retries = 2, networkRetries = 4, backoffBaseMs, backoffCapMs, sleep,
- *   isBackgrounded(), whenForeground(), onRetry({ partIndex, attempt, maxAttempts, delayMs, error, background }),
- *   onProgress({ partIndex, partCount, doneBytes, totalBytes, skipped }), isCancelled }
- * @returns {{ downloaded: number, skipped: number }}
- */
-async function downloadParts(io, manifest, opts) {
-  const o = opts || {};
-  const retries = o.retries == null ? 2 : o.retries;
-  const maxNet = o.networkRetries == null ? 4 : o.networkRetries;
-  const sleep = o.sleep || defaultSleep;
-  const total = manifest.totalZipBytes;
-  const count = manifest.parts.length;
-  let done = 0;
-  let downloaded = 0;
-  let skipped = 0;
-  const cancelled = () => !!(o.isCancelled && o.isCancelled());
-  const report = (partIndex, within, wasSkipped) => o.onProgress && o.onProgress({ partIndex, partCount: count, doneBytes: done + within, totalBytes: total, skipped: !!wasSkipped });
-  for (let i = 0; i < count; i++) {
-    const part = manifest.parts[i];
-    const idx = i + 1;
-    const partial = partialName(part.name);
-    if (cancelled()) throw cancelledError();
-    if (await isValidPart(io, part)) {
-      await io.remove(partial); // a stale partial of an already complete part
-      await io.remove(partialIdName(part.name));
-      skipped++;
-      done += part.sizeBytes;
-      report(idx, 0, true);
-      continue;
-    }
-    let attempt = 0; // corrupt-part attempts
-    let netAttempt = 0; // consecutive transient failures without progress
-    for (;;) {
-      let have = (await io.size(partial)) || 0;
-      if (have > 0) {
-        // A partial left by another release (different SHA-256 in its sidecar) can never be continued.
-        const id = await readPartialId(io, part).catch(() => null);
-        if (id && id !== part.sha256) {
-          await io.remove(partial);
-          have = 0;
-        }
-      }
-      if (have > part.sizeBytes) {
-        await io.remove(partial); // cannot be a prefix of this part
-        have = 0;
-      }
-      report(idx, have, false);
-      if (have < part.sizeBytes) {
-        try {
-          await writePartialId(io, part);
-          await io.download(partUrl(o.manifestUrl, part), partial, (written) => report(idx, Math.min(written, part.sizeBytes), false), o.isCancelled, { resumeFrom: have, expectedBytes: part.sizeBytes });
-        } catch (e) {
-          if (cancelled()) throw cancelledError();
-          const after = (await io.size(partial)) || 0;
-          const background = !!(o.isBackgrounded && o.isBackgrounded());
-          if (!isTransientNetworkError(e) && !background) throw new Error(`הורדת ${part.name} נכשלה: ${e instanceof Error ? e.message : String(e)}`);
-          if (after > have) netAttempt = 0; // progress was made: refill the retry budget
-          if (background && o.whenForeground) {
-            // Android cut the network while the app was not in the foreground: not the network's fault.
-            if (o.onRetry) o.onRetry({ partIndex: idx, attempt: netAttempt, maxAttempts: maxNet, delayMs: 0, error: e, background: true });
-            await o.whenForeground();
-            if (cancelled()) throw cancelledError();
-            await sleepCancellable(sleep, 1000, o.isCancelled);
-            continue;
-          }
-          if (netAttempt >= maxNet) throw new Error(`הורדת ${part.name} נכשלה אחרי ${maxNet + 1} ניסיונות (ההורדה תמשיך מאותה נקודה): ${e instanceof Error ? e.message : String(e)}`);
-          const delayMs = backoffDelayMs(netAttempt, o.backoffBaseMs, o.backoffCapMs);
-          netAttempt++;
-          if (o.onRetry) o.onRetry({ partIndex: idx, attempt: netAttempt, maxAttempts: maxNet, delayMs, error: e, background: false });
-          await sleepCancellable(sleep, delayMs, o.isCancelled);
-          continue;
-        }
-      }
-      if (cancelled()) throw cancelledError();
-      const got = (await io.size(partial)) || 0;
-      if (got !== part.sizeBytes) {
-        // The transfer ended "successfully" but short (a proxy cut it): keep it and continue from there.
-        if (netAttempt++ >= maxNet) throw new Error(`הורדת ${part.name} הסתיימה קצרה (${got} מתוך ${part.sizeBytes} בתים)`);
-        continue;
-      }
-      await io.rename(partial, part.name);
-      await io.remove(partialIdName(part.name));
-      if (await isValidPart(io, part)) break;
-      if (attempt++ >= retries) throw new Error(`${part.name} פגום (גודל או SHA-256 לא תואמים) גם אחרי ${retries + 1} ניסיונות`);
-    }
-    downloaded++;
-    done += part.sizeBytes;
-    report(idx, 0, false);
-  }
-  return { downloaded, skipped };
+/** Bytes of a package already on disk (finished parts + partials), for the first progress report of a resumed run. */
+function existingBytes(io, pkg) {
+  return dl.bytesOnDisk(io, pkg.parts);
 }
 
 /**
@@ -481,13 +293,40 @@ async function extractZip(io, manifest, zipName, dbName, opts) {
   return res;
 }
 
+/** Job-card line of a download snapshot (overall bytes of the flow). */
+function describeSnapshot(snap, ctx) {
+  const done = ctx.overall(snap.doneBytes);
+  const progress = formatPartProgress({ partIndex: snap.partIndex, partCount: snap.partCount, doneBytes: done, totalBytes: ctx.total, label: ctx.label });
+  const fraction = ctx.total ? Math.min(1, done / ctx.total) : null;
+  switch (snap.state) {
+    case dl.STATES.WAITING: {
+      const r = snap.retry || {};
+      if (r.offline || !r.attempt) return { stage: WAITING_STAGE, fraction, detail: `ההורדה תמשיך מעצמה כשהרשת תחזור · ${progress}` };
+      return { stage: NETWORK_RETRY_STAGE, fraction, detail: `ניסיון ${r.attempt} מתוך ${r.maxAttempts} · בעוד ${Math.max(1, Math.round((r.delayMs || 0) / 1000))} שנ׳ · ${progress}` };
+    }
+    case dl.STATES.VERIFYING:
+      return { stage: VERIFY_STAGE, fraction, detail: `${ctx.label ? ctx.label + ' · ' : ''}חלק ${snap.partIndex} מתוך ${snap.partCount}` };
+    case dl.STATES.PAUSED:
+      return { stage: PAUSED_STAGE, fraction, detail: progress };
+    case dl.STATES.ERROR:
+      return { stage: 'ההורדה נכשלה', fraction, detail: snap.error ? snap.error.message : progress };
+    default:
+      return { stage: DOWNLOAD_STAGE, fraction, detail: progress };
+  }
+}
+
 /**
- * The whole staging pipeline: download (resuming valid parts) -> append-assemble + verify the zip
- * -> extract the DB into `dbName` -> delete the zip. `report({ stage, fraction, detail })` feeds the
- * job card. The caller validates the extracted DB and installs it.
+ * The whole staging pipeline of ONE package: download (resumable, every part SHA-256 verified) -> append-assemble +
+ * verify the zip -> extract the DB into `dbName` -> delete the zip. `report({ stage, fraction, detail, download })`
+ * feeds the job card (`download` = the engine state: downloading / waiting_for_network / verifying / paused ...).
+ * The caller validates the extracted DB and installs it.
  *
- * Parts are deliberately kept when anything fails, so the next run resumes; the zip and the
- * half-extracted DB are removed.
+ * Pause (`isPauseRequested`) stops the transfer and throws DownloadPausedError: the bytes and the state stay on disk
+ * and the next run continues from them. Cancel deletes the package's bytes. A fatal failure throws DownloadError
+ * (with `.diagnostic`); the bytes are kept. The zip and a half-extracted DB are always removed.
+ *
+ * opts: { manifestUrl, engine? (default: createHttpEngine over io + fetch), request?, connectivity?, isCancelled,
+ *         isPauseRequested, window: { offset, total, label }, report, keepAwake(fn), sleep, pollMs }
  */
 async function stageCloudLibrary(io, manifest, opts) {
   const o = opts || {};
@@ -497,160 +336,55 @@ async function stageCloudLibrary(io, manifest, opts) {
   // Two-stage flow: `window` = { offset, total, label } maps this package's download bytes onto ONE bar for the whole
   // flow (offset = bytes of the packages before it, total = the combined size of every package of the flow).
   const win = o.window || null;
-  const overall = (bytes) => (win ? win.offset + bytes : bytes);
-  const overallTotal = win ? win.total : manifest.totalZipBytes;
-  // Seeded with what is already on disk: a retry's first report is the saved percentage, never 0%.
-  let lastFraction = overallTotal ? Math.min(1, overall(await existingBytes(io, manifest)) / overallTotal) : 0;
+  const ctx = { overall: (bytes) => (win ? win.offset + bytes : bytes), total: win ? win.total : manifest.totalZipBytes, label: win && win.label };
+  const engine = o.engine || dl.createHttpEngine({ io, request: o.request, connectivity: o.connectivity, sleep: o.sleep, backoffBaseMs: o.backoffBaseMs, backoffCapMs: o.backoffCapMs });
   const keepAwake = o.keepAwake || ((fn) => fn());
-  let lastDone = Math.round(lastFraction * overallTotal);
-  await downloadParts(io, manifest, {
-    manifestUrl: o.manifestUrl,
+  let lastFraction = 0;
+  const r = await dl.downloadPackage(io, manifest, {
+    engine,
+    urlOf: (p) => partUrl(o.manifestUrl, p),
     isCancelled: o.isCancelled,
-    retries: o.retries,
-    networkRetries: o.networkRetries,
-    backoffBaseMs: o.backoffBaseMs,
-    backoffCapMs: o.backoffCapMs,
+    isPauseRequested: o.isPauseRequested,
+    window: win,
     sleep: o.sleep,
-    isBackgrounded: o.isBackgrounded,
-    whenForeground: o.whenForeground,
-    onRetry: (r) =>
-      report({
-        stage: NETWORK_RETRY_STAGE,
-        fraction: lastFraction,
-        detail: r.background ? 'ההורדה תמשיך כשתחזרו לאפליקציה' : `ניסיון ${r.attempt} מתוך ${r.maxAttempts} · בעוד ${Math.max(1, Math.round(r.delayMs / 1000))} שנ׳`,
-      }),
-    onProgress: (p) => {
-      // Strictly monotonic: a transient drop / retry never moves the bar backwards.
-      lastFraction = Math.max(lastFraction, overallTotal ? overall(p.doneBytes) / overallTotal : 0);
-      lastDone = Math.max(lastDone, overall(p.doneBytes));
-      report({
-        stage: p.skipped ? 'ממשיך — חלק קיים' : 'מוריד…',
-        fraction: overallTotal ? lastFraction : null,
-        detail: formatPartProgress({ ...p, doneBytes: lastDone, totalBytes: overallTotal, label: win && win.label }),
-      });
+    pollMs: o.pollMs,
+    verifyRetries: o.verifyRetries,
+    onUpdate: (snap) => {
+      const line = describeSnapshot(snap, ctx);
+      // The bar never moves backwards (the controller's bytes are monotonic; this also holds across states).
+      if (line.fraction != null) lastFraction = Math.max(lastFraction, line.fraction);
+      report({ ...line, fraction: line.fraction == null ? null : lastFraction, download: snap.state });
     },
   });
+  if (r.status === 'paused') throw new dl.DownloadPausedError({ doneBytes: ctx.overall(r.doneBytes), totalBytes: ctx.total });
   // Assembly + extraction are the heavy disk steps: the device must not sleep in the middle of them.
   await keepAwake(async () => {
-    report({ stage: 'מרכיב את החלקים…', fraction: 0, detail: null });
+    report({ stage: 'מרכיב את החלקים…', fraction: 0, detail: null, download: dl.STATES.COMPLETED });
     await assembleParts(io, manifest, zipName, {
       isCancelled: o.isCancelled,
-      onProgress: (p) => report({ stage: 'מרכיב את החלקים…', fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null, detail: `${formatBytes(p.doneBytes)} / ${formatBytes(p.totalBytes)}` }),
+      onProgress: (p) => report({ stage: 'מרכיב את החלקים…', fraction: p.totalBytes ? p.doneBytes / p.totalBytes : null, detail: `${formatBytes(p.doneBytes)} / ${formatBytes(p.totalBytes)}`, download: dl.STATES.COMPLETED }),
     });
-    report({ stage: 'מחלץ…', fraction: 0, detail: null });
+    report({ stage: 'מחלץ…', fraction: 0, detail: null, download: dl.STATES.COMPLETED });
     try {
       await extractZip(io, manifest, zipName, dbName, {
         isCancelled: o.isCancelled,
         onProgress: ({ bytesIn, bytesOut, totalIn }) =>
-          report({ stage: 'מחלץ…', fraction: totalIn ? bytesIn / totalIn : null, detail: `${formatBytes(bytesOut)} / ${formatBytes(manifest.uncompressedDbBytes)}` }),
+          report({ stage: 'מחלץ…', fraction: totalIn ? bytesIn / totalIn : null, detail: `${formatBytes(bytesOut)} / ${formatBytes(manifest.uncompressedDbBytes)}`, download: dl.STATES.COMPLETED }),
       });
     } finally {
       if ((await io.size(zipName)) != null) await io.remove(zipName);
     }
   });
-}
-
-/** Fixed size of one Range request on the phone: a hard network drop loses at most this much. */
-const RANGE_CHUNK_BYTES = 4 * 1024 * 1024;
-
-/**
- * Downloads a part in fixed-size `Range` chunks (Android-safe resume). Each chunk is fetched into a separate
- * temp chunk file and only a COMPLETE chunk (exactly the requested length) is appended to `<part>.partial`;
- * a short / failed chunk is discarded, so the partial only ever grows by whole chunks and a drop loses at most
- * one chunk. The final URL is resolved per chunk (a redirect that strips `Range` is detected by the probe
- * answering 200 instead of 206). `env`:
- *   partialSize() -> bytes already flushed, resolve(start, end) -> { url, status } (final URL after redirects),
- *   fetchChunk(url, rangeOrNull, onBytes) writes the temp chunk file, chunkSize() -> bytes | null,
- *   discardChunk(), appendChunk() (append + delete temp), adoptChunk() (temp becomes the whole partial),
- *   resetPartial().
- * @returns {Promise<void>}
- */
-async function downloadRangeChunks(env, opts) {
-  const o = opts || {};
-  const expected = o.expectedBytes;
-  const chunkBytes = o.chunkBytes || RANGE_CHUNK_BYTES;
-  const maxStalls = o.maxStalls == null ? 3 : o.maxStalls;
-  const cancelled = () => !!(o.isCancelled && o.isCancelled());
-  // Progress is ALWAYS cumulative over the whole part (bytes already saved + the chunk in flight) and strictly
-  // non-decreasing: a retry, a re-read of the partial or a chunk boundary can never move the bar backwards.
-  let reported = 0;
-  const report = (written) => {
-    const v = Math.min(written, expected);
-    if (o.onProgress && v >= reported) {
-      reported = v;
-      o.onProgress(v, expected);
-    }
-  };
-  let have = await env.partialSize();
-  let ignored = 0;
-  // Loop guards: the downloader must NEVER spin on the same bytes forever (a broken append on a device made it
-  // fetch bytes 0-4MB again and again). The offset of every chunk has to move forward.
-  let high = have; // furthest offset a chunk started at
-  let sameStart = 0; // consecutive chunks started at the very same offset
-  let lastStart = -1;
-  let shrunk = 0; // times the partial was found shorter than before
-  while (have < expected) {
-    if (cancelled()) throw cancelledError();
-    if (have === lastStart) sameStart++;
-    else sameStart = 0;
-    lastStart = have;
-    if (have < high) shrunk++;
-    high = Math.max(high, have);
-    if (sameStart >= maxStalls || shrunk > maxStalls) {
-      const why = sameStart >= maxStalls ? `${sameStart + 1} chunks in a row started at offset ${have}` : `the partial file shrank ${shrunk} times (back to ${have} after reaching ${high})`;
-      throw new Error(`DOWNLOAD_STALLED: the download does not advance: ${why} (part ${expected} bytes). The chunk is received but never appended to the partial file.`);
-    }
-    const end = Math.min(have + chunkBytes, expected) - 1;
-    const want = end - have + 1; // Range is inclusive: bytes=have-end is end - have + 1 bytes
-    await env.discardChunk(); // a chunk left by a process death is never trusted
-    const r = await env.resolve(have, end);
-    if (r.status === 200) {
-      // Range was ignored (or stripped by a redirect): the body is the whole part, nothing can be resumed.
-      if (ignored++ > 0) throw new Error('השרת אינו תומך בהורדה חלקית (Range)');
-      if (have > 0) await env.resetPartial();
-      have = 0;
-      high = 0;
-      await env.fetchChunk(r.url, null, (n) => report(n));
-      if ((await env.chunkSize()) !== expected) {
-        await env.discardChunk();
-        throw new Error('Unexpected end of download (short body)');
-      }
-      await env.adoptChunk();
-      have = await env.partialSize();
-      continue;
-    }
-    if (r.status !== 206) throw new Error(`HTTP ${r.status}`);
-    try {
-      await env.fetchChunk(r.url, `bytes=${have}-${end}`, (n) => report(have + n));
-    } catch (e) {
-      await env.discardChunk();
-      throw e;
-    }
-    const got = await env.chunkSize();
-    if (got !== want) {
-      await env.discardChunk();
-      throw new Error(`Unexpected end of download (expected ${want} bytes, chunk has ${got})`);
-    }
-    await env.appendChunk();
-    const next = await env.partialSize();
-    if (next > have && next !== have + want) {
-      // The append wrote a wrong number of bytes: the partial cannot be trusted any more.
-      await env.resetPartial();
-      throw new Error(`DOWNLOAD_APPEND_MISMATCH: appending the chunk at offset ${have} left ${next} bytes, expected ${have + want}; the partial file was reset`);
-    }
-    have = next;
-    report(have);
-  }
+  // The package is staged: its download record is done (the parts were consumed by the assembly).
+  await dl.patchDownloadState(io, { packages: { [manifest.kind || 'core']: null } });
 }
 
 /**
- * In-memory PartsIO (browser e2e preview, self-tests). Parts are fetched with `fetch`, hashed with
- * WebCrypto. Only meant for small fixtures: the phone uses expo-file-system (src/services/cloudLibrary.ts).
+ * In-memory PartsIO (browser e2e preview, self-tests). Hashes with WebCrypto. Only meant for small fixtures: the phone
+ * uses expo-file-system (src/services/cloudLibrary.ts).
  */
-function createMemoryIO(opts) {
+function createMemoryIO() {
   const files = new Map();
-  const o = opts || {};
-  const doFetch = o.fetch || ((...a) => fetch(...a));
   const concat = (chunks) => {
     const out = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0));
     let at = 0;
@@ -660,11 +394,12 @@ function createMemoryIO(opts) {
     }
     return out;
   };
-  const io = {
+  return {
     files,
     size: (name) => (files.has(name) ? files.get(name).length : null),
     remove: (name) => void files.delete(name),
     rename: (from, to) => {
+      if (!files.has(from)) throw new Error(`${from} does not exist`);
       files.set(to, files.get(from));
       files.delete(from);
     },
@@ -672,33 +407,8 @@ function createMemoryIO(opts) {
       const buf = await globalThis.crypto.subtle.digest('SHA-256', files.get(name));
       return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
     },
-    download: async (url, name, onProgress, isCancelled, resume) => {
-      const from = (resume && resume.resumeFrom) || 0;
-      const res = await (from > 0 ? doFetch(url, { headers: { Range: `bytes=${from}-` } }) : doFetch(url));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // 206 -> the server continues after `from`; 200 -> it ignored Range and sent the whole file.
-      const resumed = from > 0 && res.status === 206 && files.has(name);
-      const total = Number(res.headers.get('content-length')) || 0;
-      const chunks = resumed ? [files.get(name)] : [];
-      let got = resumed ? from : 0;
-      if (res.body && res.body.getReader) {
-        const reader = res.body.getReader();
-        for (;;) {
-          if (isCancelled && isCancelled()) throw cancelledError();
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          files.set(name, concat(chunks)); // kept even if the stream breaks later: the next try resumes
-          got += value.length;
-          onProgress(got, total);
-        }
-      } else {
-        chunks.push(new Uint8Array(await res.arrayBuffer()));
-        got += chunks[resumed ? 1 : 0].length;
-        onProgress(got, total);
-      }
-      files.set(name, concat(chunks));
-    },
+    readText: (name) => new TextDecoder().decode(files.get(name)),
+    writeText: (name, text) => void files.set(name, new TextEncoder().encode(text)),
     openRead: (name) => {
       const data = files.get(name);
       if (!data) throw new Error(`${name} does not exist`);
@@ -712,15 +422,19 @@ function createMemoryIO(opts) {
         close: () => undefined,
       };
     },
+    // Every write is visible at once (like a real file): an interrupted transfer keeps exactly the bytes it wrote.
     openWrite: (name, append) => {
       const chunks = append && files.has(name) ? [files.get(name)] : [];
+      files.set(name, concat(chunks));
       return {
-        write: async (bytes) => void chunks.push(Uint8Array.from(bytes)),
-        close: () => void files.set(name, concat(chunks)),
+        write: async (bytes) => {
+          chunks.push(Uint8Array.from(bytes));
+          files.set(name, concat(chunks));
+        },
+        close: () => undefined,
       };
     },
   };
-  return io;
 }
 
 module.exports = {
@@ -743,18 +457,15 @@ module.exports = {
   checkFreeSpace,
   formatBytes,
   formatPartProgress,
-  isValidPart,
-  PARTIAL_SUFFIX,
-  NETWORK_RETRY_STAGE,
-  partialName,
-  partialIdName,
-  existingBytes,
-  isTransientNetworkError,
-  backoffDelayMs,
   formatCloudNotification,
-  downloadParts,
-  downloadRangeChunks,
-  RANGE_CHUNK_BYTES,
+  describeSnapshot,
+  PARTIAL_SUFFIX: dl.PARTIAL_SUFFIX,
+  partialName: dl.partialName,
+  WAITING_STAGE,
+  NETWORK_RETRY_STAGE,
+  VERIFY_STAGE,
+  PAUSED_STAGE,
+  existingBytes,
   assembleParts,
   extractZip,
   stageCloudLibrary,
