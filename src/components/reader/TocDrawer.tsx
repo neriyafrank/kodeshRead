@@ -34,6 +34,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions, type ScrollViewInstance } from 'react-native';
 
 import { normalizeHebrew } from '../../../shared/hebrew';
+import { groupTocTree } from '../../../shared/halachaTopics';
 import { inlineUnitWord } from '../../../shared/refAlign';
 import {
   buildTocTree,
@@ -121,7 +122,7 @@ type PanelProps = Omit<Props, 'visible'> & { cap: number; onFitWidth: (w: number
 
 function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFitWidth, docked }: PanelProps) {
   const s = useThemedStyles(createStyles);
-  const { adapter } = useLibrary();
+  const { adapter, bookIndex } = useLibrary();
   const chumash = useChumashBook(bookId, bookTitle);
   const tocMode = useLearning((x) => x.tocMode);
   const setTocMode = useLearning((x) => x.setTocMode);
@@ -139,10 +140,11 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
     Promise.all([
       a.all<TocNode>('SELECT id, parent_id, level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [bookId]),
       a.all<{ total_lines: number }>('SELECT total_lines FROM books WHERE id = ?', [bookId]),
-    ]).then(([list, b]) => alive && setData({ bookId, tree: buildTocTree(list), total: b[0]?.total_lines ?? 0 }));
+    ]).then(([list, b]) => alive && setData({ bookId, tree: groupTocTree(buildTocTree(list), { title: bookTitle, categoryPath: bookIndex.books.get(bookId)?.categoryPath }), total: b[0]?.total_lines ?? 0 }));
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId, adapter, data]);
 
   const ready = data?.bookId === bookId ? data : null;

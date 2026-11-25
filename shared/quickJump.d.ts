@@ -42,6 +42,8 @@ export interface JumpResult {
   direct: boolean;
   /** Set when the query named a Torah parsha / aliyah ("וישלח שני"). */
   parsha?: ParshaJump;
+  /** Set when the query named a Shulchan Aruch / Tur topic ("שוע ציצית"). `label`: "שולחן ערוך אורח חיים · הלכות ציצית (סימן ח׳)". */
+  topic?: { section: 'oc' | 'yd' | 'eh' | 'cm'; name: string; from: number; to: number; label: string };
 }
 
 export interface ParshaJump {

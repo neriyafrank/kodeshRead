@@ -415,6 +415,151 @@ async function main() {
     await check('fixture: ברכות ב:', () => expectJump(db, index, 'ברכות ב:', 'ברכות', 5, 'עמוד ב'));
     await check('fixture: ברכות ב ב', () => expectJump(db, index, 'ברכות ב ב', 'ברכות', 5, 'עמוד ב'));
 
+    // Shulchan Aruch / Tur topics (bundled shared/halachaTopics.json): Quick Jump + TOC grouping, over injected fixture data.
+    await check('halacha topics: bundled JSON integrity (4 + 4 sections, valid siman ranges; fetch script present)', () => {
+      const ht = require('../shared/halachaTopics');
+      const validate = (d, strict) => {
+        for (const kind of ['sa', 'tur']) {
+          for (const k of ['oc', 'yd', 'eh', 'cm']) {
+            const list = d[kind] && d[kind][k];
+            assert.ok(Array.isArray(list), `${kind}.${k} present`);
+            if (strict) assert.ok(list.length > 0, `${kind}.${k} has topics`);
+            let prev = 0;
+            for (const t of list) {
+              assert.ok(typeof t.t === 'string' && t.t.length > 0, `${kind}.${k}: title`);
+              assert.ok(Number.isInteger(t.from) && Number.isInteger(t.to) && t.from >= 1 && t.to >= t.from, `${kind}.${k} ${t.t}: ${t.from}-${t.to}`);
+              assert.ok(t.from > prev, `${kind}.${k} ${t.t}: ranges ascend without overlap`);
+              prev = t.to;
+            }
+          }
+        }
+      };
+      // pending = scripts/fetch-sa-topics.js has not been run yet (sefaria.org unreachable): structure only.
+      validate(ht.DATA, !ht.DATA.pending);
+      assert.ok(fs.existsSync(path.join(ROOT, 'scripts/fetch-sa-topics.js')));
+      const { topicsOf } = require('./fetch-sa-topics');
+      const t = topicsOf({ alt_structs: { Topic: { nodes: [
+        { titles: [{ lang: 'he', text: 'הלכות ציצית', primary: true }], wholeRef: 'Shulchan Arukh, Orach Chayim 8-24' },
+        { titles: [{ lang: 'he', text: 'הלכות תפילין', primary: true }], wholeRef: 'Shulchan Arukh, Orach Chayim 25:1-45:4' },
+        { titles: [{ lang: 'he', text: 'חלק', primary: true }], nodes: [{ heTitle: 'הלכות מזוזה', wholeRef: 'Shulchan Arukh, Orach Chayim 46' }] },
+      ] } } });
+      assert.deepStrictEqual(t, [{ t: 'הלכות ציצית', from: 8, to: 24 }, { t: 'הלכות תפילין', from: 25, to: 45 }, { t: 'הלכות מזוזה', from: 46, to: 46 }]);
+      assert.deepStrictEqual(require('./fetch-sa-topics').topicsOf({}), [], 'no alt_structs -> empty (caller falls back to the SA ranges)');
+      assert.strictEqual(ht.simanLabel(8), 'ח׳');
+      assert.strictEqual(ht.rangeLabel({ from: 8, to: 24 }), 'ח׳–כ״ד');
+      assert.strictEqual(ht.topicLabel({ t: 'הלכות ציצית', from: 8, to: 24 }), 'הלכות ציצית (ח׳–כ״ד)');
+    });
+    await check('halacha topics: Quick Jump (שוע ציצית, שו"ע בשר בחלב, טור שבת) + numeric queries + TOC grouping', async () => {
+      const ht = require('../shared/halachaTopics');
+      const toc = require('../shared/tocColumns');
+      const T = (t, from, to) => ({ t, from, to });
+      const fixtureData = {
+        pending: false,
+        sa: { oc: [T('הלכות הנהגת אדם בבוקר', 1, 7), T('הלכות ציצית', 8, 24), T('הלכות תפילין', 25, 30)], yd: [T('הלכות שחיטה', 80, 86), T('הלכות בשר בחלב', 87, 97)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9)] },
+        tur: { oc: [T('הלכות ציצית', 8, 24), T('הלכות שבת', 25, 30)], yd: [T('הלכות בשר בחלב', 3, 6), T('הלכות מליחה', 7, 10)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9)] },
+        turFallback: [],
+      };
+      const tlib = path.join(tmp, 'tlib');
+      const tw = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(tlib, rel)), { recursive: true }); fs.writeFileSync(path.join(tlib, rel), lines.join('\n')); };
+      const num = (n) => dict.intToHebrewNumeral(n);
+      const sa = (name, from, to) => tw(`הלכה/שולחן ערוך/שולחן ערוך, ${name}.txt`, [`<h1>שולחן ערוך, ${name}</h1>`, ...Array.from({ length: to - from + 1 }, (_, i) => [`<h2>סימן ${num(from + i)}</h2>`, `<p>תוכן סימן ${from + i}</p>`]).flat()]);
+      sa('אורח חיים', 1, 30);
+      sa('יורה דעה', 80, 100);
+      tw('הלכה/שולחן ערוך/שולחן ערוך, אבן העזר.txt', ['<h1>שולחן ערוך, אבן העזר</h1>', '<h2>סימן א</h2>', 'x']); // too few simanim: stays flat
+      tw('הלכה/טור/טור.txt', ['<h1>טור</h1>', '<h2>אורח חיים</h2>', ...Array.from({ length: 30 }, (_, i) => [`<h3>סימן ${num(i + 1)}</h3>`, `<p>טור ${i + 1}</p>`]).flat(), '<h2>יורה דעה</h2>', ...Array.from({ length: 10 }, (_, i) => [`<h3>סימן ${num(i + 1)}</h3>`, `<p>טור יד ${i + 1}</p>`]).flat()]);
+      tw('הלכה/שולחן ערוך/מפרשים/פרי מגדים/פרי מגדים על אורח חיים.txt', ['<h1>פרי מגדים על אורח חיים</h1>', '<h2>סימן ח</h2>', 'x']);
+      const tOut = path.join(tmp, 'topics.db');
+      const tp = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${tlib}`, `--out=${tOut}`], { encoding: 'utf8' });
+      if (tp.status !== 0) throw new Error('topics fixture build failed:\n' + tp.stderr);
+      const tdb = openDb(tOut);
+      const prev = ht.setTopicData(fixtureData);
+      try {
+        const tidx = await loadBookIndex(tdb);
+        const top = async (q) => (await resolveReference(tdb, tidx, q))[0];
+        const lineOf = async (title, siman) => {
+          const book = [...tidx.books.values()].find((b) => b.title === title);
+          const r = await tdb.all('SELECT start_line FROM toc_nodes WHERE book_id = ? AND title = ?', [book.id, `סימן ${siman}`]);
+          return r[0].start_line;
+        };
+        // שוע ציצית -> שולחן ערוך אורח חיים, siman ח (the topic's first siman).
+        for (const q of ['שוע ציצית', 'שו"ע ציצית', 'שולחן ערוך ציצית', 'שוע הלכות ציצית', 'שוע אוח ציצית']) {
+          const r = await top(q);
+          assert.strictEqual(r.bookTitle, 'שולחן ערוך, אורח חיים', q);
+          assert.strictEqual(r.targetLine, await lineOf('שולחן ערוך, אורח חיים', 'ח'), q);
+          assert.strictEqual(r.location, 'הלכות ציצית (סימן ח׳)', q);
+          assert.strictEqual(r.topic.label, 'שולחן ערוך אורח חיים · הלכות ציצית (סימן ח׳)', q);
+          assert.ok(r.direct && r.complete, q);
+        }
+        const bb = await top('שו"ע בשר בחלב');
+        assert.strictEqual(bb.bookTitle, 'שולחן ערוך, יורה דעה');
+        assert.strictEqual(bb.targetLine, await lineOf('שולחן ערוך, יורה דעה', 'פז'));
+        assert.strictEqual(bb.topic.section, 'yd');
+        assert.strictEqual((await top('שוע תפיל')).topic.name, 'הלכות תפילין', 'word start while typing');
+        // טור: one book with the four sections; the topic's siman is searched inside its section only.
+        const ts = await top('טור שבת');
+        assert.strictEqual(ts.bookTitle, 'טור');
+        assert.strictEqual(ts.topic.label, 'טור אורח חיים · הלכות שבת (סימן כ״ה)');
+        assert.ok(ts.path.length === 2 && ts.path[1] === 'סימן כה', ts.path.join(' > '));
+        const tm = await top('טור מליחה');
+        assert.ok(tm.topic.section === 'yd' && tm.path.join(' > ') === 'יורה דעה > סימן ז', tm.path.join(' > '));
+        const [tn] = await tdb.all("SELECT t.start_line FROM toc_nodes t JOIN books b ON b.id = t.book_id WHERE b.title = 'טור' AND t.title = 'סימן ז' ORDER BY t.start_line DESC");
+        assert.strictEqual(tm.targetLine, tn.start_line, 'yoreh deah siman 7, not orach chaim 7');
+        // Numeric / abbreviated references behave as before (no topic result).
+        const n1 = await top('שוע אוח ח');
+        assert.ok(!n1.topic && n1.bookTitle === 'שולחן ערוך, אורח חיים' && n1.targetLine === await lineOf('שולחן ערוך, אורח חיים', 'ח'), JSON.stringify(n1.path));
+        const n2 = await top('שו"ע יו"ד פז');
+        assert.ok(!n2.topic && n2.bookTitle === 'שולחן ערוך, יורה דעה' && n2.targetLine === await lineOf('שולחן ערוך, יורה דעה', 'פז'));
+        const n3 = await top('שוע אוח כה');
+        assert.ok(!n3.topic && n3.complete);
+        // Commentaries on the Shulchan Aruch are never a topic target.
+        for (const r of await resolveReference(tdb, tidx, 'שוע ציצית')) assert.ok(!/פרי מגדים/.test(r.bookTitle));
+        // No topic data (pending JSON) -> exactly the old behavior.
+        ht.setTopicData({ pending: true, sa: { oc: [], yd: [], eh: [], cm: [] }, tur: { oc: [], yd: [], eh: [], cm: [] } });
+        assert.ok(!(await resolveReference(tdb, tidx, 'שוע ציצית')).some((r) => r.topic));
+        ht.setTopicData(fixtureData);
+
+        // --- TOC grouping ---
+        const treeOf = async (title) => {
+          const book = [...tidx.books.values()].find((b) => b.title === title);
+          const rows = await tdb.all('SELECT id, parent_id, level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [book.id]);
+          return { book, flat: toc.buildTocTree(rows), rows };
+        };
+        const oc = await treeOf('שולחן ערוך, אורח חיים');
+        const g = ht.groupTocTree(oc.flat, { title: oc.book.title, categoryPath: oc.book.categoryPath }, fixtureData);
+        assert.deepStrictEqual(g.roots.map((n) => n.title), ['הלכות הנהגת אדם בבוקר (א׳–ז׳)', 'הלכות ציצית (ח׳–כ״ד)', 'הלכות תפילין (כ״ה–ל׳)']);
+        const kids = g.children.get(g.roots[1].id);
+        assert.strictEqual(kids.length, 17);
+        assert.deepStrictEqual([kids[0].title, kids[16].title], ['סימן ח', 'סימן כד']);
+        assert.ok(kids.every((k) => k.parent_id === g.roots[1].id) && g.roots[1].start_line === kids[0].start_line, 'a topic jumps to its first siman');
+        assert.strictEqual(g.depth, oc.flat.depth + 1);
+        // The columns open topic -> simanim; the reading position pre-selects its topic and siman.
+        const cols = toc.tocColumns(g, [g.roots[1].id]);
+        assert.strictEqual(cols.length, 2);
+        const line = kids[3].start_line + 1; // inside siman יא
+        const path2 = toc.pathForLine(g, line);
+        assert.deepStrictEqual(path2.map((id) => g.byId.get(id).title), ['הלכות ציצית (ח׳–כ״ד)', 'סימן יא']);
+        assert.ok(toc.filterToc(g, 'ציצית').some((n) => n.synthetic), 'the topic is findable by name');
+        assert.ok(toc.filterToc(g, 'כה').some((n) => n.title === 'סימן כה'), 'simanim stay findable by number');
+        // Tur: each section container is grouped under its own topics.
+        const tur = await treeOf('טור');
+        const gt = ht.groupTocTree(tur.flat, { title: tur.book.title, categoryPath: tur.book.categoryPath }, fixtureData);
+        const secOc = gt.roots.find((r) => r.title === 'אורח חיים');
+        assert.ok(gt.children.get(secOc.id).some((n) => n.title === 'הלכות ציצית (ח׳–כ״ד)') && gt.children.get(secOc.id).some((n) => n.title === 'הלכות שבת (כ״ה–ל׳)'));
+        // Simanim 1-7 have no Tur topic in the fixture: they stay as plain siman rows next to the topics.
+        assert.ok(gt.children.get(secOc.id).filter((n) => !n.synthetic).length === 7);
+        // Fallbacks: too few simanim, a commentary, a non-halacha book, pending data -> the very same flat tree.
+        const eh = await treeOf('שולחן ערוך, אבן העזר');
+        assert.strictEqual(ht.groupTocTree(eh.flat, { title: eh.book.title, categoryPath: eh.book.categoryPath }, fixtureData), eh.flat);
+        const pm = await treeOf('פרי מגדים על אורח חיים');
+        assert.strictEqual(ht.groupTocTree(pm.flat, { title: pm.book.title, categoryPath: pm.book.categoryPath }, fixtureData), pm.flat);
+        assert.strictEqual(ht.groupTocTree(oc.flat, { title: 'בראשית', categoryPath: 'תנך/תורה' }, fixtureData), oc.flat);
+        assert.strictEqual(ht.groupTocTree(oc.flat, { title: oc.book.title, categoryPath: oc.book.categoryPath }, { pending: true, sa: {}, tur: {} }), oc.flat);
+      } finally {
+        ht.setTopicData(prev);
+        tdb.close();
+      }
+    });
+
     // Rambam scoped prefix matcher: own works only (משנה תורה + פירוש המשנה), never commentaries on them.
     await check('quick open: רמבם scoped matcher (Mishneh Torah + Peirush HaMishnah, no commentary crowding)', async () => {
       const rlib = path.join(tmp, 'rlib');

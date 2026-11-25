@@ -104,7 +104,9 @@ export function QuickJumpBar({ onJump }: Props) {
           <Text style={styles.directText} numberOfLines={2} testID="quick-jump-direct-text">
             {results[0].parsha
               ? `פתח: ${results[0].parsha.label}`
-              : `פתח: ${results[0].bookTitle}${results[0].location ? ` — ${results[0].location}` : ''}`}
+              : results[0].topic
+                ? `פתח: ${results[0].topic.label}`
+                : `פתח: ${results[0].bookTitle}${results[0].location ? ` — ${results[0].location}` : ''}`}
           </Text>
           <Text style={styles.directGo}>←</Text>
         </Pressable>

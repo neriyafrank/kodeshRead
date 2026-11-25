@@ -25,6 +25,7 @@ const { normalizeHebrew, stripHtml, decodeEntities } = require('./hebrew');
 const { sourcesOf, adapterForBook } = require('./sources');
 const dict = require('./hebrewTorahDict');
 const torah = require('./torahParshiot');
+const halacha = require('./halachaTopics');
 
 const MAX_BOOK_CANDIDATES = 5;
 
@@ -500,6 +501,97 @@ async function resolveRambamScoped(db, index, words, limit) {
   });
 }
 
+// --- Shulchan Aruch / Tur topics ("שוע ציצית", "טור בשר בחלב") -------------------------------------------------
+
+const SA_WORD = normalizeHebrew('שו"ע', { keepPunctuation: false });
+const TUR_WORD = normalizeHebrew('טור', { keepPunctuation: false });
+const topicBookCache = new WeakMap();
+
+/** [{ book, info }] of the library's Shulchan Aruch / Tur section books (commentaries never), core first. */
+function topicBooks(index) {
+  let list = topicBookCache.get(index);
+  if (list) return list;
+  list = [];
+  for (const b of index.books.values()) {
+    const info = halacha.sectionOfBook(b.title, b.categoryPath);
+    if (info) list.push({ book: b, info });
+  }
+  topicBookCache.set(index, list);
+  return list;
+}
+
+/** "שוע" | "שו"ע" | "שולחן ערוך" | "טור" at the start: { kind, at } (tokens consumed) or null. */
+function topicPrefix(tokens) {
+  if (tokens[0] === TUR_WORD) return { kind: 'tur', at: 1 };
+  if (tokens[0] === SA_WORD) return { kind: 'sa', at: 1 };
+  if ((tokens[0] === normalizeHebrew('שולחן') || tokens[0] === normalizeHebrew('שלחן')) && tokens[1] === normalizeHebrew('ערוך')) return { kind: 'sa', at: 2 };
+  return null;
+}
+
+/** First siman line of a topic inside a Tur book holding all four sections (its section heading found by title). */
+async function turSimanInSection(db, book, sec, siman) {
+  const rows = await db.all('SELECT id, title, level, start_line FROM toc_nodes WHERE book_id = ? AND level <= 2 ORDER BY start_line', [book.id]);
+  const node = rows.find((r) => normalizeHebrew(r.title, { keepPunctuation: false }).includes(halacha.SECTION_NAME[sec]));
+  if (!node) return null;
+  const end = await rangeEnd(db, book.id, node, book.totalLines);
+  const hit = await findNode(db, book.id, [dict.intToHebrewNumeral(siman)], node.start_line, end, node.level);
+  return hit ? { node, hit } : null;
+}
+
+/**
+ * "<שוע|שו"ע|שולחן ערוך|טור> [section] <topic>": matches the bundled הלכות topics (shared/halachaTopics.js) and opens the
+ * section book at the topic's first siman. Numeric / abbreviated references ("שוע אוח ח", "טור יו"ד פז") are left to the
+ * generic resolver. Null when not a topic query or no topic / book matches.
+ */
+async function resolveHalachaTopic(db, index, words, limit) {
+  if (!halacha.hasData()) return null;
+  const tokens = words.map((w) => w.tok);
+  const pre = topicPrefix(tokens);
+  if (!pre || tokens.length <= pre.at) return null;
+  let rest = tokens.slice(pre.at);
+  let sec = null;
+  for (const k of halacha.SECTION_KEYS) {
+    for (const alias of halacha.SECTION_ALIASES[k]) {
+      const a = alias.split(' ');
+      if (rest.length > a.length && a.every((x, i) => rest[i] === x)) {
+        sec = k;
+        rest = rest.slice(a.length);
+        break;
+      }
+    }
+    if (sec) break;
+  }
+  // A pure location ("ח", "כה ה", "סימן ח") is a reference, not a topic.
+  if (rest.every((t) => /^\d+$/.test(t) || dict.isHebrewNumeral(t) || STRUCTURE_WORDS.has(t))) return null;
+  const matches = halacha.matchTopics(pre.kind, rest, sec ? { sec } : undefined);
+  if (!matches.length) return null;
+  const books = topicBooks(index).filter((b) => b.info.kind === pre.kind);
+  const results = [];
+  for (const m of matches) {
+    const cand = books.find((b) => b.info.sec === m.sec) || books.find((b) => b.info.sec === null);
+    if (!cand) continue;
+    const book = cand.book;
+    const adapter = adapterForBook(db, book.id);
+    let r;
+    if (cand.info.sec) {
+      r = await resolveInBook(db, book, [{ key: dict.intToHebrewNumeral(m.topic.from) }]);
+      if (r.unmatched.length) continue;
+    } else {
+      const f = await turSimanInSection(adapter, book, m.sec, m.topic.from);
+      if (!f) continue;
+      r = { path: [f.node.title, f.hit.title], targetLine: f.hit.start_line, marker: null, unmatched: [] };
+    }
+    const location = `${m.topic.t} (סימן ${halacha.simanLabel(m.topic.from)})`;
+    results.push({
+      bookId: book.id, bookTitle: book.title, categoryPath: book.categoryPath, path: r.path, targetLine: r.targetLine, marker: null, unmatched: [],
+      preview: await previewText(db, book.id, r.targetLine), complete: true, suggestion: false, location,
+      direct: results.length === 0, topic: { section: m.sec, name: m.topic.t, from: m.topic.from, to: m.topic.to, label: `${cand.info.kind === 'tur' ? 'טור' : 'שולחן ערוך'} ${halacha.SECTION_LABEL[m.sec]} · ${location}` },
+    });
+    if (results.length >= limit) break;
+  }
+  return results.length ? results : null;
+}
+
 async function resolveBookReference(db, index, input, opts) {
   const limit = (opts && opts.limit) || MAX_BOOK_CANDIDATES;
   const words = rawTokens(input);
@@ -508,6 +600,8 @@ async function resolveBookReference(db, index, input, opts) {
 
   const scoped = await resolveRambamScoped(db, index, words, limit);
   if (scoped && scoped.length) return scoped;
+  const topical = await resolveHalachaTopic(db, index, words, limit);
+  if (topical) return topical;
 
   // Longest leading token sequence that is a book title/alias ("מסכת"/"ספר" optional),
   // literally or after abbreviation / spelling normalization ("שו\"ע או\"ח", "ב\"ק", "בר'").
