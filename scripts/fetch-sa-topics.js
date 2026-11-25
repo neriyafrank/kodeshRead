@@ -120,6 +120,22 @@ function clean(list) {
   return out;
 }
 
+/** Compact structure dump of an index response (what Sefaria returned), printed when nothing could be parsed. */
+function describe(index) {
+  if (!index || typeof index !== 'object') return `response is ${typeof index}`;
+  const lines = [`top-level keys: ${Object.keys(index).join(', ')}`];
+  const alt = index.alt_structs;
+  if (!alt || typeof alt !== 'object') lines.push('alt_structs: MISSING');
+  else {
+    for (const [name, st] of Object.entries(alt)) {
+      const nodes = (st && st.nodes) || [];
+      lines.push(`alt_structs.${name}: keys [${Object.keys(st || {}).join(', ')}], ${nodes.length} top-level nodes`);
+      if (nodes[0]) lines.push(`  first node: ${JSON.stringify(nodes[0]).slice(0, 600)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 async function load(kind, sec, dir) {
   const errors = [];
   for (const title of TITLES[kind][sec]) {
@@ -146,7 +162,10 @@ async function main() {
   for (const sec of SECTIONS) {
     const sa = await load('sa', sec, dir);
     out.sa[sec] = topicsOf(sa.index);
-    if (!out.sa[sec].length) throw new Error(`Shulchan Aruch ${sec}: no topical alt_structs found (inspect ${sa.title})`);
+    if (!out.sa[sec].length) {
+      console.error(`--- Sefaria response for ${sa.title} ---\n${describe(sa.index)}`);
+      throw new Error(`Shulchan Aruch ${sec}: no topical alt_structs found (see the structure above)`);
+    }
   }
   for (const sec of SECTIONS) {
     let topics = [];
@@ -175,4 +194,4 @@ if (require.main === module) {
     process.exit(1);
   });
 }
-module.exports = { topicsOf, rangeOf, clean };
+module.exports = { topicsOf, rangeOf, clean, describe };

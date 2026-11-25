@@ -298,6 +298,16 @@ try {
       await tid('open-library-manager').last().waitFor({ timeout: 180000 });
       await tid('open-library-manager').last().click();
       await tid('cloud-info').waitFor({ timeout: 60000 });
+      // The card renders before the manifest answers: wait for its verdict (an action button, the error, or "up to date")
+      // so the assertions below never race the (async) release check.
+      await page.waitForFunction(
+        () => {
+          const card = [...document.querySelectorAll('[data-testid="cloud-library-card"]')].pop();
+          return !!card && (!!card.querySelector('[data-testid^="cloud-download"],[data-testid="cloud-error"]') || /✓ הגרסה/.test(card.innerText));
+        },
+        null,
+        { timeout: 60000 },
+      );
     };
     const setRecord = (record) =>
       page.evaluate((r) => localStorage.setItem('kodeshread.librarySettings', JSON.stringify({ state: { manifestUrl: null, onboardingDismissed: true, starterOpen: true, installedCloud: r }, version: 1 })), record);

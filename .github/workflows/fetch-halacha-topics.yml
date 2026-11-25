@@ -1,0 +1,75 @@
+# Populates shared/halachaTopics.json (topical הלכות divisions of Shulchan Aruch + Tur) from Sefaria's Index API.
+# Manual run only: the development sandbox cannot reach sefaria.org. The app itself never calls Sefaria; it bundles the JSON.
+name: Fetch halacha topics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-halacha-topics
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 # engines: >=22.13 (node:sqlite for the self-test)
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Fetch topics from Sefaria
+        run: node scripts/fetch-sa-topics.js
+
+      - name: Sanity-check the output
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const d = JSON.parse(fs.readFileSync('shared/halachaTopics.json', 'utf8'));
+          const problems = [];
+          if (d.pending) problems.push('"pending": true is still set');
+          for (const kind of ['sa', 'tur']) {
+            for (const sec of ['oc', 'yd', 'eh', 'cm']) {
+              const list = d[kind] && d[kind][sec];
+              if (!Array.isArray(list) || list.length === 0) problems.push(`${kind}.${sec} has 0 topics`);
+              else console.log(`${kind}.${sec}: ${list.length} topics, simanim ${list[0].from}-${list[list.length - 1].to}, e.g. ${list[0].t} (${list[0].from}-${list[0].to})`);
+            }
+          }
+          console.log('turFallback (Tur sections using the Shulchan Aruch ranges):', JSON.stringify(d.turFallback));
+          if (problems.length) {
+            console.error('::error::halachaTopics.json is not usable:\n  ' + problems.join('\n  '));
+            console.error('Top-level keys:', Object.keys(d).join(', '));
+            console.error(JSON.stringify(d, null, 1).slice(0, 4000));
+            process.exit(1);
+          }
+          NODE
+
+      - name: Build the sample library (the self-test reads it)
+        run: npm run db:sample
+
+      - name: Self-test with the real data
+        run: node scripts/selftest.js
+
+      - name: Commit and push to main
+        run: |
+          if git diff --quiet -- shared/halachaTopics.json; then
+            echo "shared/halachaTopics.json is unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add shared/halachaTopics.json
+          git commit -m "Populate halachaTopics.json from Sefaria"
+          git push origin HEAD:main
