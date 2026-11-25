@@ -85,22 +85,53 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Rename APK
+      - name: Collect signed APK
         id: apk
         run: |
-          src="android/app/build/outputs/apk/release/app-release.apk"
-          test -f "$src"
+          # Only the Gradle `release` output is accepted; an unsigned / unaligned file can never be picked up.
+          dir="android/app/build/outputs/apk/release"
+          ls -l "$dir"
+          src="$dir/app-release.apk"
+          if [ ! -f "$src" ]; then
+            echo "::error::$src not found (found: $(ls "$dir"/*.apk 2>/dev/null | tr '\n' ' '))"
+            exit 1
+          fi
           name="kodeshRead-$(git rev-parse --short HEAD).apk"
-          mkdir -p dist-apk
+          rm -rf dist-apk && mkdir -p dist-apk
           cp "$src" "dist-apk/$name"
+          # The release asset is a byte-identical copy of the artifact file.
+          cp "dist-apk/$name" dist-apk/kodeshRead-latest.apk
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          ls -lh dist-apk
+          ls -l dist-apk
+
+      - name: Verify APK (signature, alignment, size, SHA-256)
+        run: |
+          set -euo pipefail
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          echo "build-tools: $bt"
+          for f in dist-apk/*.apk; do
+            echo "::group::$f"
+            echo "size: $(stat -c %s "$f") bytes"
+            sha256sum "$f"
+            case "$f" in *unsigned*) echo "::error::unsigned APK: $f"; exit 1;; esac
+            "$bt/zipalign" -c -v 4 "$f" | tail -n 3
+            "$bt/apksigner" verify --verbose --print-certs "$f" | tee "$RUNNER_TEMP/apksigner.txt"
+            grep -Eq 'Verified using v(2|3)[^:]*: true' "$RUNNER_TEMP/apksigner.txt" \
+              || { echo "::error::$f has no valid v2/v3 signature"; exit 1; }
+            echo "::endgroup::"
+          done
+          test "$(sha256sum < dist-apk/${{ steps.apk.outputs.name }})" = "$(sha256sum < dist-apk/kodeshRead-latest.apk)"
+          sha256sum dist-apk/*.apk > dist-apk/SHA256SUMS.txt
+          cat dist-apk/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.apk.outputs.name }}
-          path: dist-apk/${{ steps.apk.outputs.name }}
+          path: |
+            dist-apk/${{ steps.apk.outputs.name }}
+            dist-apk/SHA256SUMS.txt
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
 
       - name: Publish app-latest release
@@ -110,12 +141,39 @@ jobs:
           APK: ${{ steps.apk.outputs.name }}
           SIGNED: ${{ steps.keystore.outputs.signed }}
         run: |
-          cp "dist-apk/$APK" dist-apk/kodeshRead-latest.apk
+          set -euo pipefail
+          # Re-verify the exact files right before they are uploaded.
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          for f in "dist-apk/$APK" dist-apk/kodeshRead-latest.apk; do
+            "$bt/apksigner" verify --verbose "$f"
+            echo "$f: $(stat -c %s "$f") bytes, sha256 $(sha256sum "$f" | cut -d' ' -f1)"
+          done
           if [ "$SIGNED" = "true" ]; then sign="signed with the release keystore"; else sign="signed with the debug keystore"; fi
           notes="Android APK (arm64-v8a) built from $GITHUB_SHA, $sign. Install: download \`kodeshRead-latest.apk\` on the phone and open it."
-          gh release delete app-latest --cleanup-tag --yes || true
-          gh release create app-latest "dist-apk/$APK" dist-apk/kodeshRead-latest.apk \
-            --target "$GITHUB_SHA" --title "kodeshRead app (latest build)" --notes "$notes" --latest=false
+          # Move the tag to this commit (create it if missing), then create / update the release in place.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/app-latest" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/app-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/app-latest -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          if gh release view app-latest >/dev/null 2>&1; then
+            gh release edit app-latest --title "kodeshRead app (latest build)" --notes "$notes" --latest=false
+            # Drop stale assets (e.g. APKs of older commits) so only this build remains.
+            gh release view app-latest --json assets -q '.assets[].name' | while read -r n; do
+              gh release delete-asset app-latest "$n" --yes
+            done
+          else
+            gh release create app-latest --target "$GITHUB_SHA" --title "kodeshRead app (latest build)" --notes "$notes" --latest=false
+          fi
+          gh release upload app-latest "dist-apk/$APK" dist-apk/kodeshRead-latest.apk dist-apk/SHA256SUMS.txt --clobber
+          # Download what was published and compare with the verified file.
+          rm -rf release-check && mkdir release-check
+          gh release download app-latest --pattern '*.apk' --dir release-check
+          for f in release-check/*.apk; do
+            "$bt/apksigner" verify --verbose "$f"
+            test "$(sha256sum < "$f")" = "$(sha256sum < "dist-apk/$APK")" || { echo "::error::$f differs from the verified APK"; exit 1; }
+          done
+          echo "Release assets match the verified APK."
 
       - name: Summary
         run: |
