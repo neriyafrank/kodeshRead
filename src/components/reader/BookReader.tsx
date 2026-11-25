@@ -105,9 +105,11 @@ interface Props {
   /** Reader-tools row toggle, shown at the end of the breadcrumb bar (the breadcrumb itself opens the TOC). */
   toolsOpen?: boolean;
   onToggleTools?: () => void;
+  /** The top chrome auto-hid on scroll: the screen folds the tools bar too, so it is never orphaned at the top. */
+  onChromeHidden?: () => void;
 }
 
-export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools }: Props) {
+export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, onChromeHidden }: Props) {
   const { adapter } = useLibrary();
   const palette = useAppTheme();
   const fontSize = useSettings((s) => s.fontSize);
@@ -182,10 +184,14 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools }:
   const headerVisible = useRef(true);
   const lastY = useRef(0);
   const settleUntil = useRef(0);
+  const chromeHiddenRef = useRef(onChromeHidden);
+  chromeHiddenRef.current = onChromeHidden;
   const showHeader = useCallback(
     (show: boolean) => {
       if (headerVisible.current === show) return;
       headerVisible.current = show;
+      // Scrolling down hides the breadcrumb row: the open tools bar folds with it (one unified collapsible chrome).
+      if (!show) chromeHiddenRef.current?.();
       Animated.timing(headerY, { toValue: show ? 0 : -BREADCRUMB_HEIGHT - 2, duration: 180, useNativeDriver: useNative, isInteraction: false }).start();
     },
     [headerY],

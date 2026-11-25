@@ -106,7 +106,7 @@ export default function ReaderWorkspace() {
             />
           ) : null}
           <View style={s.flex}>
-            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} toolsOpen={toolsOpen} onToggleTools={() => setToolsOpen((v) => !v)} />
+            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} toolsOpen={toolsOpen} onToggleTools={() => setToolsOpen((v) => !v)} onChromeHidden={() => setToolsOpen(false)} />
           </View>
         </View>
       ) : (

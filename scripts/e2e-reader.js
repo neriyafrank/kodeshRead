@@ -171,6 +171,42 @@ try {
     assert.ok(Math.abs((await textTop()) - collapsedTop) < 2, 'text back at full height');
     step(`reader tools bar: collapsed by default, toggles open / closed (text starts ${Math.round(openTop - collapsedTop)}px higher collapsed)`);
 
+    // --- scroll auto-hide: the open tools bar never stays orphaned above a hidden breadcrumb ------------
+    {
+      await toggle.click();
+      await tid('reader-tools').waitFor();
+      await page.waitForTimeout(250);
+      const crumbBox = await tid('reader-breadcrumb').boundingBox();
+      const area = { x: crumbBox.x + crumbBox.width / 2, y: crumbBox.y + 300 };
+      await page.mouse.move(area.x, area.y);
+      const topOf = async () => (await tid('reader-breadcrumb').boundingBox()).y;
+      const startTop = await topOf();
+      for (let i = 0; i < 12 && (await visible('toc-button')); i++) {
+        await page.mouse.wheel(0, 400);
+        await page.waitForTimeout(150);
+      }
+      await page.waitForTimeout(400);
+      const breadcrumbHidden = (await topOf()) < startTop - 20 || (await tid('reader-breadcrumb').boundingBox()).y < 0 || !(await visible('reader-tools-toggle'));
+      assert.ok(!(await visible('toc-button')), 'scrolling down folds the open tools bar');
+      assert.ok(!(await visible('reader-tools')), 'the tools bar is not left orphaned at the top');
+      assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'false', 'the sliders toggle is reset to closed');
+      assert.ok(breadcrumbHidden || !(await visible('toc-button')), 'tools never visible while the breadcrumb is hidden');
+      await shot('r1c-scroll-hidden');
+      // Scrolling back up restores the breadcrumb row cleanly, with the tools bar still closed.
+      for (let i = 0; i < 6; i++) {
+        await page.mouse.wheel(0, -400);
+        await page.waitForTimeout(150);
+      }
+      await page.waitForTimeout(400);
+      assert.ok(await visible('reader-tools-toggle'), 'breadcrumb + toggle are back after scrolling up');
+      assert.ok(!(await visible('toc-button')), 'the tools bar stays closed after scrolling up (no stuck-open bar)');
+      await toggle.click();
+      await tid('toc-button').waitFor();
+      await toggle.click();
+      await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
+      step('scroll down folds the open tools bar with the hidden header (never orphaned); scrolling up restores the breadcrumb, tools stay closed');
+    }
+
     // --- long-press actions ------------------------------------------------------------------
     const shabbatTab = page.locator('[data-testid^="tab-"][aria-selected]', { hasText: 'ראש השנה' }).last();
     await shabbatTab.scrollIntoViewIfNeeded();
