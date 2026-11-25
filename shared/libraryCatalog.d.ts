@@ -66,6 +66,8 @@ export interface LibraryCatalog {
   bookTitle(id: number): string;
   bookPath(id: number): string;
   bookIdsOf(node: CatalogNode): number[];
+  /** JSON-safe snapshot of the derived catalog (shared/catalogCache.js). */
+  toSnapshot(): unknown;
 }
 
 export interface CatalogInput {
@@ -75,6 +77,8 @@ export interface CatalogInput {
 
 export function buildLibraryCatalog(data: CatalogInput): LibraryCatalog;
 export function buildLibraryCatalogAsync(data: CatalogInput, pause?: () => Promise<void>): Promise<LibraryCatalog>;
+export const CATALOG_VERSION: number;
+export function catalogFromSnapshot(snapshot: unknown): LibraryCatalog;
 export function filterTree(nodes: CatalogNode[], query: string, extra?: (node: CatalogNode) => boolean): CatalogNode[];
 export function titleMatches(query: string, title: string, categoryPath?: string): boolean;
 export function treeBookIds(nodes: CatalogNode[]): number[];

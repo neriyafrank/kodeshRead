@@ -783,6 +783,8 @@ async function main() {
   await scanSafetyTests();
   await homeLayoutTests();
   await marginLetterTests();
+  // 17. Library cold start: persisted catalog snapshot, lazy Quick Jump aliases, cheap startup queries.
+  await coldStartTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -7446,4 +7448,234 @@ async function parallelWorksTests() {
     }
     void roles;
   });
+}
+
+/**
+ * Library cold start (section 17): the catalog snapshot cache (shared/catalogCache.js) restores the real-library
+ * catalog instead of re-pairing it, a changed library (stages core -> core + extended, an import, a deleted book, another
+ * catalog version, a damaged file) is a clean miss, the startup path reads only aggregates / cheap columns, and the
+ * Quick Jump alias index is lazy but identical once built.
+ */
+async function coldStartTests() {
+  const indexPath = path.join(ROOT, 'otzaria_index_only.txt');
+  if (!fs.existsSync(indexPath)) return console.warn('! otzaria_index_only.txt missing; skipping the cold start checks.');
+  const catalogCache = require('../shared/catalogCache');
+  const lc = require('../shared/libraryCatalog');
+  const quickJump = require('../shared/quickJump');
+  const sources = require('../shared/sources');
+  const paths = fs.readFileSync(indexPath, 'utf8').split('\n').filter((l) => l.endsWith('.txt')).map((l) => l.replace(/^\.\//, '').replace(/\.txt$/, ''));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kodesh-cold-'));
+  const open = [];
+  /** A library database holding the given "dir/dir/title" paths, ids shifted by `base`. */
+  const makeDb = async (name, list, base = 0) => {
+    const db = openWritable(path.join(tmp, name));
+    open.push(db);
+    await indexer.ensureSchema(db.w, { kind: 'core' });
+    const cid = new Map();
+    const insCat = db.raw.prepare('INSERT INTO categories (id, parent_id, name, path) VALUES (?, ?, ?, ?)');
+    const insBook = db.raw.prepare('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines) VALUES (?, ?, ?, ?, ?, 10)');
+    const cat = (p) => {
+      if (cid.has(p)) return cid.get(p);
+      const parts = p.split('/');
+      const parent = parts.length > 1 ? cat(parts.slice(0, -1).join('/')) : null;
+      const id = base + cid.size + 1;
+      insCat.run(id, parent, parts[parts.length - 1], p);
+      cid.set(p, id);
+      return id;
+    };
+    db.raw.exec('BEGIN');
+    list.forEach((p, i) => {
+      const parts = p.split('/');
+      const title = parts.pop();
+      insBook.run(base + i + 1, cat(parts.join('/')), title, generateBookAliases(parts, title).join('|'), p + '.txt');
+    });
+    db.raw.exec('COMMIT');
+    return db;
+  };
+  const memStore = () => {
+    const m = { text: null, writes: 0 };
+    return { m, read: async () => m.text, write: async (t) => { m.text = t; m.writes++; } };
+  };
+  /** Records every SQL statement an adapter receives. */
+  const spy = (adapter, log) => ({ all: (sql, params) => (log.push(sql), adapter.all(sql, params)) });
+  const split = Math.floor(paths.length * 0.7);
+  const corePaths = paths.slice(0, split);
+  const extPaths = paths.slice(split);
+  const core = await makeDb('core.db', corePaths);
+  const ext = await makeDb('ext.db', extPaths, sources.EXTENDED_ID_BASE);
+  const coreOnly = () => sources.createRouter([{ name: 'core', adapter: core.read, idBase: 0 }]);
+  const both = () => sources.createRouter([{ name: 'core', adapter: core.read, idBase: 0 }, { name: 'extended', adapter: ext.read, idBase: sources.EXTENDED_ID_BASE }]);
+  const noPause = () => Promise.resolve();
+  const timings = [];
+  const load = (router, store, stages) => catalogCache.loadCatalogCached(router, { stages, store, pause: noPause, onTiming: (t) => timings.push(t) });
+  const same = (a, b) => {
+    assert.deepStrictEqual(a.sections, b.sections);
+    assert.deepStrictEqual(a.commentarySections, b.commentarySections);
+    assert.deepStrictEqual(a.generalCommentaries, b.generalCommentaries);
+    assert.deepStrictEqual(a.bookInfos, b.bookInfos);
+  };
+
+  try {
+    const store = memStore();
+    let coldCatalog;
+    await check('cold start: first launch builds the catalog once and stores a compact snapshot; the next launch restores an identical catalog far faster, without re-pairing', async () => {
+      coldCatalog = await load(coreOnly(), store, 'core=v1|extended=-');
+      assert.strictEqual(timings.at(-1).cache, 'miss');
+      assert.strictEqual(store.m.writes, 1, 'stored after the build');
+      assert.ok(store.m.text.length < 1.5e6, `snapshot is compact (${store.m.text.length} bytes)`);
+      const miss = timings.at(-1);
+      const warm = await load(coreOnly(), store, 'core=v1|extended=-');
+      const hit = timings.at(-1);
+      assert.strictEqual(hit.cache, 'hit');
+      assert.strictEqual(store.m.writes, 1, 'a hit stores nothing');
+      same(warm, coldCatalog);
+      for (const id of [1, 50, 400, 3000]) {
+        assert.strictEqual(warm.isCommentary(id), coldCatalog.isCommentary(id));
+        assert.strictEqual(warm.roleOf(id), coldCatalog.roleOf(id));
+        assert.deepStrictEqual(warm.commentariesOf(id), coldCatalog.commentariesOf(id));
+      }
+      assert.strictEqual(hit.buildMs, 0);
+      assert.ok(hit.totalMs < 500, `cached catalog loads in <500ms (${hit.totalMs}ms)`);
+      assert.ok(hit.totalMs * 3 < miss.totalMs, `restoring (${hit.totalMs}ms) is much faster than building (${miss.totalMs}ms)`);
+    });
+
+    await check('cold start: the cached path runs only aggregate queries (no alias / full-column reads of thousands of books)', async () => {
+      const log = [];
+      const router = sources.createRouter([{ name: 'core', adapter: spy(core.read, log), idBase: 0 }]);
+      await load(router, store, 'core=v1|extended=-');
+      assert.strictEqual(timings.at(-1).cache, 'hit');
+      assert.ok(log.length > 0 && log.length <= 4, `${log.length} startup queries`);
+      for (const q of log) assert.ok(/COUNT\(\*\)/.test(q) && !/aliases/.test(q), q);
+    });
+
+    await check('cold start: installing the expansion (core -> core + extended) invalidates the cache, rebuilds the complete catalog and caches that', async () => {
+      const full = await load(both(), store, 'core=v1|extended=v1');
+      assert.strictEqual(timings.at(-1).cache, 'miss');
+      assert.strictEqual(full.bookCount, paths.length);
+      assert.ok(full.bookCount > coldCatalog.bookCount);
+      const again = await load(both(), store, 'core=v1|extended=v1');
+      assert.strictEqual(timings.at(-1).cache, 'hit');
+      same(again, full);
+      // Same files, other stage versions (a new core build): also a miss.
+      await load(both(), store, 'core=v2|extended=v1');
+      assert.strictEqual(timings.at(-1).cache, 'miss');
+      // Removing the expansion goes back to a miss (the stored snapshot is the full one), not to the stale full catalog.
+      const back = await load(coreOnly(), store, 'core=v1|extended=-');
+      assert.strictEqual(timings.at(-1).cache, 'miss');
+      assert.strictEqual(back.bookCount, corePaths.length);
+    });
+
+    await check('cold start: personal imports / deleted books change the key even with unchanged stage versions', async () => {
+      const userDb = await makeDb('user.db', ['הספרים שלי/שיעורים/מכתב'], sources.USER_ID_BASE);
+      const router = (u) => sources.createRouter([{ name: 'core', adapter: core.read, idBase: 0 }, { name: 'user', adapter: u.read, idBase: sources.USER_ID_BASE, categoryRoot: sources.USER_ROOT_NAME }]);
+      await load(router(userDb), store, 's');
+      assert.strictEqual(timings.at(-1).cache, 'miss');
+      await load(router(userDb), store, 's');
+      assert.strictEqual(timings.at(-1).cache, 'hit');
+      userDb.raw.prepare('INSERT INTO books (id, category_id, title, aliases, file_path, total_lines) SELECT ?, category_id, ?, ?, ?, 3 FROM books LIMIT 1').run(sources.USER_ID_BASE + 2, 'מכתב ב', 'מכתב ב', 'u2.txt');
+      await load(router(userDb), store, 's');
+      assert.strictEqual(timings.at(-1).cache, 'miss', 'an added personal book');
+      await load(router(userDb), store, 's');
+      assert.strictEqual(timings.at(-1).cache, 'hit');
+      userDb.raw.prepare('DELETE FROM books WHERE id = ?').run(sources.USER_ID_BASE + 2);
+      await load(router(userDb), store, 's');
+      assert.strictEqual(timings.at(-1).cache, 'miss', 'a deleted personal book');
+    });
+
+    await check('cold start: a damaged, truncated, foreign or other-version cache is a clean miss, never an error or a wrong catalog', async () => {
+      const key = await catalogCache.catalogCacheKey(coreOnly(), 'k');
+      const fresh = await lc.buildLibraryCatalogAsync(await sources.loadCatalog(coreOnly()), noPause);
+      const good = JSON.stringify({ format: catalogCache.CACHE_FORMAT, key, snapshot: fresh.toSnapshot() });
+      const bad = [
+        '',
+        'not json',
+        good.slice(0, good.length >> 1),
+        JSON.stringify({ format: 999, key, snapshot: fresh.toSnapshot() }),
+        JSON.stringify({ format: catalogCache.CACHE_FORMAT, key: key + 'x', snapshot: fresh.toSnapshot() }),
+        JSON.stringify({ format: catalogCache.CACHE_FORMAT, key, snapshot: { ...fresh.toSnapshot(), v: lc.CATALOG_VERSION + 1 } }),
+        JSON.stringify({ format: catalogCache.CACHE_FORMAT, key, snapshot: { v: lc.CATALOG_VERSION } }),
+      ];
+      for (const text of bad) {
+        const st = { read: async () => text, write: async () => undefined };
+        assert.strictEqual(await catalogCache.readCatalogCache(st, key), null, text.slice(0, 40));
+        const c = await load(coreOnly(), { read: async () => text, write: async () => undefined }, 'k');
+        assert.strictEqual(c.bookCount, corePaths.length);
+        assert.strictEqual(timings.at(-1).cache, 'miss');
+      }
+      assert.ok(await catalogCache.readCatalogCache({ read: async () => good, write: async () => undefined }, key), 'the intact snapshot restores');
+      // A store that throws on read / write never breaks the load.
+      const broken = { read: async () => { throw new Error('io'); }, write: async () => { throw new Error('io'); } };
+      assert.strictEqual((await load(coreOnly(), broken, 'k')).bookCount, corePaths.length);
+      // Without a store (web preview) the catalog is built as before.
+      assert.strictEqual((await load(coreOnly(), null, 'k')).bookCount, corePaths.length);
+      assert.strictEqual(timings.at(-1).cache, 'off');
+    });
+
+    await check('cold start: the cache write is handed to the scheduler (deferred past the first paint), after the catalog is returned', async () => {
+      const st = memStore();
+      const queued = [];
+      const c = await catalogCache.loadCatalogCached(coreOnly(), { stages: 'z', store: st, pause: noPause, schedule: (fn) => queued.push(fn) });
+      assert.strictEqual(c.bookCount, corePaths.length);
+      assert.strictEqual(st.m.writes, 0, 'nothing written before the scheduler runs it');
+      assert.strictEqual(queued.length, 1);
+      await queued[0]();
+      assert.strictEqual(st.m.writes, 1);
+    });
+
+    await check('cold start: Quick Jump book index loads cheap columns only (no alias text), builds aliases lazily, and equals the eager index', async () => {
+      const log = [];
+      const router = sources.createRouter([{ name: 'core', adapter: spy(core.read, log), idBase: 0 }]);
+      const t0 = Date.now();
+      const lazy = await quickJump.loadBookIndex(router, { lazyAliases: true });
+      const ms = Date.now() - t0;
+      assert.ok(log.every((q) => !/aliases/.test(q)), 'no alias column before the first render');
+      assert.strictEqual(lazy.books.size, corePaths.length);
+      assert.strictEqual(lazy.aliasesReady, false);
+      assert.strictEqual(lazy.byAlias.size, 0);
+      assert.ok(ms < 1000, `book index (cheap columns) in ${ms}ms`);
+      const eager = await quickJump.loadBookIndex(coreOnly());
+      assert.strictEqual(eager.aliasesReady, true);
+      let slices = 0;
+      await lazy.ensureAliases(async () => { slices++; });
+      assert.ok(slices > 0, 'cooperative: yields while building');
+      assert.strictEqual(lazy.aliasesReady, true);
+      assert.strictEqual(lazy.byAlias.size, eager.byAlias.size);
+      assert.strictEqual(lazy.maxAliasTokens, eager.maxAliasTokens);
+      assert.deepStrictEqual([...lazy.byAlias.keys()], [...eager.byAlias.keys()]);
+      for (const [a, list] of eager.byAlias) assert.deepStrictEqual(lazy.byAlias.get(a).map((x) => [x.book.id, x.exactTitle]), list.map((x) => [x.book.id, x.exactTitle]), a);
+      // resolveReference waits for the lazy aliases on first use.
+      const fresh = await quickJump.loadBookIndex(coreOnly(), { lazyAliases: true });
+      const title = corePaths[0].split('/').pop();
+      const res = await quickJump.resolveReference(coreOnly(), fresh, title);
+      assert.ok(fresh.aliasesReady && res.some((r) => r.bookTitle === title), 'resolves a book title through a lazy index');
+    });
+
+    await check('cold start: opening an up-to-date database runs no migration DDL (ensureSchema)', async () => {
+      const execs = [];
+      const w = { ...core.w, exec: (sql) => (execs.push(sql), core.w.exec(sql)) };
+      assert.strictEqual(await indexer.ensureSchema(w, { kind: 'core' }), false);
+      assert.deepStrictEqual(execs, []);
+      // An older database (version row behind) still migrates.
+      core.raw.prepare("UPDATE meta SET value = '2' WHERE key = 'script_version'").run();
+      await indexer.ensureSchema(w, { kind: 'core' });
+      assert.ok(execs.length > 0, 'old schema version migrates');
+      core.raw.prepare("UPDATE meta SET value = ? WHERE key = 'script_version'").run(String(indexer.SCHEMA_VERSION));
+    });
+
+    await check('cold start: startup wiring - cached catalog, lazy aliases after first paint, parallel opens, fast read pragmas, perf logs, no per-item localeCompare', () => {
+      const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+      const hook = src('src/db/useLibraryCatalog.ts');
+      assert.ok(hook.includes('loadCatalogCached') && hook.includes('catalogStore') && hook.includes('runAfterRender') && hook.includes("'library-load'"), 'catalog hook uses the cache, defers the write, logs timings');
+      assert.ok(/dbOpen[\s\S]*buildTree[\s\S]*total/.test(hook), '[perf] library-load logs dbOpen / buildTree / total');
+      const ctx = src('src/db/LibraryContext.tsx');
+      assert.ok(ctx.includes('lazyAliases: true') && ctx.includes('ensureAliases') && ctx.includes('runAfterRender'), 'alias index is built after the first paint');
+      assert.ok(/Promise\.all\(\[openCoreDatabase\(\), openUserDatabase\(\), openExtendedDatabase\(\)/.test(ctx), 'databases open in parallel');
+      const lib = src('src/db/library.ts');
+      assert.ok(lib.includes('cache_size') && lib.includes('temp_store = MEMORY') && !/integrity_check|quick_check/.test(lib), 'fast read pragmas, no startup integrity check');
+      for (const f of ['shared/libraryCatalog.js', 'shared/catalogCache.js', 'shared/sources.js', 'shared/quickJump.js', 'src/db/useLibraryCatalog.ts', 'src/db/LibraryContext.tsx']) assert.ok(!/\.localeCompare\(/.test(src(f)), `${f}: no localeCompare on the startup path (one shared Intl.Collator)`);
+    });
+  } finally {
+    for (const db of open) try { db.raw.close(); } catch {}
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }

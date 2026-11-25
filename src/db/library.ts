@@ -139,7 +139,9 @@ async function migrateLegacyDb(): Promise<void> {
 
 async function openReadOnly(name: string): Promise<SQLiteDatabase> {
   const db = await openDatabaseAsync(name);
-  await db.execAsync('PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;');
+  // Read-only fast path: no consistency checks at startup, 16MB page cache per connection (the
+  // catalog and book index scan a few thousand rows once), temp tables in memory.
+  await db.execAsync('PRAGMA query_only = ON; PRAGMA temp_store = MEMORY; PRAGMA cache_size = -16384;');
   return db;
 }
 

@@ -319,24 +319,16 @@ function splitBooks(data) {
   return { cats, infos, core: infos.filter((i) => !i.personal), personal: infos.filter((i) => i.personal) };
 }
 
-function assembleCatalog(split, pairResults) {
-  const { infos, core, personal } = split;
-  const byId = new Map(infos.map((i) => [i.id, i]));
+/**
+ * Bumped whenever the catalog's DERIVED output could change for the same books (pairing, roles, placement,
+ * ranking rules): a cached snapshot (shared/catalogCache.js) of another version is ignored and rebuilt.
+ */
+const CATALOG_VERSION = 1;
 
-  // --- canonical roles (per database: the importer pairs within one) ---
-  // shared/bookRoles.js: a commentary / targum only when explicitly matched to its target work;
-  // parallel-family members (טור / שו"ע, משנה / בבלי, חומש / מדרש רבה ...) are always standalone.
-  const commToBase = new Map(); // commentary / targum id -> directly commented book id
-  const generalIds = new Set();
-  const roles = new Map();
-  const members = new Map();
-  for (const [gi, group] of [core, personal].entries()) {
-    const r = bookRoles.classifyBooks(group, pairResults[gi]);
-    for (const [id, role] of r.roles) roles.set(id, role);
-    for (const [id, base] of r.baseOf) commToBase.set(id, base);
-    for (const id of r.general) generalIds.add(id);
-    for (const [id, m] of r.members) members.set(id, m);
-  }
+/** Everything cheap that follows from the classified books (no sorting, no pairing). */
+function derive(state) {
+  const { infos, commToBase, generalIds, roles } = state;
+  const byId = new Map(infos.map((i) => [i.id, i]));
   const isCommentarySet = new Set([...commToBase.keys(), ...generalIds]);
   const roleOf = (id) => roles.get(id) || (byId.has(id) ? bookRoles.ROLES.BASE : null);
 
@@ -362,6 +354,108 @@ function assembleCatalog(split, pairResults) {
       commsOfBase.get(root).push(info);
     }
   }
+  return { byId, isCommentarySet, roleOf, rootBase, commsOfBase, general };
+}
+
+/** The two canonical trees (the expensive part: placement + collation sorts). Sets state.sections / commentarySections. */
+function buildTrees(state, d) {
+  const { infos, members } = state;
+  const { isCommentarySet, roleOf, commsOfBase, general } = d;
+  const bases = infos.filter((i) => !isCommentarySet.has(i.id));
+  function makeTree(include) {
+    const root = { children: new Map() };
+    const add = (placed, leaf) => {
+      let node = root;
+      let key = '';
+      for (const l of placed.levels) {
+        key += '/' + l.name;
+        let next = node.children.get(l.name);
+        if (!next) {
+          next = { id: 'sec:' + key, kind: 'section', name: l.name, order: l.order, children: new Map() };
+          node.children.set(l.name, next);
+        }
+        node = next;
+      }
+      node.children.set('#' + leaf.id, leaf);
+    };
+    for (const b of bases) {
+      const cc = (commsOfBase.get(b.id) || []).length;
+      if (!include(b, cc)) continue;
+      const p = placeBook(b, members.get(b.id));
+      add(p, bookLeaf(b, p.order, cc, roleOf(b.id), members.get(b.id)));
+    }
+    return finalize([...root.children.values()]);
+  }
+  /** Maps -> sorted arrays, counts, empty sections dropped. */
+  function finalize(nodes) {
+    const out = [];
+    for (const n of nodes) {
+      if (n.kind === 'section') {
+        n.children = finalize([...n.children.values()]);
+        n.count = n.children.reduce((s, c) => s + c.count, 0);
+        if (!n.count) continue;
+      }
+      out.push(n);
+    }
+    out.sort((a, b) => a.order - b.order || compareNames(a.name, b.name));
+    return out;
+  }
+
+  state.sections = makeTree(() => true);
+  state.commentarySections = makeTree((b, cc) => cc > 0);
+  if (general.length) {
+    const kids = general
+      .slice()
+      .sort((a, b) => compareNames(a.title, b.title))
+      .map((g) => generalLeaf(g, roleOf(g.id)));
+    state.commentarySections.push(generalSection(kids));
+  }
+}
+
+const bookLeaf = (b, order, cc, role, m) => ({
+  id: 'book:' + b.id,
+  kind: 'book',
+  name: b.title,
+  title: b.title,
+  bookId: b.id,
+  order,
+  commentaryCount: cc,
+  count: 1,
+  categoryPath: b.categoryPath,
+  role,
+  parallelFamily: m ? m.family : null,
+});
+const generalLeaf = (g, role) => ({ id: 'comm:' + g.id, kind: 'commentary', name: g.title, title: g.title, bookId: g.id, order: 0, count: 1, categoryPath: g.categoryPath, role });
+const generalSection = (kids) => ({ id: 'sec:' + GENERAL_COMMENTARIES, kind: 'section', name: GENERAL_COMMENTARIES, order: 10000, children: kids, count: kids.length });
+
+function assembleCatalog(split, pairResults) {
+  const { infos, core, personal } = split;
+
+  // --- canonical roles (per database: the importer pairs within one) ---
+  // shared/bookRoles.js: a commentary / targum only when explicitly matched to its target work;
+  // parallel-family members (טור / שו"ע, משנה / בבלי, חומש / מדרש רבה ...) are always standalone.
+  const commToBase = new Map(); // commentary / targum id -> directly commented book id
+  const generalIds = new Set();
+  const roles = new Map();
+  const members = new Map();
+  for (const [gi, group] of [core, personal].entries()) {
+    const r = bookRoles.classifyBooks(group, pairResults[gi]);
+    for (const [id, role] of r.roles) roles.set(id, role);
+    for (const [id, base] of r.baseOf) commToBase.set(id, base);
+    for (const id of r.general) generalIds.add(id);
+    for (const [id, m] of r.members) members.set(id, m);
+  }
+  const state = { infos, commToBase, generalIds, roles, members, sections: [], commentarySections: [] };
+  const d = derive(state);
+  buildTrees(state, d);
+  return finish(state, d);
+}
+
+/** The public catalog object over a fully analysed `state` (fresh build or restored snapshot). */
+function finish(state, d) {
+  const { infos, commToBase, members } = state;
+  const { byId, isCommentarySet, roleOf, rootBase, commsOfBase, general } = d;
+  const { sections, commentarySections } = state;
 
   const rankedCache = new Map();
   const toItem = (i) => ({ bookId: i.id, bookTitle: i.title, categoryPath: i.categoryPath, linkType: roleOf(i.id) === 'targum' ? 'targum' : 'commentary' });
@@ -386,70 +480,6 @@ function assembleCatalog(split, pairResults) {
       }));
     if (!pinned) rankedCache.set(baseId, ranked);
     return ranked;
-  }
-
-  // --- base tree ---
-  const bases = infos.filter((i) => !isCommentarySet.has(i.id));
-  function makeTree(include) {
-    const root = { children: new Map() };
-    const add = (placed, leaf) => {
-      let node = root;
-      let key = '';
-      for (const l of placed.levels) {
-        key += '/' + l.name;
-        let next = node.children.get(l.name);
-        if (!next) {
-          next = { id: 'sec:' + key, kind: 'section', name: l.name, order: l.order, children: new Map() };
-          node.children.set(l.name, next);
-        }
-        node = next;
-      }
-      node.children.set('#' + leaf.id, leaf);
-    };
-    for (const b of bases) {
-      const cc = (commsOfBase.get(b.id) || []).length;
-      if (!include(b, cc)) continue;
-      const p = placeBook(b, members.get(b.id));
-      const m = members.get(b.id);
-      add(p, {
-        id: 'book:' + b.id,
-        kind: 'book',
-        name: b.title,
-        title: b.title,
-        bookId: b.id,
-        order: p.order,
-        commentaryCount: cc,
-        count: 1,
-        categoryPath: b.categoryPath,
-        role: roleOf(b.id),
-        parallelFamily: m ? m.family : null,
-      });
-    }
-    return finalize([...root.children.values()]);
-  }
-  /** Maps -> sorted arrays, counts, empty sections dropped. */
-  function finalize(nodes) {
-    const out = [];
-    for (const n of nodes) {
-      if (n.kind === 'section') {
-        n.children = finalize([...n.children.values()]);
-        n.count = n.children.reduce((s, c) => s + c.count, 0);
-        if (!n.count) continue;
-      }
-      out.push(n);
-    }
-    out.sort((a, b) => a.order - b.order || compareNames(a.name, b.name));
-    return out;
-  }
-
-  const sections = makeTree(() => true);
-  const commentarySections = makeTree((b, cc) => cc > 0);
-  if (general.length) {
-    const kids = general
-      .slice()
-      .sort((a, b) => compareNames(a.title, b.title))
-      .map((g) => ({ id: 'comm:' + g.id, kind: 'commentary', name: g.title, title: g.title, bookId: g.id, order: 0, count: 1, categoryPath: g.categoryPath, role: roleOf(g.id) }));
-    commentarySections.push({ id: 'sec:' + GENERAL_COMMENTARIES, kind: 'section', name: GENERAL_COMMENTARIES, order: 10000, children: kids, count: kids.length });
   }
 
   const nodeBooks = (node, out) => {
@@ -484,7 +514,73 @@ function assembleCatalog(split, pairResults) {
     bookPath: (id) => (byId.has(id) ? byId.get(id).categoryPath : ''),
     /** Book ids of a section / book node (commentaries excluded from base sections). */
     bookIdsOf: (node) => nodeBooks(node, []),
+    /** JSON-safe form of everything this catalog derived (see catalogFromSnapshot): restoring skips pairing, roles and the sorted trees. */
+    toSnapshot: () => catalogSnapshot(state),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot (persisted by shared/catalogCache.js so a later launch skips pairing + tree building)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compact JSON form: folder paths are interned, a book leaf is ['b', id, order, commentaryCount] (title, folder, role and
+ * parallel family are looked up by id), a "מפרשים כלליים" leaf is ['c', id]; sections keep their ids / names / counts.
+ */
+function catalogSnapshot(state) {
+  const paths = [];
+  const pathIdx = new Map();
+  const pi = (p) => {
+    if (!pathIdx.has(p)) {
+      pathIdx.set(p, paths.length);
+      paths.push(p);
+    }
+    return pathIdx.get(p);
+  };
+  const tree = (nodes) =>
+    nodes.map((n) =>
+      n.kind === 'section' ? { id: n.id, name: n.name, order: n.order, count: n.count, c: tree(n.children) } : n.kind === 'book' ? ['b', n.bookId, n.order, n.commentaryCount] : ['c', n.bookId],
+    );
+  return {
+    v: CATALOG_VERSION,
+    infos: state.infos.map((i) => [i.id, i.title, pi(i.categoryPath), i.personal ? 1 : 0]),
+    paths,
+    commToBase: [...state.commToBase],
+    generalIds: [...state.generalIds],
+    roles: [...state.roles],
+    members: [...state.members],
+    sections: tree(state.sections),
+    commentarySections: tree(state.commentarySections),
+  };
+}
+
+/** Rebuilds the catalog from catalogSnapshot() output without pairing, classifying or sorting. Throws on a snapshot of another version / shape. */
+function catalogFromSnapshot(snap) {
+  if (!snap || snap.v !== CATALOG_VERSION || !Array.isArray(snap.infos) || !Array.isArray(snap.paths)) throw new Error('catalog snapshot has another version');
+  const infos = snap.infos.map(([id, title, p, personal]) => {
+    const categoryPath = snap.paths[p];
+    return { id, title, categoryPath, dirs: categoryPath.split('/').filter(Boolean), personal: !!personal, aliases: [] };
+  });
+  const state = {
+    infos,
+    commToBase: new Map(snap.commToBase),
+    generalIds: new Set(snap.generalIds),
+    roles: new Map(snap.roles),
+    members: new Map(snap.members),
+    sections: [],
+    commentarySections: [],
+  };
+  const d = derive(state);
+  const tree = (list) =>
+    list.map((n) => {
+      if (!Array.isArray(n)) return { id: n.id, kind: 'section', name: n.name, order: n.order, children: tree(n.c), count: n.count };
+      const info = d.byId.get(n[1]);
+      if (!info) throw new Error('catalog snapshot names an unknown book');
+      return n[0] === 'b' ? bookLeaf(info, n[2], n[3], d.roleOf(info.id), state.members.get(info.id)) : generalLeaf(info, d.roleOf(info.id));
+    });
+  state.sections = tree(snap.sections);
+  state.commentarySections = tree(snap.commentarySections);
+  return finish(state, d);
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +634,8 @@ function treeBookIds(nodes) {
 module.exports = {
   buildLibraryCatalog,
   buildLibraryCatalogAsync,
+  catalogFromSnapshot,
+  CATALOG_VERSION,
   filterTree,
   titleMatches,
   treeBookIds,

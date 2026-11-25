@@ -32,35 +32,70 @@ const MAX_BOOK_CANDIDATES = 5;
  * Load every book's title + aliases once and index them in memory.
  * `db` may be a router: the books of every library database are indexed together
  * (their ids never collide), core books first.
+ *
+ * `{ lazyAliases: true }` (the app's cold start): only the `books` map (id -> title / folder / lines, cheap columns, no
+ * alias strings, no normalization) is loaded before the first render. The alias index (`byAlias`, `maxAliasTokens`)
+ * is built later by `index.ensureAliases()` (cooperative, idempotent; `resolveReference` awaits it), so a library of
+ * thousands of books never blocks the Library screen on ~1MB of alias text.
  */
-async function loadBookIndex(db) {
-  const rows = [];
-  for (const s of sourcesOf(db)) {
-    rows.push(
-      ...(await s.adapter.all(
-        `SELECT b.id, b.title, b.aliases, b.total_lines, c.path AS category_path
-         FROM books b LEFT JOIN categories c ON c.id = b.category_id ORDER BY b.id`,
-        [],
-      )),
-    );
-  }
-  const byAlias = new Map();
+async function loadBookIndex(db, opts) {
+  const lazy = !!(opts && opts.lazyAliases);
   const books = new Map();
-  for (const r of rows) {
-    const book = { id: r.id, title: r.title, categoryPath: r.category_path || '', totalLines: r.total_lines };
-    books.set(r.id, book);
-    const titleKey = normalizeHebrew(r.title, { keepPunctuation: false });
-    const aliases = String(r.aliases).split('|').filter(Boolean);
-    if (!aliases.includes(titleKey)) aliases.unshift(titleKey);
-    for (const a of aliases) {
-      const list = byAlias.get(a) || [];
-      list.push({ book, exactTitle: a === titleKey });
-      byAlias.set(a, list);
+  for (const s of sourcesOf(db)) {
+    const rows = await s.adapter.all(
+      `SELECT b.id, b.title, b.total_lines, c.path AS category_path
+       FROM books b LEFT JOIN categories c ON c.id = b.category_id ORDER BY b.id`,
+      [],
+    );
+    for (const r of rows) {
+      books.set(r.id, { id: r.id, title: r.title, categoryPath: r.category_path || '', totalLines: r.total_lines });
+    }
+  }
+  const index = { byAlias: new Map(), books, maxAliasTokens: 1, aliasesReady: false, ensureAliases: null };
+  let building = null;
+  index.ensureAliases = (pause) => {
+    if (index.aliasesReady) return Promise.resolve();
+    if (!building) {
+      building = buildAliasIndex(db, index, pause).then(
+        () => {
+          index.aliasesReady = true;
+        },
+        (e) => {
+          building = null; // retry on the next call
+          throw e;
+        },
+      );
+    }
+    return building;
+  };
+  if (!lazy) await index.ensureAliases();
+  return index;
+}
+
+/** Fills index.byAlias / maxAliasTokens from the aliases column; yields (`pause`) every few hundred books when given. */
+async function buildAliasIndex(db, index, pause) {
+  const byAlias = new Map();
+  let n = 0;
+  for (const s of sourcesOf(db)) {
+    const rows = await s.adapter.all('SELECT id, title, aliases FROM books ORDER BY id', []);
+    for (const r of rows) {
+      const book = index.books.get(r.id);
+      if (!book) continue; // removed since the index was loaded
+      const titleKey = normalizeHebrew(r.title, { keepPunctuation: false });
+      const aliases = String(r.aliases).split('|').filter(Boolean);
+      if (!aliases.includes(titleKey)) aliases.unshift(titleKey);
+      for (const a of aliases) {
+        const list = byAlias.get(a) || [];
+        list.push({ book, exactTitle: a === titleKey });
+        byAlias.set(a, list);
+      }
+      if (pause && ++n % 500 === 0) await pause();
     }
   }
   let maxAliasTokens = 1;
   for (const a of byAlias.keys()) maxAliasTokens = Math.max(maxAliasTokens, a.split(' ').length);
-  return { byAlias, books, maxAliasTokens };
+  index.byAlias = byAlias;
+  index.maxAliasTokens = maxAliasTokens;
 }
 
 function tokenize(input) {
@@ -334,6 +369,8 @@ async function resolveParsha(db, index, hit) {
  * @returns {Promise<Array<{ bookId, bookTitle, categoryPath, path: string[], targetLine, marker, unmatched: string[], preview, complete: boolean, parsha? }>>}
  */
 async function resolveReference(db, index, input, opts) {
+  // The alias index is built lazily after the first render (loadBookIndex { lazyAliases }): wait for it on first use.
+  if (index.ensureAliases && !index.aliasesReady) await index.ensureAliases();
   const hit = torah.parseParshaQuery(rawTokens(input).map((w) => w.tok));
   const [parsha, books] = await Promise.all([hit ? resolveParsha(db, index, hit) : null, resolveBookReference(db, index, input, opts)]);
   if (!parsha) return books;

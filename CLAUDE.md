@@ -228,6 +228,19 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > install run under the job foreground service (`src/services/jobService.ts`). Self-tested (section 12, "cloud download:"), `e2e:library`
 > (drop -> Range resume, pause, airplane mode, resume).
 
+> **Library cold start (< 500 ms target):** the Library screen no longer waits on pairing the whole library. `shared/libraryCatalog.js`
+> splits `assembleCatalog` into analyse (`derive` / `buildTrees`) and `finish`, and `catalog.toSnapshot()` / `catalogFromSnapshot()` persist
+> everything derived (compact JSON, ~0.7 MB for 7,700 books: restore ~12 ms vs ~800 ms desktop / seconds on Hermes). `shared/catalogCache.js`
+> (`loadCatalogCached`, storage injected; app store `src/services/catalogCache.ts` = a file in the cache dir, none on web) keys the snapshot by
+> `CATALOG_VERSION` (bump it when pairing / roles / placement / ranking change) + installed stages (`useLibraryCatalog.stagesOf`) + per-source
+> aggregates (COUNT / MAX id; id / title checksums for the mutable user + starter DBs), so core -> core + extended, imports, deletions and new
+> builds are clean misses; damaged / foreign files are misses too. The write is deferred past the first paint (`src/lib/perf.ts` `runAfterRender`;
+> RN 0.88 has no `InteractionManager`). `loadBookIndex(db, { lazyAliases: true })` loads only id / title / folder / lines before the first render;
+> the Quick Jump alias index (`ensureAliases`, cooperative) is built after the first paint or on first `resolveReference`. `LibraryProvider` opens
+> core / user / extended in parallel, read-only connections set `cache_size` + `temp_store`, `ensureSchema` skips migration DDL when
+> `meta.script_version` is current. `[perf] library-open` / `library-load` (dbOpen, bookIndex, key, cacheRead, query, buildTree, total, cache,
+> sinceStart) / `quickjump-aliases` are logged in dev builds and kept in `globalThis.__KODESHREAD_PERF__`. Self-tested (section 17 `cold start:`).
+
 > **APK on GitHub Actions:** `.github/workflows/build-android-apk.yml` (workflow_dispatch, `publish_release` input) builds the
 > arm64 APK on `ubuntu-latest` without EAS (`db:ensure` -> `expo prebuild` -> `assembleRelease` -> `kodeshRead-<short-sha>.apk`,
 > uploaded as an artifact; with `publish_release` also attached to the non-"latest" `app-latest` release). Optional secrets

@@ -264,7 +264,9 @@ async function ensureSchema(db, opts) {
   const kind = (opts && opts.kind) || 'core';
   const rows = await db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'meta'", []);
   if (rows.length) {
-    await migrateSchema(db);
+    // Cold start: a database created by this schema version needs no migration (no DDL / write lock on every launch).
+    const v = await db.all("SELECT value FROM meta WHERE key = 'script_version'", []).catch(() => []);
+    if (!(v[0] && Number(v[0].value) === SCHEMA_VERSION)) await migrateSchema(db);
     return false;
   }
   const ddl = ((await sqliteHasFts5(db)) ? SCHEMA : SCHEMA.replace(FTS_TABLE_RE, '')) + REF_LINKS_SCHEMA + INGESTION_SCHEMA + BOOK_UNITS_SCHEMA + IMPORT_QUEUE_SCHEMA;

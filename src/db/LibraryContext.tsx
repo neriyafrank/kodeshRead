@@ -9,6 +9,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { loadBookIndex, type BookIndex, type QueryAdapter } from '../../shared/quickJump';
 import { booksScope, hasFts5 } from '../../shared/search';
 import { createRouter, EXTENDED_ID_BASE, USER_ID_BASE, USER_ROOT_NAME, type LibraryRouter, type LibrarySource } from '../../shared/sources';
+import { openTimings, perfLog, runAfterRender } from '../lib/perf';
 import { useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { closeQuietly } from './dbUtils';
@@ -139,7 +140,15 @@ async function buildLibrary(core: Library['core'], user: SQLiteDatabase, starter
   if (userKind === 'user' || userKind === undefined) sources.push({ name: 'user', adapter: toAdapter(user), idBase: USER_ID_BASE, categoryRoot: USER_ROOT_NAME });
   else console.warn(`user library storage returned a "${userKind}" database (web preview); personal books unavailable`);
   const adapter = createRouter(sources);
-  const [bookIndex, fts] = await Promise.all([loadBookIndex(adapter), hasFts5(adapter)]);
+  // Cold start: only the cheap columns (id, title, folder, lines) before the first render; the alias index for Quick Jump
+  // is built after the first paint (publish) or on its first use. The FTS5 probe runs beside it.
+  const timed = async <T,>(p: Promise<T>): Promise<[T, number]> => {
+    const t = Date.now();
+    return [await p, Date.now() - t];
+  };
+  const [[bookIndex, bookIndexMs], [fts, ftsMs]] = await Promise.all([timed(loadBookIndex(adapter, { lazyAliases: true })), timed(hasFts5(adapter))]);
+  openTimings.bookIndex = bookIndexMs;
+  openTimings.fts = ftsMs;
   if (!fts) console.warn('SQLite build has no FTS5 (web preview): full-text search uses a slow LIKE fallback');
   let coreBookCount = 0;
   let userBookCount = 0;
@@ -198,6 +207,14 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
     current.current = lib;
     pruneStaleReferences(lib.bookIndex);
     setState({ status: 'ready', library: lib });
+    // Non-critical, after the first render: the Quick Jump alias index (cooperative, a few hundred books per slice).
+    runAfterRender(() => {
+      const t = Date.now();
+      lib.bookIndex.ensureAliases(() => new Promise<void>((r) => setTimeout(r, 0))).then(
+        () => perfLog('quickjump-aliases', { build: Date.now() - t }),
+        (e) => console.warn('quick jump aliases failed (built on first use)', e),
+      );
+    });
   }, []);
 
   /** Serializes controller operations (no refresh while a core swap is half done). */
@@ -211,9 +228,15 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
     let alive = true;
     (async () => {
       try {
-        const [core, user] = await Promise.all([openCoreDatabase(), openUserDatabase()]);
+        const tOpen = Date.now();
+        // Everything that opens a file starts at once; the expansion is dropped below when there is no (matching) core.
+        const [core, user, extended0] = await Promise.all([openCoreDatabase(), openUserDatabase(), openExtendedDatabase().catch(() => null)]);
         // The expansion pack only works next to a core library of the same build; a stale one is ignored (replaced on update).
-        let extended = core ? await openExtendedDatabase() : null;
+        let extended = extended0;
+        if (!core && extended) {
+          await closeQuietly(extended.db);
+          extended = null;
+        }
         if (extended && extended.info.version !== core?.info.version) {
           await closeQuietly(extended.db);
           extended = null;
@@ -223,7 +246,10 @@ export function LibraryProvider({ fallback, children }: ProviderProps) {
         let starter: SQLiteDatabase | null = null;
         if (!core) starter = await openStarterDatabase().catch((e) => (console.warn('starter library unavailable', e), null));
         else if (starterDbExists()) await deleteStarterDatabase().catch(() => undefined);
+        openTimings.dbOpen = Date.now() - tOpen;
         const lib = await buildLibrary(core, user, starter, ++generation.current, extended);
+        openTimings.total = Date.now() - tOpen;
+        perfLog('library-open', { dbOpen: openTimings.dbOpen, bookIndex: openTimings.bookIndex, fts: openTimings.fts, total: openTimings.total, books: String(lib.bookIndex.books.size) });
         if (alive) publish(lib);
       } catch (e) {
         console.error(e);

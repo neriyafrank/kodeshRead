@@ -15,6 +15,10 @@ export interface BookIndex {
   byAlias: Map<string, { book: IndexedBook; exactTitle: boolean }[]>;
   books: Map<number, IndexedBook>;
   maxAliasTokens: number;
+  /** false until `ensureAliases()` finished (only with `loadBookIndex(db, { lazyAliases: true })`); byAlias is empty before. */
+  aliasesReady: boolean;
+  /** Builds `byAlias` / `maxAliasTokens` (idempotent); `pause` is awaited every few hundred books so the UI stays live. */
+  ensureAliases(pause?: () => Promise<void>): Promise<void>;
 }
 
 export interface JumpResult {
@@ -72,7 +76,7 @@ export interface LocationToken {
   alt?: string;
 }
 
-export function loadBookIndex(db: LibraryDb): Promise<BookIndex>;
+export function loadBookIndex(db: LibraryDb, opts?: { lazyAliases?: boolean }): Promise<BookIndex>;
 export function resolveReference(db: LibraryDb, index: BookIndex, input: string, opts?: { limit?: number }): Promise<JumpResult[]>;
 export function tokenize(input: string): string[];
 export function rawTokens(input: string): RawToken[];
