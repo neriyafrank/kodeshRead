@@ -15,6 +15,8 @@ const { normalizeHebrew, extractRefKey, hebrewNumeralToInt } = require('./hebrew
 const { intToHebrewNumeral } = require('./hebrewTorahDict');
 const DATA = require('./halachaTopics.json');
 let CURRENT = DATA;
+/** e2e hook: `globalThis.__KODESHREAD_HALACHA_TOPICS__` replaces the bundled data (like the other __KODESHREAD_*__ test hooks). */
+const active = () => globalThis.__KODESHREAD_HALACHA_TOPICS__ || CURRENT;
 /** Test hook: swap the active topic data (null restores the bundled JSON). Returns the previous data. */
 function setTopicData(d) {
   const prev = CURRENT;
@@ -35,7 +37,7 @@ const SECTION_ALIASES = {
 };
 const SECTION_LABEL = { oc: 'אורח חיים', yd: 'יורה דעה', eh: 'אבן העזר', cm: 'חושן משפט' };
 
-const hasData = (data) => ((data = data || CURRENT), !!data) && !data.pending && SECTION_KEYS.every((k) => data.sa && data.sa[k] && data.sa[k].length) && SECTION_KEYS.every((k) => data.tur && data.tur[k] && data.tur[k].length);
+const hasData = (data) => ((data = data || active()), !!data) && !data.pending && SECTION_KEYS.every((k) => data.sa && data.sa[k] && data.sa[k].length) && SECTION_KEYS.every((k) => data.tur && data.tur[k] && data.tur[k].length);
 
 /** Which section book is this? -> { kind: 'sa' | 'tur', sec: 'oc'|... | null } (Tur in one file: sec null) or null. Commentaries never match. */
 function sectionOfBook(title, categoryPath) {
@@ -75,7 +77,7 @@ function topicKey(t) {
 }
 
 function topicsFor(kind, sec, data) {
-  const d = data || CURRENT;
+  const d = data || active();
   return (d && d[kind] && d[kind][sec]) || [];
 }
 
@@ -99,7 +101,7 @@ const sirNumber = (node) => {
  * @param {{ title: string, categoryPath?: string }} book
  */
 function groupTocTree(tree, book, data) {
-  const d = data || CURRENT;
+  const d = data || active();
   if (!tree || !hasData(d)) return tree;
   const info = sectionOfBook(book.title, book.categoryPath);
   if (!info) return tree;
@@ -150,7 +152,7 @@ function groupTocTree(tree, book, data) {
  * @returns {{ sec, topic, score }[]}  score 3 exact name, 2 name starts with the query, 1 words inside; optional `sec` limits the sections.
  */
 function matchTopics(kind, rest, opts, data) {
-  const d = data || CURRENT;
+  const d = data || active();
   if (!hasData(d)) return [];
   let q = rest.filter(Boolean);
   while (q.length > 1 && /^(הלכות|הלכה|הל)$/.test(q[0])) q = q.slice(1);

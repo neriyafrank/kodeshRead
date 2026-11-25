@@ -127,11 +127,13 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
   const tocMode = useLearning((x) => x.tocMode);
   const setTocMode = useLearning((x) => x.setTocMode);
   const parshiotMode = !!chumash && tocMode === 'parshiot';
+  const halachaMode = useLearning((x) => x.halachaMode);
+  const setHalachaMode = useLearning((x) => x.setHalachaMode);
   const jump = (line: number) => {
     onSelect(line);
     if (!docked) onClose();
   };
-  const [data, setData] = useState<{ bookId: number; tree: TocTree<TocNode>; total: number } | null>(null);
+  const [data, setData] = useState<{ bookId: number; tree: TocTree<TocNode>; grouped: TocTree<TocNode> | null; total: number } | null>(null);
 
   useEffect(() => {
     if (data?.bookId === bookId) return;
@@ -140,7 +142,13 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
     Promise.all([
       a.all<TocNode>('SELECT id, parent_id, level, title, ref_key, start_line FROM toc_nodes WHERE book_id = ? ORDER BY start_line, level', [bookId]),
       a.all<{ total_lines: number }>('SELECT total_lines FROM books WHERE id = ?', [bookId]),
-    ]).then(([list, b]) => alive && setData({ bookId, tree: groupTocTree(buildTocTree(list), { title: bookTitle, categoryPath: bookIndex.books.get(bookId)?.categoryPath }), total: b[0]?.total_lines ?? 0 }));
+    ]).then(([list, b]) => {
+      if (!alive) return;
+      const tree = buildTocTree(list);
+      // Shulchan Aruch / Tur with topic data: a second, grouped view (הלכות topics -> simanim); null = plain TOC only.
+      const grouped = groupTocTree(tree, { title: bookTitle, categoryPath: bookIndex.books.get(bookId)?.categoryPath });
+      setData({ bookId, tree, grouped: grouped !== tree ? grouped : null, total: b[0]?.total_lines ?? 0 });
+    });
     return () => {
       alive = false;
     };
@@ -148,6 +156,13 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
   }, [bookId, adapter, data]);
 
   const ready = data?.bookId === bookId ? data : null;
+  // One segmented switch for both kinds of book: Chumash (פרקים | פרשות) and Shulchan Aruch / Tur with topic data (סימנים | קבצי הלכות).
+  const topicsMode = !!ready?.grouped && halachaMode === 'topics';
+  const modeOptions: { options: readonly (readonly [string, string])[]; active: string; set: (m: string) => void } | null = chumash
+    ? { options: [['chapters', 'פרקים'], ['parshiot', 'פרשות']], active: parshiotMode ? 'parshiot' : 'chapters', set: (m) => setTocMode(m as 'chapters' | 'parshiot') }
+    : ready?.grouped
+      ? { options: [['simanim', 'סימנים'], ['topics', 'קבצי הלכות']], active: topicsMode ? 'topics' : 'simanim', set: (m) => setHalachaMode(m as 'simanim' | 'topics') }
+      : null;
   return (
     <View style={s.panel}>
       <View style={s.header}>
@@ -161,19 +176,14 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
           <Text style={s.closeText}>✕</Text>
         </Pressable>
       </View>
-      {chumash ? (
+      {modeOptions ? (
         <View style={s.modeRow} accessibilityRole="radiogroup" accessibilityLabel="תצוגת תוכן העניינים">
-          {(
-            [
-              ['chapters', 'פרקים'],
-              ['parshiot', 'פרשות'],
-            ] as const
-          ).map(([mode, label]) => {
-            const on = (mode === 'parshiot') === parshiotMode;
+          {modeOptions.options.map(([mode, label]) => {
+            const on = mode === modeOptions.active;
             return (
               <Pressable
                 key={mode}
-                onPress={() => setTocMode(mode)}
+                onPress={() => modeOptions.set(mode)}
                 style={[s.modeBtn, on && s.modeBtnOn]}
                 accessibilityRole="radio"
                 aria-checked={on}
@@ -194,9 +204,9 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
         <Text style={s.empty}>אין תוכן עניינים לספר זה</Text>
       ) : (
         <TocColumnsView
-          key={`${bookId}`}
+          key={`${bookId}-${topicsMode ? 'topics' : 'flat'}`}
           bookId={bookId}
-          tree={ready.tree}
+          tree={topicsMode && ready.grouped ? ready.grouped : ready.tree}
           total={ready.total}
           currentLine={currentLine}
           cap={cap}

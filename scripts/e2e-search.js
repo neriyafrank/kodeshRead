@@ -216,7 +216,7 @@ try {
     await chipCount('bavli');
     assert.deepStrictEqual(
       await Promise.all(['tanach', 'mishna', 'bavli', 'rambam', 'shulchan-aruch'].map((id) => tid(`corpus-chip-${id}-count`).innerText())),
-      ['2', '1', '3', '0', '0'],
+      ['2', '1', '3', '0', '1'],
       'matched book counts of the presets (base books only: no Rashi / Tosafot / Ramban / Onkelos)',
     );
     assert.ok(Number(await tid('corpus-chip-mefarshim-count').innerText()) >= 8, 'the commentary preset counts the commentaries');
@@ -267,7 +267,7 @@ try {
     assert.strictEqual(await summary(), 'כל הספרייה', 'empty selection = the whole library');
     assert.strictEqual(await tid('scope-open-book').count(), 0, 'no open book -> no shortcuts');
     const secs = await page.locator('[data-testid^="scope-toggle-sec:"]').allInnerTexts();
-    assert.ok(/תנ"ך/.test(secs[0]) && /משנה/.test(secs[1]) && /תלמוד בבלי/.test(secs[2]) && secs.length === 3, `canonical sections: ${JSON.stringify(secs)}`);
+    assert.ok(/תנ"ך/.test(secs[0]) && /משנה/.test(secs[1]) && /תלמוד בבלי/.test(secs[2]) && /הלכה/.test(secs[3]) && secs.length === 4, `canonical sections: ${JSON.stringify(secs)}`);
     const tabs = await page.locator('[data-testid="scope-sheet"]').innerText();
     assert.ok(tabs.includes('ספרי בסיס') && tabs.includes('פרשנים לפי ספר'), tabs);
     await shot('2-scope-sheet');

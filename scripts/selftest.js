@@ -540,6 +540,18 @@ async function main() {
         assert.deepStrictEqual(path2.map((id) => g.byId.get(id).title), ['הלכות ציצית (ח׳–כ״ד)', 'סימן יא']);
         assert.ok(toc.filterToc(g, 'ציצית').some((n) => n.synthetic), 'the topic is findable by name');
         assert.ok(toc.filterToc(g, 'כה').some((n) => n.title === 'סימן כה'), 'simanim stay findable by number');
+        // The two TOC modes: סימנים = the flat tree (current siman pre-selected), קבצי הלכות = topics -> simanim (current topic + siman).
+        assert.deepStrictEqual(toc.pathForLine(oc.flat, line).map((id) => oc.flat.byId.get(id).title), ['סימן יא']);
+        assert.ok(oc.flat.roots.every((n) => !n.synthetic) && oc.flat.roots.length === 30, 'סימנים mode: the plain siman list, no topic nodes');
+        assert.strictEqual(toc.tocColumns(oc.flat, []).length, 1);
+        const topicRows = g.roots.map((n) => [n.title, n.start_line]);
+        assert.strictEqual(topicRows[1][1], kids[0].start_line, 'קבצי הלכות mode: a topic row jumps to its first siman');
+        const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+        const drawer = src('src/components/reader/TocDrawer.tsx');
+        assert.ok(drawer.includes("['simanim', 'סימנים'], ['topics', 'קבצי הלכות']") && drawer.includes("['chapters', 'פרקים'], ['parshiot', 'פרשות']"), 'one segmented switch for Chumash and Shulchan Aruch / Tur');
+        assert.ok(/ready\?\.grouped/.test(drawer) && drawer.includes('grouped !== tree ? grouped : null'), 'no switch (flat TOC untouched) when there is no topic data');
+        const store = src('src/state/learningStore.ts');
+        assert.ok(store.includes("halachaMode: 'simanim'") && /halachaMode === 'topics' \|\| p\.halachaMode === 'simanim'/.test(store), 'persisted, sanitized, default סימנים');
         // Tur: each section container is grouped under its own topics.
         const tur = await treeOf('טור');
         const gt = ht.groupTocTree(tur.flat, { title: tur.book.title, categoryPath: tur.book.categoryPath }, fixtureData);
@@ -1022,8 +1034,8 @@ async function starterPackTests() {
     const exp = await exportStarterPacks({ dbFile: SAMPLE_DB, outDir: out });
 
     await check('starter export: curated books found in the sample, the rest skipped gracefully', () => {
-      assert.deepStrictEqual(exp.packs.map((p) => p.slug), ['genesis', 'numbers', 'bavli-shabbat'], 'canonical catalog order: תנ"ך (Torah order) before תלמוד בבלי');
-      for (const missing of ['exodus', 'psalms', 'bavli-berachot', 'shulchan-aruch-orach-chaim', 'kuzari']) assert.ok(exp.skipped.includes(missing), missing);
+      assert.deepStrictEqual(exp.packs.map((p) => p.slug), ['genesis', 'numbers', 'bavli-shabbat', 'shulchan-aruch-orach-chaim'], 'canonical catalog order: תנ"ך (Torah order) before תלמוד בבלי');
+      for (const missing of ['exodus', 'psalms', 'bavli-berachot', 'kuzari']) assert.ok(exp.skipped.includes(missing), missing);
       assert.strictEqual(exp.packs.length + exp.skipped.length, sp.STARTER_BOOKS.length);
     });
 
@@ -1031,8 +1043,8 @@ async function starterPackTests() {
       const catalog = JSON.parse(fs.readFileSync(path.join(out, 'starter-catalog.json'), 'utf8'));
       assert.deepStrictEqual(Object.keys(catalog).sort(), ['books', 'builtAt', 'formatVersion', 'version']);
       assert.ok(catalog.version && catalog.builtAt);
-      assert.deepStrictEqual(catalog.books.map((b) => b.slug), ['genesis', 'numbers', 'bavli-shabbat']);
-      assert.deepStrictEqual(fs.readdirSync(out).sort(), ['starter-bavli-shabbat.json.gz', 'starter-catalog.json', 'starter-genesis.json.gz', 'starter-numbers.json.gz']);
+      assert.deepStrictEqual(catalog.books.map((b) => b.slug), ['genesis', 'numbers', 'bavli-shabbat', 'shulchan-aruch-orach-chaim']);
+      assert.deepStrictEqual(fs.readdirSync(out).sort(), ['starter-bavli-shabbat.json.gz', 'starter-catalog.json', 'starter-genesis.json.gz', 'starter-numbers.json.gz', 'starter-shulchan-aruch-orach-chaim.json.gz']);
       for (const b of catalog.books) {
         const bytes = fs.readFileSync(path.join(out, b.packFile));
         assert.strictEqual(bytes.length, b.sizeBytes);
@@ -1090,7 +1102,7 @@ async function starterPackTests() {
 
     await check('starter catalog: validation rejects unsafe or malformed entries', () => {
       const good = JSON.parse(fs.readFileSync(path.join(out, 'starter-catalog.json'), 'utf8'));
-      assert.strictEqual(sp.validateStarterCatalog(good).books.length, 3);
+      assert.strictEqual(sp.validateStarterCatalog(good).books.length, 4);
       const mutate = (fn) => {
         const c = JSON.parse(JSON.stringify(good));
         fn(c);

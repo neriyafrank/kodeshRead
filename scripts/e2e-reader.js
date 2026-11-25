@@ -37,6 +37,16 @@ try {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 400, height: 820 }, deviceScaleFactor: SHOTS ? 2 : 1 });
   const errors = [];
+  // Shulchan Aruch topic data (the bundled JSON is only populated by the fetch workflow): the sample שולחן ערוך, אורח חיים has simanim א-ל.
+  await page.addInitScript(() => {
+    const T = (t, from, to) => ({ t, from, to });
+    globalThis.__KODESHREAD_HALACHA_TOPICS__ = {
+      pending: false,
+      sa: { oc: [T('הלכות הנהגת אדם בבוקר', 1, 7), T('הלכות ציצית', 8, 24), T('הלכות תפילין', 25, 30)], yd: [T('הלכות שחיטה', 1, 9)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9)] },
+      tur: { oc: [T('הלכות ציצית', 8, 24)], yd: [T('הלכות שחיטה', 1, 9)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9)] },
+      turFallback: [],
+    };
+  });
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   // The top-most instance (expo-router web can keep a hidden copy of a screen underneath).
@@ -758,6 +768,59 @@ try {
       localStorage.setItem('kodeshread.appearance', JSON.stringify(a));
     });
     step(`themes: font + theme persist across reload; Dark charcoal reaches reader (${activeBg} active verse), commentary drawer, TOC and library`);
+
+    // --- Shulchan Aruch TOC: סימנים | קבצי הלכות (same segmented switch as פרקים | פרשות) ----------------------
+    {
+      await page.goto(BASE + '/', { timeout: 180000 });
+      await tid('quick-jump-input').waitFor({ timeout: 180000 });
+      await tid('quick-jump-input').fill('שוע אוח כה');
+      await page.locator('[data-testid="quick-jump-result"]', { hasText: 'אורח חיים' }).first().click();
+      await page.waitForFunction(() => /^שולחן ערוך/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || ''), null, { timeout: 30000 });
+      await openToc(0);
+      assert.strictEqual(await tid('toc-mode-simanim').getAttribute('aria-checked'), 'true', 'סימנים mode by default');
+      assert.strictEqual(await tid('toc-mode-topics').getAttribute('aria-checked'), 'false');
+      assert.deepStrictEqual(await all('toc-mode-').evaluateAll((e) => e.map((x) => x.innerText.trim())), ['סימנים', 'קבצי הלכות'], 'both labels, סימנים on the right (first in RTL)');
+      const [ms, mt] = [await tid('toc-mode-simanim').boundingBox(), await tid('toc-mode-topics').boundingBox()];
+      assert.ok(ms.x > mt.x, 'סימנים sits to the right of קבצי הלכות (RTL, like פרקים | פרשות)');
+      const sameRow = await Promise.all([tid('toc-mode-simanim').boundingBox(), tid('toc-mode-topics').boundingBox()]);
+      assert.ok(Math.abs(sameRow[0].y - sameRow[1].y) < 2 && Math.abs(sameRow[0].height - sameRow[1].height) < 2, 'one segmented row');
+      const activeLabel = () => page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"][aria-selected="true"] [data-testid="toc-label"]').last().innerText();
+      const labels0 = () => page.locator('[data-testid="toc-col-0"] [data-testid="toc-label"]').evaluateAll((e) => e.map((x) => x.innerText.trim()));
+      assert.strictEqual((await labels0()).length >= 25, true, 'the plain siman list');
+      assert.ok((await labels0()).includes('סימן כה') && !(await labels0()).some((l) => l.startsWith('הלכות')), 'סימנים: simanim only, no topic headers');
+      assert.strictEqual((await activeLabel()).trim(), 'סימן כה', 'the current siman is highlighted');
+      await shot('r5f-sa-toc-simanim');
+      // קבצי הלכות: the topics with their siman ranges, the current topic highlighted, a topic opens its simanim.
+      await tid('toc-mode-topics').click();
+      await page.waitForFunction(() => document.querySelector('[data-testid="toc-mode-topics"]')?.getAttribute('aria-checked') === 'true');
+      await tid('toc-col-0').waitFor();
+      assert.deepStrictEqual(await labels0(), ['הלכות הנהגת אדם בבוקר (א׳–ז׳)', 'הלכות ציצית (ח׳–כ״ד)', 'הלכות תפילין (כ״ה–ל׳)']);
+      assert.strictEqual((await activeLabel()).trim(), 'הלכות תפילין (כ״ה–ל׳)', 'the current topic is highlighted (siman כה)');
+      assert.strictEqual(await page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"][aria-selected="true"] [data-testid="toc-label"]').last().innerText().then((t) => t.trim()), 'סימן כה', 'its simanim open beside it, current siman highlighted');
+      await shot('r5g-sa-toc-topics');
+      await page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"]', { hasText: 'הלכות ציצית' }).last().click();
+      await tid('toc-col-1').waitFor();
+      await page.waitForTimeout(250);
+      assert.ok((await page.locator('[data-testid="toc-col-0"] [data-testid="toc-col-head"], [data-testid="toc-col-1"] [data-testid="toc-col-head"]').allInnerTexts()).some((t) => t.includes('לתחילת הלכות ציצית (ח׳–כ״ד)')), 'לתחילת <topic> header');
+      await page.locator('[data-testid="toc-col-1"] [data-testid="toc-open-section"]').last().click();
+      await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('סימן ח'), null, { timeout: 20000 });
+      step('Shulchan Aruch TOC: סימנים (flat, current siman) | קבצי הלכות (topics with ranges, current topic); a topic jumps to its first siman');
+      // Mode is remembered; a siman inside a topic navigates exactly.
+      await openToc(0);
+      assert.strictEqual(await tid('toc-mode-topics').getAttribute('aria-checked'), 'true', 'the mode persists');
+      assert.strictEqual((await activeLabel()).trim(), 'הלכות ציצית (ח׳–כ״ד)');
+      await page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"]', { hasText: /^סימן יא$/ }).last().click();
+      await page.locator('[data-testid^="toc-verse-"]').first().waitFor();
+      await page.locator('[data-testid="toc-col-2"] [data-testid="toc-open-section"]').last().click();
+      await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('סימן יא'), null, { timeout: 20000 });
+      await openToc(0);
+      await tid('toc-mode-simanim').click();
+      await page.waitForFunction(() => document.querySelector('[data-testid="toc-mode-simanim"]')?.getAttribute('aria-checked') === 'true');
+      assert.strictEqual((await activeLabel()).trim(), 'סימן יא', 'back in סימנים the current siman is highlighted');
+      await tid('toc-close').click();
+      // Without topic data the TOC is the plain list with no switch (a non-halacha book never shows it either).
+      step('Shulchan Aruch TOC: topic -> siman navigation exact in both modes; the mode persists');
+    }
 
     // --- tablet: docked TOC stays open after a jump -------------------------------------------
     await page.setViewportSize({ width: 1180, height: 820 });

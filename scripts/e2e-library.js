@@ -476,9 +476,9 @@ try {
     await tid('starter-book-genesis').waitFor();
     assert.deepStrictEqual(starterRequests.slice(0, 2), ['starter-catalog.json', 'starter-catalog.json']);
     const slugs = await page.locator('[data-testid^="starter-book-"]').evaluateAll((els) => els.map((e) => e.dataset.testid.replace('starter-book-', '')));
-    assert.deepStrictEqual(slugs, ['genesis', 'numbers', 'bavli-shabbat'], 'canonical catalog order (the books missing from the sample are skipped)');
+    assert.deepStrictEqual(slugs, ['genesis', 'numbers', 'bavli-shabbat', 'shulchan-aruch-orach-chaim'], 'canonical catalog order (the books missing from the sample are skipped)');
     const sections = (await page.locator('[data-testid^="starter-section-"]').evaluateAll((els) => els.map((e) => e.innerText.split('\n')[0])));
-    assert.deepStrictEqual(sections, ['תנ"ך', 'תלמוד בבלי']);
+    assert.deepStrictEqual(sections, ['תנ"ך', 'תלמוד בבלי', 'הלכה']);
     const bannerText = (await tid('starter-upgrade-banner').innerText()).replace(/\s+/g, ' ');
     assert.ok(bannerText.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא'), bannerText);
     assert.ok(bannerText.includes('הורד ספרייה מלאה'));
@@ -524,7 +524,7 @@ try {
     step('Daily Study bar: always visible above the starter books; a missing book prompts for the library manager');
     // collapse / expand (persisted)
     assert.strictEqual(await tid('starter-toggle').getAttribute('aria-expanded'), 'true', 'expanded by default');
-    assert.ok(/\(3\)/.test(await tid('starter-count').innerText()), 'count in the header');
+    assert.ok(/\(4\)/.test(await tid('starter-count').innerText()), 'count in the header');
     await tid('starter-toggle').click();
     await tid('starter-books-collapsed').waitFor();
     assert.strictEqual(await tid('starter-books').count(), 0, 'the list is folded away');
@@ -720,7 +720,7 @@ try {
     const root0 = await box('library-column-0');
     assert.ok(root0.x + root0.width > 380, 'root column hugs the right edge');
     const rootNames = (await secRows.allInnerTexts()).map((t) => t.split('\n').find((x) => /[א-ת]/.test(x)));
-    assert.deepStrictEqual(rootNames, ['תנ"ך', 'משנה', 'תלמוד בבלי'], 'canonical section order; empty sections hidden');
+    assert.deepStrictEqual(rootNames, ['תנ"ך', 'משנה', 'תלמוד בבלי', 'הלכה'], 'canonical section order; empty sections hidden');
     await sec('תנ"ך').click();
     await tid('library-column-1').waitFor();
     assert.strictEqual(await sec('תנ"ך').getAttribute('aria-selected'), 'true', 'active section highlighted');
