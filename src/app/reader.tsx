@@ -1,10 +1,8 @@
 /**
  * Reading workspace: a slim bar over the active tab's windowed reader.
  *   row 1: back · tab strip (scrolls, long-press actions) · open-tabs counter (switcher)
- *   row 2 (folded away by default, toggled by the tools button in the breadcrumb bar): תוכן עניינים · search ·
- *          טעמים / ניקוד · Aa
- * The text gets the full height while row 2 is collapsed; the breadcrumb above the text still
- * opens the TOC.
+ *   row 2 (always visible, no toggle): תוכן עניינים · search · טעמים / ניקוד · Aa
+ * The active tab already shows the current book and location, so there is no breadcrumb bar over the text.
  * The TOC (RTL cascading columns) is a slide-over drawer on phones and a docked panel beside the
  * text on wide screens. Only the active tab's reader is mounted; the others are restored from
  * their saved positions when re-activated.
@@ -14,7 +12,6 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Collapsible } from '../components/Collapsible';
 import { SearchIcon } from '../components/Icons';
 import { AppearanceSheet } from '../components/reader/AppearanceSheet';
 import { BookReader } from '../components/reader/BookReader';
@@ -34,8 +31,6 @@ export default function ReaderWorkspace() {
   const [tocOpen, setTocOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  // Reader tools (row 2) start folded so the text gets the full height.
-  const [toolsOpen, setToolsOpen] = useState(false);
   const { width } = useWindowDimensions();
   // Tablets / desktop: the TOC docks beside the text and stays open after a jump.
   const docked = width >= 900;
@@ -51,7 +46,7 @@ export default function ReaderWorkspace() {
         </Pressable>
         <TabStrip onOpenSwitcher={() => setSwitcherOpen(true)} />
       </View>
-      <Collapsible open={toolsOpen} style={s.displayBar} testID="reader-tools">
+      <View style={s.displayBar} testID="reader-tools">
         <Pressable
           onPress={() => setTocOpen((v) => !v)}
           disabled={!activeTab}
@@ -90,7 +85,7 @@ export default function ReaderWorkspace() {
         >
           <Text style={s.aaText}>Aa</Text>
         </Pressable>
-      </Collapsible>
+      </View>
 
       {activeTab ? (
         <View style={s.body}>
@@ -106,7 +101,7 @@ export default function ReaderWorkspace() {
             />
           ) : null}
           <View style={s.flex}>
-            <BookReader key={activeTab.tabId} tab={activeTab} onOpenToc={() => setTocOpen(true)} toolsOpen={toolsOpen} onToggleTools={() => setToolsOpen((v) => !v)} onChromeHidden={() => setToolsOpen(false)} />
+            <BookReader key={activeTab.tabId} tab={activeTab} />
           </View>
         </View>
       ) : (

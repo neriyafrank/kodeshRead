@@ -45,11 +45,12 @@ try {
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
   const step = (name) => console.log(`✓ ${name}`);
   const tabsInStore = () => page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.map((t) => t.bookTitle));
-  const crumb = () => tid('reader-breadcrumb').innerText();
+  // The active tab (book + innermost heading) is the location indicator: there is no breadcrumb row.
+  const ACTIVE_TAB = '[data-testid^="tab-"][aria-selected="true"]';
+  const crumb = () => page.locator(ACTIVE_TAB).last().innerText();
   const visible = (id) => tid(id).isVisible().catch(() => false);
-  /** The tools bar (TOC / search / טעמים / ניקוד / Aa) is folded away by default. */
+  /** The tools bar (TOC / search / טעמים / ניקוד / Aa) is always visible. */
   const openTools = async () => {
-    if (!(await visible('toc-button'))) await tid('reader-tools-toggle').click();
     await tid('toc-button').waitFor();
   };
   const openToc = async (col = 0) => {
@@ -115,7 +116,7 @@ try {
       await tid('quick-jump-input').fill(q);
       await page.waitForFunction((t) => [...document.querySelectorAll('[data-testid="quick-jump-result"]')].some((e) => e.innerText.startsWith(t)), title, { timeout: 20000 });
       await page.locator('[data-testid="quick-jump-result"]', { hasText: title }).first().click();
-      await page.waitForFunction((t) => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith(t), title, { timeout: 20000 });
+      await page.waitForFunction((t) => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith(t), title, { timeout: 20000 });
       if (title !== 'בראשית') {
         await tid('reader-back').click();
         await tid('quick-jump-input').waitFor();
@@ -141,70 +142,33 @@ try {
     await shot('r1-tabs');
     step('tab bar: 5 tabs, counter, active tab in view with its section');
 
-    // --- collapsible tools bar ------------------------------------------------------------------
-    const toggle = tid('reader-tools-toggle');
-    assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'false', 'tools start collapsed');
-    for (const id of ['toc-button', 'reader-search', 'toggle-cantillation', 'toggle-nikkud', 'aa-button']) assert.ok(!(await visible(id)), `${id} hidden while collapsed`);
+    // --- the tools bar is always visible (no toggle, no breadcrumb row) -----------------------------
     {
-      // The tools toggle lives in the breadcrumb bar (row 2), not in the tabs bar; the bar has no ☰ icon (tapping the breadcrumb opens the TOC).
-      const tb = await toggle.boundingBox();
-      const bc = await tid('reader-breadcrumb').boundingBox();
-      assert.ok(tb.y >= bc.y - 2 && tb.y + tb.height <= bc.y + bc.height + 2, 'tools toggle sits in the breadcrumb row');
-      assert.ok(!(await crumb()).includes('☰'), 'the breadcrumb bar has no ☰ TOC icon (only the breadcrumb text and the tools toggle)');
-      assert.ok(tb.x < bc.x + bc.width / 2, 'the tools toggle stays at the start (left) end of the bar');
-    }
-    const textTop = async () => (await tid('reader-breadcrumb').boundingBox()).y;
-    const collapsedTop = await textTop();
-    await toggle.click();
-    await tid('reader-tools').waitFor();
-    for (const id of ['toc-button', 'reader-search', 'toggle-cantillation', 'toggle-nikkud', 'aa-button']) assert.ok(await visible(id), `${id} shown once expanded`);
-    assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'true');
-    await page.waitForTimeout(250);
-    const openTop = await textTop();
-    assert.ok(openTop > collapsedTop + 25, `the text area gives the bar room (${collapsedTop} -> ${openTop})`);
-    await shot('r1b-tools-open');
-    await toggle.click();
-    await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
-    assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'false');
-    assert.ok(!(await visible('toc-button')));
-    await page.waitForTimeout(100);
-    assert.ok(Math.abs((await textTop()) - collapsedTop) < 2, 'text back at full height');
-    step(`reader tools bar: collapsed by default, toggles open / closed (text starts ${Math.round(openTop - collapsedTop)}px higher collapsed)`);
-
-    // --- scroll auto-hide: the open tools bar never stays orphaned above a hidden breadcrumb ------------
-    {
-      await toggle.click();
-      await tid('reader-tools').waitFor();
-      await page.waitForTimeout(250);
-      const crumbBox = await tid('reader-breadcrumb').boundingBox();
-      const area = { x: crumbBox.x + crumbBox.width / 2, y: crumbBox.y + 300 };
-      await page.mouse.move(area.x, area.y);
-      const topOf = async () => (await tid('reader-breadcrumb').boundingBox()).y;
-      const startTop = await topOf();
-      for (let i = 0; i < 12 && (await visible('toc-button')); i++) {
+      assert.strictEqual(await page.locator('[data-testid="reader-tools-toggle"]').count(), 0, 'no tools toggle button');
+      assert.strictEqual(await page.locator('[data-testid="reader-breadcrumb"]').count(), 0, 'no breadcrumb row under the toolbar');
+      for (const id of ['toc-button', 'reader-search', 'toggle-cantillation', 'toggle-nikkud', 'aa-button']) assert.ok(await visible(id), `${id} visible by default`);
+      const bar = await tid('reader-tools').boundingBox();
+      const strip = await tid('tab-strip').boundingBox();
+      const list = await tid('reader-list').boundingBox();
+      assert.ok(bar.y >= strip.y + strip.height - 4 && bar.y - (strip.y + strip.height) < 24, 'toolbar sits right under the tab strip');
+      assert.ok(list.y >= bar.y + bar.height - 2 && list.y - (bar.y + bar.height) < 6, `reading text starts right under the toolbar (${list.y - (bar.y + bar.height)}px gap)`);
+      // RTL: תוכן + search at the right (start) edge, Aa at the left (end) edge.
+      const toc = await tid('toc-button').boundingBox();
+      const aa = await tid('aa-button').boundingBox();
+      assert.ok(toc.x > aa.x, 'תוכן at the start (right) edge, Aa at the end (left) edge');
+      // Scrolling the text never hides the toolbar.
+      await page.mouse.move(list.x + list.width / 2, list.y + 300);
+      for (let i = 0; i < 4; i++) {
         await page.mouse.wheel(0, 400);
-        await page.waitForTimeout(150);
+        await page.waitForTimeout(120);
       }
-      await page.waitForTimeout(400);
-      const breadcrumbHidden = (await topOf()) < startTop - 20 || (await tid('reader-breadcrumb').boundingBox()).y < 0 || !(await visible('reader-tools-toggle'));
-      assert.ok(!(await visible('toc-button')), 'scrolling down folds the open tools bar');
-      assert.ok(!(await visible('reader-tools')), 'the tools bar is not left orphaned at the top');
-      assert.strictEqual(await toggle.getAttribute('aria-expanded'), 'false', 'the sliders toggle is reset to closed');
-      assert.ok(breadcrumbHidden || !(await visible('toc-button')), 'tools never visible while the breadcrumb is hidden');
-      await shot('r1c-scroll-hidden');
-      // Scrolling back up restores the breadcrumb row cleanly, with the tools bar still closed.
-      for (let i = 0; i < 6; i++) {
+      assert.ok(await visible('toc-button') && await visible('aa-button'), 'toolbar stays visible while scrolling down');
+      for (let i = 0; i < 4; i++) {
         await page.mouse.wheel(0, -400);
-        await page.waitForTimeout(150);
+        await page.waitForTimeout(120);
       }
-      await page.waitForTimeout(400);
-      assert.ok(await visible('reader-tools-toggle'), 'breadcrumb + toggle are back after scrolling up');
-      assert.ok(!(await visible('toc-button')), 'the tools bar stays closed after scrolling up (no stuck-open bar)');
-      await toggle.click();
-      await tid('toc-button').waitFor();
-      await toggle.click();
-      await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
-      step('scroll down folds the open tools bar with the hidden header (never orphaned); scrolling up restores the breadcrumb, tools stay closed');
+      await shot('r1b-tools-always-visible');
+      step('reader tools bar: always visible under the tab strip, compact, RTL, no toggle / breadcrumb');
     }
 
     // --- long-press actions ------------------------------------------------------------------
@@ -225,7 +189,7 @@ try {
       await tid('quick-jump-input').fill(q);
       await page.waitForFunction((t) => [...document.querySelectorAll('[data-testid="quick-jump-result"]')].some((e) => e.innerText.startsWith(t)), title, { timeout: 20000 });
       await page.locator('[data-testid="quick-jump-result"]', { hasText: title }).first().click();
-      await page.waitForFunction((t) => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith(t), title, { timeout: 20000 });
+      await page.waitForFunction((t) => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith(t), title, { timeout: 20000 });
     }
 
     // --- switcher -----------------------------------------------------------------------------
@@ -257,7 +221,7 @@ try {
     await shot('r3-switcher');
     await tid('tabs-filter').fill('');
     await page.locator('[data-testid^="tab-card-"]', { hasText: 'שבת' }).first().click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith('שבת'));
     step('switcher: recent first, abbreviation filter, tap to switch');
 
     await tid('tabs-counter').click();
@@ -288,7 +252,7 @@ try {
     await tid('reader-back').click();
     await tid('quick-jump-input').fill('במדבר כז טו');
     await page.locator('[data-testid="quick-jump-result"]', { hasText: 'במדבר' }).first().click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק כז'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק כז'));
     await page.waitForTimeout(600);
     await openToc(1);
     const sel = async (col) => (await page.locator(`[data-testid="toc-col-${col}"] [aria-selected="true"]`).last().innerText()).trim();
@@ -314,7 +278,7 @@ try {
     assert.ok((await all('toc-verse-').count()) > 5, 'chapter ג verses listed');
     await page.locator('[data-testid^="toc-verse-"]', { hasText: /^פסוק ד$/ }).last().click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק ג'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק ג'));
     step('TOC columns: synced to פרק כז › פסוק טו, verses open to the left, verse tap jumps and closes');
 
     // Quick filter: gematria / digits / chapter + verse.
@@ -329,7 +293,7 @@ try {
     assert.ok((await tid('toc-filter-direct').innerText()).includes('פרק כז › פסוק טו'));
     await shot('r5-toc-filter');
     await tid('toc-filter-direct').click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק כז'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק כז'));
     step('TOC filter: כ"ה / 25 / "כז טו" (chapter + verse)');
 
     // --- Torah: פרקים | פרשות in the Chumash TOC, inline parsha / aliyah dividers --------------
@@ -374,11 +338,11 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="toc-parsha-open"]')].some((e) => e.innerText.includes('פרשת בלק')));
     await tid('toc-aliyah-39-2').click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="toc-pcol-0"]'));
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').includes('פרק כב'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק כב'));
     await page.waitForTimeout(500);
     let dv = (await dividerInfo('aliyah')).find((d) => d.text === 'שלישי');
     assert.ok(dv && dv.verse === 'כא' && dv.above, `"שלישי" divider above במדבר כב כא: ${JSON.stringify(await dividerInfo('aliyah'))}`);
-    const crumbY = (await tid('reader-breadcrumb').boundingBox()).y + 40;
+    const crumbY = (await tid('reader-list').boundingBox()).y + 8;
     assert.ok(dv.top >= crumbY - 4 && dv.top < crumbY + 120, `the jump lands the aliyah at the reading line (${Math.round(dv.top)} vs ${Math.round(crumbY)})`);
     await shot('r5c-aliyah-divider');
     // "לתחילת פרשת בלק": the parsha divider above כב ב (פרשות mode is remembered).
@@ -408,7 +372,7 @@ try {
     // Not a Chumash (שבת): no switch, no dividers.
     const shabbatId = await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.find((t) => t.bookTitle === 'שבת').bookId);
     await tid(`tab-${shabbatId}`).click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith('שבת'));
     await openToc(0);
     assert.strictEqual(await all('toc-mode-parshiot').count(), 0, 'no פרשות switch outside the Chumash');
     await assertNoDailyInToc('שבת TOC');
@@ -461,7 +425,7 @@ try {
     assert.ok(qjAlign.every((a) => a.align === 'right' && a.dir === 'rtl' && a.gap <= 2), `parsha card right-aligned: ${JSON.stringify(qjAlign)}`);
     await shot('r5e-quick-jump-parsha');
     await tid('quick-jump-direct').click();
-    await page.waitForFunction(() => /^בראשית/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק לב'), null, { timeout: 20000 });
+    await page.waitForFunction(() => /^בראשית/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '') && document.querySelector('[data-testid^="tab-"][aria-selected="true"]').innerText.includes('פרק לב'), null, { timeout: 20000 });
     await page.waitForTimeout(500);
     dv = (await dividerInfo('aliyah')).find((d) => d.text === 'שני');
     assert.ok(dv && dv.verse === 'יד' && dv.above, `"פרשת וישלח שני" lands on בראשית לב יד under its divider: ${JSON.stringify(await dividerInfo('aliyah'))}`);
@@ -476,7 +440,7 @@ try {
     await tid('quick-jump-input').fill('בלק 3');
     await waitDirect('פתח: פרשת בלק · שלישי (במדבר כ״ב:כ״א)');
     await tid('quick-jump-direct').click();
-    await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק כב'), null, { timeout: 20000 });
+    await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '') && document.querySelector('[data-testid^="tab-"][aria-selected="true"]').innerText.includes('פרק כב'), null, { timeout: 20000 });
     await page.waitForTimeout(500);
     dv = (await dividerInfo('aliyah')).find((d) => d.text === 'שלישי');
     assert.ok(dv && dv.verse === 'כא' && dv.above, 'בלק 3 -> במדבר כב כא');
@@ -521,7 +485,7 @@ try {
     await tid('reader-back').click();
     await tid('quick-jump-input').fill('שבת ב.');
     await page.locator('[data-testid="quick-jump-result"]', { hasText: 'שבת' }).first().click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('שבת'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith('שבת'));
     await openDrawer(2);
     assert.deepStrictEqual(await drawerNames(), ['רש"י', 'תוספות']);
     assert.strictEqual(await pinOf('רש"י').getAttribute('aria-pressed'), 'true', 'רש"י is a favorite in שבת too');
@@ -533,7 +497,7 @@ try {
     await shot('r7-commentary-pins');
     // ...and back in the בראשית tab the favorites still lead, in pin order.
     await page.locator('[data-testid^="tab-"][aria-selected]', { hasText: 'בראשית' }).last().click();
-    await page.waitForFunction(() => (document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '').startsWith('בראשית'));
+    await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').startsWith('בראשית'));
     await openDrawer(8);
     assert.deepStrictEqual((await drawerNames()).slice(0, 3), ['רמב"ן', 'רש"י', 'אונקלוס']);
     assert.deepStrictEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.commentary')).state.pinned), ['רמבנ', 'רשי', 'תוספות']);
@@ -676,8 +640,6 @@ try {
     await page.waitForFunction(() => !document.querySelector('[data-testid="appearance-sheet"]'), null, { timeout: 5000 }).catch(() => undefined);
     if (await page.locator('[data-testid="appearance-sheet"]').count()) await page.mouse.click(200, 60);
     await page.waitForTimeout(300);
-    await tid('reader-tools-toggle').click();
-    await page.waitForFunction(() => !document.querySelector('[data-testid="reader-tools"]'));
     vm = await verseMetrics();
     assert.ok(vm.ink < vm.lineHeight, 'dark: no collisions');
     marginLetterOk(vm, 'dark, default size');
@@ -804,7 +766,8 @@ try {
     await tid('quick-jump-input').waitFor({ timeout: 180000 });
     await tid('quick-jump-input').fill('בראשית א');
     await page.locator('[data-testid="quick-jump-result"]', { hasText: 'בראשית' }).first().click();
-    assert.strictEqual(await tid('reader-tools-toggle').getAttribute('aria-expanded'), 'false', 'tools collapsed on tablet too');
+    await tid('toc-button').waitFor({ timeout: 20000 });
+    assert.ok(await visible('toc-button'), 'tools bar visible on tablet too');
     await openToc(1);
     const reader = await tid('reader-list').boundingBox();
     const toc = await tid('toc-drawer').boundingBox();

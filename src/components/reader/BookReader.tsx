@@ -58,19 +58,17 @@ import { readerFont } from '../../fonts';
 import { useChumashBook, useChumashDividers } from '../../services/parshiotNav';
 import { useSettings } from '../../state/settingsStore';
 import { useTabs, type ReaderTab } from '../../state/tabsStore';
-import { radius, spacing, useAppTheme, type Palette } from '../../theme';
-import { SlidersIcon } from '../Icons';
+import { spacing, useAppTheme, type Palette } from '../../theme';
 import { RichText } from '../RichText';
 import { CommentaryPane, commentaryPaneHeight } from './CommentaryPane';
 import { ParagraphToolbar, useCopyMode, useCopyToast } from './CopyToolbar';
 
-export const BREADCRUMB_HEIGHT = 40;
 /**
  * The "reading line": the row under this many px from the list top (just below the
- * breadcrumb bar) is the tab's current line; its offset is saved relative to it.
+ * top padding) is the tab's current line; its offset is saved relative to it.
  */
-const ANCHOR = BREADCRUMB_HEIGHT + spacing.sm;
-/** Scroll events right after a programmatic jump must not hide the breadcrumb. */
+const ANCHOR = spacing.sm;
+/** Scroll events right after a programmatic jump are not user scrolling. */
 const JUMP_SETTLE_MS = 600;
 const HIGHLIGHT_MS = 2000;
 const SAVE_DEBOUNCE_MS = 300;
@@ -101,15 +99,9 @@ interface Typography {
 
 interface Props {
   tab: ReaderTab;
-  onOpenToc: () => void;
-  /** Reader-tools row toggle, shown at the end of the breadcrumb bar (the breadcrumb itself opens the TOC). */
-  toolsOpen?: boolean;
-  onToggleTools?: () => void;
-  /** The top chrome auto-hid on scroll: the screen folds the tools bar too, so it is never orphaned at the top. */
-  onChromeHidden?: () => void;
 }
 
-export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, onChromeHidden }: Props) {
+export function BookReader({ tab }: Props) {
   const { adapter } = useLibrary();
   const palette = useAppTheme();
   const fontSize = useSettings((s) => s.fontSize);
@@ -130,7 +122,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
   const [win, setWin] = useState<WindowState | null>(null);
   // `end`: last highlighted line when a whole unit (commentary block / verse) is the target.
   const [highlight, setHighlight] = useState<{ line: number; end?: number; nonce: number; terms?: string[] } | null>(null);
-  const [topRow, setTopRow] = useState<{ line: number; tocPath: string | null }>({ line: tab.currentLineIndex, tocPath: tab.tocPath });
   const [error, setError] = useState<string | null>(null);
   /** Paragraph the commentary drawer is showing (null = drawer closed). */
   const [selected, setSelected] = useState<{ line: number; tocPath: string | null } | null>(null);
@@ -179,24 +170,9 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
     };
   }, [flush]);
 
-  // --- auto-hiding breadcrumb ------------------------------------------------------
-  const [headerY] = useState(() => new Animated.Value(0));
-  const headerVisible = useRef(true);
+  // --- scroll tracking ---------------------------------------------------------------
   const lastY = useRef(0);
   const settleUntil = useRef(0);
-  const chromeHiddenRef = useRef(onChromeHidden);
-  chromeHiddenRef.current = onChromeHidden;
-  const showHeader = useCallback(
-    (show: boolean) => {
-      if (headerVisible.current === show) return;
-      headerVisible.current = show;
-      // Scrolling down hides the breadcrumb row: the open tools bar folds with it (one unified collapsible chrome).
-      if (!show) chromeHiddenRef.current?.();
-      Animated.timing(headerY, { toValue: show ? 0 : -BREADCRUMB_HEIGHT - 2, duration: 180, useNativeDriver: useNative, isInteraction: false }).start();
-    },
-    [headerY],
-  );
-
 
   // --- window loading -----------------------------------------------------------
   /** Paragraphs [from, to] with their link counts (one indexed query each). */
@@ -222,7 +198,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
       const row = rows[idx];
       if (row) {
         position.current = { currentLineIndex: row.line_index, tocPath: row.toc_path, lineOffset };
-        setTopRow({ line: row.line_index, tocPath: row.toc_path });
         scheduleSave();
       }
       return row?.line_index ?? target;
@@ -246,15 +221,13 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
         await listRef.current.scrollToIndex({ index: idx, animated: false, viewOffset: -ANCHOR });
         // The final programmatic scroll does not always emit onScroll: record the position here.
         position.current = { currentLineIndex: row.line_index, tocPath: row.toc_path, lineOffset: 0 };
-        setTopRow({ line: row.line_index, tocPath: row.toc_path });
         scheduleSave();
       } else {
         landed = await loadAround(target, total, 0);
       }
-      showHeader(true);
       if (withHighlight) setHighlight({ line: landed, end: end != null && end > landed ? end : undefined, nonce: Date.now(), terms });
     },
-    [totalLines, loadAround, showHeader, scheduleSave],
+    [totalLines, loadAround, scheduleSave],
   );
 
   // Initial load: book size, then the window around the pending jump or saved position.
@@ -329,11 +302,7 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
 
   const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const y = e.nativeEvent.contentOffset.y;
-    const dy = y - lastY.current;
     lastY.current = y;
-    if (y < BREADCRUMB_HEIGHT || Date.now() < settleUntil.current) showHeader(true);
-    else if (dy > 6) showHeader(false);
-    else if (dy < -6) showHeader(true);
 
     const list = listRef.current;
     const w = winRef.current;
@@ -350,7 +319,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
     const lineOffset = Math.max(0, Math.round(lineY - layout.y));
     const prev = position.current;
     if (prev.currentLineIndex !== row.line_index) {
-      setTopRow({ line: row.line_index, tocPath: row.toc_path });
       if (followRef.current) followReadingLine(w.rows, i);
     }
     if (prev.currentLineIndex !== row.line_index || prev.lineOffset !== lineOffset) {
@@ -496,8 +464,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
     [typo, highlight, selectedLine, onPressRow, onLongPressRow, dividers, copyMode.state],
   );
 
-  const crumbs = topRow.tocPath ? topRow.tocPath.split(' > ') : [];
-
   return (
     <View style={[styles.root, { backgroundColor: palette.background }]} onLayout={(e) => setAreaHeight(e.nativeEvent.layout.height)}>
       <View
@@ -525,7 +491,7 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
           onStartReachedThreshold={1.5}
           onScroll={onScroll}
           scrollEventThrottle={16}
-          ListHeaderComponent={<View style={{ height: BREADCRUMB_HEIGHT + spacing.sm }} />}
+          ListHeaderComponent={<View style={{ height: spacing.sm }} />}
           ListFooterComponent={
             totalLines != null && win.range.to >= totalLines ? (
               // Extra room so the last lines can still be scrolled up to the reading line.
@@ -539,52 +505,6 @@ export function BookReader({ tab, onOpenToc, toolsOpen = false, onToggleTools, o
         />
       )}
 
-      <Animated.View
-        style={[
-          styles.breadcrumb,
-          { backgroundColor: palette.background, borderBottomColor: palette.border, transform: [{ translateY: headerY }] },
-        ]}
-      >
-        <View style={styles.crumbRow}>
-        <Pressable
-          style={styles.crumbPress}
-          onPress={() => {
-            flush();
-            onOpenToc();
-          }}
-          accessibilityRole="button"
-          accessibilityLabel="פתח תוכן עניינים"
-          testID="reader-breadcrumb"
-        >
-          <Text style={[styles.crumbText, { color: palette.textMuted }]} numberOfLines={1}>
-            <Text style={{ color: palette.text, fontWeight: '700' }}>{tab.bookTitle}</Text>
-            {crumbs.map((c, i) => (
-              <Text key={i} style={i === crumbs.length - 1 ? { color: palette.accent, fontWeight: '600' } : undefined}>
-                {'  ‹  ' + c}
-              </Text>
-            ))}
-          </Text>
-        </Pressable>
-        {onToggleTools ? (
-          <Pressable
-            onPress={onToggleTools}
-            hitSlop={6}
-            style={({ pressed }) => [
-              styles.toolsBtn,
-              toolsOpen && { backgroundColor: palette.accentSoft },
-              pressed && { opacity: 0.6 },
-            ]}
-            accessibilityRole="button"
-            aria-expanded={toolsOpen}
-            accessibilityState={{ expanded: toolsOpen }}
-            accessibilityLabel={toolsOpen ? 'הסתר כלי קריאה' : 'הצג כלי קריאה'}
-            testID="reader-tools-toggle"
-          >
-            <SlidersIcon size={18} />
-          </Pressable>
-        ) : null}
-        </View>
-      </Animated.View>
       {copyMode.state.mode !== 'idle' ? (
         <ParagraphToolbar
           style={styles.copyBar}
@@ -824,17 +744,4 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   end: { textAlign: 'center', paddingVertical: spacing.xl * 2, fontSize: 14 },
-  breadcrumb: {
-    position: 'absolute',
-    top: 0,
-    start: 0,
-    end: 0,
-    height: BREADCRUMB_HEIGHT,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    justifyContent: 'center',
-  },
-  crumbRow: { flexDirection: 'row', alignItems: 'center', height: '100%', paddingEnd: spacing.sm },
-  crumbPress: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingStart: spacing.lg, paddingEnd: spacing.sm, gap: spacing.sm, height: '100%' },
-  toolsBtn: { width: 36, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: radius.md },
-  crumbText: { flex: 1, fontSize: 14, writingDirection: 'rtl' },
 });

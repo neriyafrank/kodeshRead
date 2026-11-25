@@ -539,7 +539,7 @@ try {
     await tid('starter-loading-genesis').waitFor({ timeout: 5000 });
     assert.strictEqual((await tid('starter-loading-genesis').innerText()).trim(), 'טוען את בראשית מהענן…');
     await shot('starter-loading');
-    await tid('reader-breadcrumb').waitFor({ timeout: 30000 });
+    await tid('reader-tools').waitFor({ timeout: 30000 });
     await tid('para-3').waitFor({ timeout: 20000 });
     assert.ok(starterRequests.includes('starter-genesis.json.gz'));
     assert.ok((await tid('para-3').innerText()).length > 5, 'verse text rendered from the starter database');
@@ -876,9 +876,8 @@ try {
     const TROPE = /[\u0591-\u05AF]/;
     const NIKKUD = /[\u05B0-\u05BC\u05C1\u05C2]/;
     assert.ok(TROPE.test(await text()) && NIKKUD.test(await text()), 'both shown by default');
-    // The reader tools bar (טעמים / ניקוד / Aa ...) is folded away by default.
+    // The reader tools bar (טעמים / ניקוד / Aa ...) is always visible.
     const openReaderTools = async () => {
-      if (!(await tid('toggle-cantillation').last().isVisible().catch(() => false))) await tid('reader-tools-toggle').last().click();
       await tid('toggle-cantillation').last().waitFor();
     };
     await openReaderTools();
@@ -1008,7 +1007,7 @@ try {
     // (An unreadable zone falls back to Israel: covered in `npm test`.) The tap below runs on the Diaspora parsha.
     await withZone('America/New_York');
     await last('daily-item-parasha').click();
-    await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || '') && document.querySelector('[data-testid="reader-breadcrumb"]').innerText.includes('פרק ד'), null, { timeout: 20000 });
+    await page.waitForFunction(() => /^במדבר/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '') && document.querySelector('[data-testid^="tab-"][aria-selected="true"]').innerText.includes('פרק ד'), null, { timeout: 20000 });
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid^="aliyah-divider-"]')].some((e) => e.innerText.trim() === 'שני' && e.getBoundingClientRect().height > 0));
     await shot('daily-opened');
     await last('reader-back').click();

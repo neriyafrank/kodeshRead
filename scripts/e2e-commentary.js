@@ -192,9 +192,7 @@ try {
     assert.ok(y7 > 60 && y7 < (await tid('commentary-pane').boundingBox()).y, `resizing must not scroll the text (line 7 at ${y7})`);
     step(`resizable (${Math.round(before)} -> ${Math.round(after)} px)`);
 
-    // Theme: switch to Dark (charcoal) in the Aa sheet (in the folded reader tools bar); the drawer follows.
-    assert.strictEqual(await tid('aa-button').count(), 0, 'reader tools collapsed by default');
-    await tid('reader-tools-toggle').click();
+    // Theme: switch to Dark (charcoal) in the Aa sheet (the reader tools bar is always visible); the drawer follows.
     await tid('aa-button').click();
     await tid('theme-dark').click();
     await page.keyboard.press('Escape');
@@ -320,7 +318,7 @@ try {
     await page.waitForFunction(() => !!document.querySelector('[data-testid="commentary-focus-row"]'));
     await lp_hold(paraEntries.first());
     await rawTid('copy-open-in-book').click();
-    await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('רש"י על שבת'));
+    await page.waitForFunction(() => document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText.includes('רש"י על שבת'));
     await tid('para-7').waitFor();
     assert.strictEqual(await page.locator('[data-testid^="links-badge-"]').count(), 0, 'no count badge here either');
     await shot('4-opened');
@@ -342,7 +340,7 @@ try {
     step('empty state for a verse without the chosen commentators + "הצג את כל המפרשים"');
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="commentary-group-name"], [data-testid="commentary-focus-row"]')].some((e) => (e.dataset.testid === 'commentary-focus-row' ? e.getAttribute('aria-label') : e.innerText) === 'שבת'));
     await tid('commentary-open-block').first().click();
-    await page.waitForFunction(() => /^שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''));
+    await page.waitForFunction(() => /^שבת/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || ''));
     // Rows whose highlight glow (an absolutely positioned, coloured layer) is visible; the
     // existing שבת tab shows its breadcrumb before the jump lands, so poll.
     const litRows = () =>
@@ -763,7 +761,7 @@ try {
     await tid('commentary-chip-all').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="commentary-group"]').length === 2);
     await tid('parallel-open').click();
-    await page.waitForFunction(() => document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText.includes('משנה שבת'), null, { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText.includes('משנה שבת'), null, { timeout: 15000 });
     await tid('para-6').waitFor({ timeout: 15000 });
     step('parallel chip -> overview of משנה שבת פרק א; "פתח בספר ↗" opens the Mishnah at the perek');
 
@@ -779,7 +777,7 @@ try {
     for (const t of await tid('parallel-entry').allInnerTexts()) assert.ok(!/דף ב\./.test(t), `no repeated daf title above a paragraph: ${t.slice(0, 40)}`);
     await shot('13-mishna-to-bavli');
     await tid('parallel-open').click();
-    await page.waitForFunction(() => /^\s*שבת/.test(document.querySelector('[data-testid="reader-breadcrumb"]')?.innerText || ''), null, { timeout: 15000 });
+    await page.waitForFunction(() => /^\s*שבת/.test(document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || ''), null, { timeout: 15000 });
     await tid('para-3').waitFor({ timeout: 15000 });
     step('reverse direction: משנה שבת פרק א -> בבלי שבת פרק א (perek cut at "הדרן עלך"), opened in the reader');
 
