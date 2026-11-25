@@ -380,11 +380,134 @@ async function resolveReference(db, index, input, opts) {
   return [parsha, ...others.map((b) => ({ ...b, direct: false }))];
 }
 
+// --- Rambam scoped prefix matcher ("רמבם תפילה ב ג") ---------------------------------------------------------
+
+const RAMBAM_TOKEN = normalizeHebrew('רמב"ם', { keepPunctuation: false });
+const MT = normalizeHebrew('משנה תורה', { keepPunctuation: false }).split(' ');
+/** Words typed before the work's own name that carry no identity ("הלכות תפילה", "מסכת ברכות", "על ברכות"). */
+const RAMBAM_NOISE = new Set(['הלכות', 'הלכה', 'הל', 'מסכת', 'מס', 'ספר', 'על', 'מסכתא'].map((w) => normalizeHebrew(w, { keepPunctuation: false })));
+/** Leading words that select the Mishnah commentary ("רמבם פירוש המשנה ברכות", "רמבם משנה ברכות"). */
+const PM_HINT = new Set(['פירוש', 'פירוש', 'המשנה', 'המשניות', 'משניות', 'משנה', 'לפירוש'].map((w) => normalizeHebrew(w, { keepPunctuation: false })));
+const RAMBAM_NORM = RAMBAM_TOKEN; // final letters are folded by normalizeHebrew (רמבם -> רמבמ)
+const PM_TITLE = new RegExp(`^(?:${RAMBAM_NORM} על (?:ה)?משנ(?:ה|יות)|פירוש (?:ה)?משנ(?:ה|יות) (?:ל)?ה?${RAMBAM_NORM})\\s*`);
+
+const rambamCache = new WeakMap();
+
+/**
+ * Rambam's OWN works, identified by folder path / title (never by "X על רמבם"):
+ *   mt  משנה תורה (a `משנה תורה` folder segment outside מפרשים, or a "משנה תורה, ..." title outside commentary folders)
+ *   pm  פירוש המשנה לרמב"ם ("רמבם על משנה X" / "פירוש המשנה לרמב"ם X", outside מפרשים / אחרונים)
+ * Each entry carries the name tokens used for matching (title minus the work's prefix and "הלכות").
+ */
+function rambamBooks(index) {
+  let list = rambamCache.get(index);
+  if (list) return list;
+  list = [];
+  const T = (x) => normalizeHebrew(x, { keepPunctuation: false });
+  for (const b of index.books.values()) {
+    const segs = String(b.categoryPath || '').split('/').map(T);
+    const title = T(b.title).replace(/^[\u200E\u200F]+/, '');
+    const commentaryFolder = segs.includes(T('מפרשים')) || segs.includes(T('אחרונים'));
+    let kind = null;
+    let rest = '';
+    if (!commentaryFolder && PM_TITLE.test(title)) {
+      kind = 'pm';
+      rest = title.replace(PM_TITLE, '');
+    } else if (!segs.includes(T('מפרשים')) && (segs.includes(T('משנה תורה')) || /^משנה תורה\b/.test(title))) {
+      if (/\sעל\s/.test(title) && !/^משנה תורה/.test(title)) continue; // "X על משנה תורה"
+      kind = 'mt';
+      rest = title.replace(/^משנה תורה\s*/, '');
+    }
+    if (!kind) continue;
+    const tokens = rest.split(' ').filter((t) => t && !RAMBAM_NOISE.has(t));
+    if (tokens.length) list.push({ book: b, kind, tokens, order: list.length });
+  }
+  rambamCache.set(index, list);
+  return list;
+}
+
+/** Score (0 = no match) of query tokens against a name's tokens: contiguous, word-equal (optional ו- prefix); `prefix` lets the last token be a word start. */
+function rambamScore(q, name, prefix) {
+  const strip = (t) => (t.length > 2 && t[0] === 'ו' ? t.slice(1) : t);
+  const eq = (a, b) => a === b || strip(b) === a;
+  for (let at = 0; at + q.length <= name.length; at++) {
+    let ok = true;
+    for (let i = 0; i < q.length && ok; i++) {
+      const n = name[at + i];
+      const last = i === q.length - 1;
+      ok = eq(q[i], n) || (prefix && last && q[i].length >= 2 && (n.startsWith(q[i]) || strip(n).startsWith(q[i])));
+    }
+    if (ok) return q.length === name.length && at === 0 ? 3 : at === 0 ? 2 : 1;
+  }
+  return 0;
+}
+
+/**
+ * "רמבם <name> [location]": match the remainder against Rambam's own works only (see rambamBooks), longest name first,
+ * the rest of the query is the chapter / halakha / mishna reference. Null when the query is not scoped or nothing matches
+ * (the generic resolver then runs as before).
+ */
+async function resolveRambamScoped(db, index, words, limit) {
+  const tokens = words.map((w) => w.tok);
+  if (tokens.length < 2 || tokens[0] !== RAMBAM_TOKEN) return null;
+  let at = 1;
+  let prefer = null;
+  if (tokens.slice(at, at + 2).join(' ') === MT.join(' ')) {
+    prefer = 'mt';
+    at += 2;
+  }
+  while (at < tokens.length - 1 && (PM_HINT.has(tokens[at]) || RAMBAM_NOISE.has(tokens[at]))) {
+    if (PM_HINT.has(tokens[at]) && !prefer) prefer = 'pm';
+    at++;
+  }
+  const all = rambamBooks(index);
+  if (!all.length || at >= tokens.length) return null;
+  const rest = tokens.slice(at);
+  let found = null;
+  for (const prefix of [false, true]) {
+    for (let n = rest.length; n >= 1 && !found; n--) {
+      if (prefix && n !== rest.length) continue; // a word start is only accepted while typing the last word
+      const q = rest.slice(0, n);
+      const hits = [];
+      for (const e of all) {
+        if (prefer === 'mt' && e.kind !== 'mt') continue;
+        const score = rambamScore(q, e.tokens, prefix);
+        if (score) hits.push({ e, score });
+      }
+      if (hits.length) found = { hits, n };
+    }
+    if (found) break;
+  }
+  if (!found) return null;
+  const rank = (e) => (prefer ? (e.kind === prefer ? 0 : 1) : e.kind === 'mt' ? 0 : 1);
+  found.hits.sort((a, b) => b.score - a.score || rank(a.e) - rank(b.e) || a.e.order - b.e.order);
+  const loc = parseLocation(words.slice(at + found.n));
+  const results = [];
+  for (const { e, score } of found.hits.slice(0, limit)) {
+    const r = await resolveInBook(db, e.book, loc);
+    results.push({
+      bookId: e.book.id, bookTitle: e.book.title, categoryPath: e.book.categoryPath, path: r.path, targetLine: r.targetLine, marker: r.marker,
+      unmatched: r.unmatched, preview: await previewText(db, e.book.id, r.targetLine), complete: r.unmatched.length === 0, suggestion: false,
+      location: locationLabel(r.path, r.marker), direct: r.unmatched.length === 0 && loc.length > 0 && (r.path.length > 0 || !!r.marker), _score: score,
+    });
+  }
+  // Fully resolved first, then name quality, then Mishneh Torah before Peirush HaMishnah (kept stable by the sort above).
+  const keyed = results.map((r, i) => ({ r, i }));
+  keyed.sort((a, b) => Number(b.r.complete) - Number(a.r.complete) || b.r._score - a.r._score || a.i - b.i);
+  return keyed.map(({ r }) => {
+    delete r._score;
+    return r;
+  });
+}
+
 async function resolveBookReference(db, index, input, opts) {
   const limit = (opts && opts.limit) || MAX_BOOK_CANDIDATES;
   const words = rawTokens(input);
   const tokens = words.map((w) => w.tok);
   if (!tokens.length) return [];
+
+  const scoped = await resolveRambamScoped(db, index, words, limit);
+  if (scoped && scoped.length) return scoped;
 
   // Longest leading token sequence that is a book title/alias ("מסכת"/"ספר" optional),
   // literally or after abbreviation / spelling normalization ("שו\"ע או\"ח", "ב\"ק", "בר'").
@@ -472,4 +595,4 @@ async function resolveBookReference(db, index, input, opts) {
   return results;
 }
 
-module.exports = { loadBookIndex, resolveReference, resolveInBook, tokenize, parseLocation, lookupBook, rawTokens };
+module.exports = { rambamBooks, loadBookIndex, resolveReference, resolveInBook, tokenize, parseLocation, lookupBook, rawTokens };

@@ -414,6 +414,62 @@ async function main() {
     await check('fixture: ברכות ב. (nested amud)', () => expectJump(db, index, 'ברכות ב.', 'ברכות', 3, 'עמוד א'));
     await check('fixture: ברכות ב:', () => expectJump(db, index, 'ברכות ב:', 'ברכות', 5, 'עמוד ב'));
     await check('fixture: ברכות ב ב', () => expectJump(db, index, 'ברכות ב ב', 'ברכות', 5, 'עמוד ב'));
+
+    // Rambam scoped prefix matcher: own works only (משנה תורה + פירוש המשנה), never commentaries on them.
+    await check('quick open: רמבם scoped matcher (Mishneh Torah + Peirush HaMishnah, no commentary crowding)', async () => {
+      const rlib = path.join(tmp, 'rlib');
+      const rw = (rel, lines) => { fs.mkdirSync(path.dirname(path.join(rlib, rel)), { recursive: true }); fs.writeFileSync(path.join(rlib, rel), lines.join('\n')); };
+      const chapters = (t) => [`<h1>${t}</h1>`, ...['א', 'ב'].flatMap((p) => [`<h2>פרק ${p}</h2>`, ...['א', 'ב', 'ג'].flatMap((h) => [`<h3>הלכה ${h}</h3>`, `<p>תוכן ${p} ${h}</p>`])])];
+      const mt = (sefer, name) => rw(`הלכה/משנה תורה/${sefer}/משנה תורה, ${name}.txt`, chapters(`משנה תורה, ${name}`));
+      mt('ספר אהבה', 'הלכות תפילה וברכת כהנים');
+      mt('ספר אהבה', 'הלכות ברכות');
+      mt('ספר זמנים', 'הלכות מגילה וחנוכה');
+      mt('ספר זמנים', 'הלכות שבת');
+      const pm = (name) => rw(`משנה/ראשונים/רמבם/סדר זרעים/רמבם על משנה ${name}.txt`, chapters(`רמבם על משנה ${name}`));
+      for (const n of ['ברכות', 'פאה', 'אבות', 'שבת']) pm(n);
+      // Commentaries ON Rambam and other lookalikes that must not crowd the results.
+      for (const n of ['כסף משנה', 'מגיד משנה', 'ראבד']) rw(`הלכה/משנה תורה/מפרשים/${n}/${n} על משנה תורה, הלכות תפילה וברכת כהנים.txt`, chapters(`${n} על הלכות תפילה`));
+      rw('הלכה/משנה תורה/מפרשים/כסף משנה/כסף משנה על הלכות ברכות.txt', chapters('כסף משנה על הלכות ברכות'));
+      rw('משנה/אחרונים/דבש תמר/דבש תמר על פירוש המשניות להרמבם ברכות.txt', chapters('דבש תמר על פירוש המשניות להרמבם ברכות'));
+      rw('משנה/ראשונים/ברטנורא/ברטנורא על משנה ברכות.txt', chapters('ברטנורא על משנה ברכות'));
+      const rOut = path.join(tmp, 'rambam.db');
+      const rp = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${rlib}`, `--out=${rOut}`], { encoding: 'utf8' });
+      if (rp.status !== 0) throw new Error('rambam fixture build failed:\n' + rp.stderr);
+      const rdb = openDb(rOut);
+      try {
+        const ridx = await loadBookIndex(rdb);
+        const own = quickJump.rambamBooks(ridx).map((e) => e.book.title).sort();
+        assert.strictEqual(own.length, 8, `only Rambam's own works are recognised: ${own.join(' | ')}`);
+        assert.ok(own.every((t) => !/כסף|מגיד|ראבד|דבש|ברטנורא/.test(t)), own.join(' | '));
+        const titles = async (q) => (await resolveReference(rdb, ridx, q)).map((r) => r.bookTitle);
+        for (const q of ['רמבם תפילה', 'רמב"ם תפילה', 'רמב״ם  תפילה']) assert.strictEqual((await titles(q))[0], 'משנה תורה, הלכות תפילה וברכת כהנים', q);
+        assert.strictEqual((await titles('רמבם חנוכה'))[0], 'משנה תורה, הלכות מגילה וחנוכה');
+        assert.strictEqual((await titles('רמבם הלכות תפיל'))[0], 'משנה תורה, הלכות תפילה וברכת כהנים', 'word start while typing');
+        // Reference parsing survives: chapter ב halakha ג.
+        const [t] = await resolveReference(rdb, ridx, 'רמבם תפילה ב ג');
+        assert.strictEqual(t.bookTitle, 'משנה תורה, הלכות תפילה וברכת כהנים');
+        assert.ok(t.complete && t.direct && t.location === 'פרק ב › הלכה ג', t.location);
+        // Both corpora, Mishneh Torah first on ties, no commentary in the list.
+        for (const q of ['רמבם ברכות', 'רמבם שבת']) {
+          const res = await titles(q);
+          assert.strictEqual(res.length, 2, `${q}: ${res.join(' | ')}`);
+          assert.ok(/^משנה תורה, הלכות /.test(res[0]) && /^רמבם על משנה /.test(res[1]), `${q}: ${res.join(' | ')}`);
+        }
+        const both = await resolveReference(rdb, ridx, 'רמבם ברכות א ב');
+        assert.strictEqual(both.length, 2);
+        assert.ok(both.every((r) => r.complete && r.path.join(' > ') === 'פרק א > הלכה ב'), JSON.stringify(both.map((r) => r.path)));
+        // A hint flips the tie; a Mishnah-only tractate surfaces Peirush HaMishnah cleanly.
+        assert.strictEqual((await titles('רמבם פירוש המשנה ברכות'))[0], 'רמבם על משנה ברכות');
+        assert.deepStrictEqual(await titles('רמבם משנה תורה ברכות'), ['משנה תורה, הלכות ברכות']);
+        for (const q of ['רמבם אבות', 'רמבם פאה']) assert.deepStrictEqual(await titles(q), [`רמבם על משנה ${q.split(' ')[1]}`], q);
+        const [pa] = await resolveReference(rdb, ridx, 'רמבם פאה ב א');
+        assert.ok(pa.complete && pa.path.join(' > ') === 'פרק ב > הלכה א', JSON.stringify(pa.path));
+        // Bare "רמבם" keeps the generic behavior (no scoped narrowing, no crash).
+        assert.ok(Array.isArray(await resolveReference(rdb, ridx, 'רמבם')));
+      } finally {
+        rdb.close();
+      }
+    });
     // Abbreviation-aware Quick Open + location parsing.
     const SIMAN_SHKH = 3 + 5 * 11;
     await check('quick open: שו"ע או"ח סי\' שכח', () => expectJump(db, index, "שו\"ע או\"ח סי' שכח", 'שולחן ערוך אורח חיים', SIMAN_SHKH, 'סימן שכח'));
