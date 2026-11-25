@@ -241,6 +241,12 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `meta.script_version` is current. `[perf] library-open` / `library-load` (dbOpen, bookIndex, key, cacheRead, query, buildTree, total, cache,
 > sinceStart) / `quickjump-aliases` are logged in dev builds and kept in `globalThis.__KODESHREAD_PERF__`. Self-tested (section 17 `cold start:`).
 
+> **Tanach order, daily cards, manager layout:** `shared/commentaryRank.js` ranks Onkelos #1, Rashi #2 and puts תרגום יונתן LAST of all
+> commentaries (`LATE_DISPLAY`; `CATALOG_VERSION` 2). Daily-learning cards are two lines (label + title; a missing book appends
+> `· לא נמצא בספרייה` to the label). `library-manager.tsx` = one primary card (`CloudLibraryCard`: human-readable installed stage, book
+> count, size, build date, the main download / expand / resume action, `בדוק עדכונים`) + a collapsed-by-default `מתקדם / ייבוא ידני`
+> accordion (`advanced-toggle`: technical stats, `CloudPackageDetails`, custom URL + `הורד והתקן`, build from Otzaria folder, destructive remove).
+
 > **APK on GitHub Actions:** `.github/workflows/build-android-apk.yml` (workflow_dispatch, `publish_release` input) builds the
 > arm64 APK on `ubuntu-latest` without EAS (`db:ensure` -> `expo prebuild` -> `assembleRelease` -> `kodeshRead-<short-sha>.apk`,
 > uploaded as an artifact; with `publish_release` also attached to the non-"latest" `app-latest` release). Optional secrets

@@ -162,6 +162,11 @@ try {
   const tid = (id) => page.locator(`[data-testid="${id}"]`);
   const shot = (name) => (SHOTS ? page.screenshot({ path: `${SHOTS}/${name}.png` }) : null);
   const step = (name) => console.log(`✓ ${name}`);
+  /** The manager's "מתקדם / ייבוא ידני" accordion is collapsed by default (its content is unmounted). */
+  const openAdvanced = async () => {
+    if ((await tid('advanced-toggle').last().getAttribute('aria-expanded')) !== 'true') await tid('advanced-toggle').last().click();
+    await tid('manifest-url').last().waitFor();
+  };
 
   try {
     await page.goto(BASE + '/', { timeout: 180000 });
@@ -172,7 +177,17 @@ try {
 
 
     await tid('open-library-manager').click();
+    await tid('cloud-info').waitFor();
+    // Redesigned manager: a clean primary card; every technical item sits in the collapsed advanced section.
+    assert.strictEqual(await tid('advanced-toggle').getAttribute('aria-expanded'), 'false', 'advanced is collapsed by default');
+    for (const id of ['core-info', 'manifest-url', 'download-core', 'build-core', 'remove-core', 'cloud-details']) assert.strictEqual(await tid(id).count(), 0, `${id} hidden while advanced is collapsed`);
+    await tid('check-update').waitFor();
+    const primary = (await tid('cloud-library-card').innerText()).replace(/[\u2066-\u2069]/g, '');
+    assert.ok(!/מקור|src|sample|פסקאות|קישורי פרשנים|manifest/.test(primary), `no technical clutter on the primary card: ${primary}`);
+    await tid('advanced-toggle').click();
+    assert.strictEqual(await tid('advanced-toggle').getAttribute('aria-expanded'), 'true');
     await tid('core-info').waitFor();
+    for (const id of ['manifest-url', 'download-core', 'build-core', 'remove-core']) assert.strictEqual(await tid(id).count(), 1, `${id} inside the advanced section`);
     const stats = await tid('core-info').innerText();
     const sampleBooks = require('fs')
       .readdirSync(require('path').join(__dirname, '..', 'raw_library', 'sample'), { recursive: true })
@@ -184,17 +199,25 @@ try {
     assert.strictEqual(await tid('download-core').getAttribute('aria-disabled'), 'true', 'download disabled on web');
     assert.strictEqual(await tid('import-files').getAttribute('aria-disabled'), 'true', 'import disabled on web');
     await shot('manager');
-    step('manager shows installed core library + release URL');
+    await tid('advanced-toggle').click();
+    await tid('core-info').waitFor({ state: 'detached' });
+    assert.strictEqual(await tid('advanced-toggle').getAttribute('aria-expanded'), 'false', 'advanced folds again');
+    await tid('advanced-toggle').click();
+    await tid('core-info').waitFor();
+    step('manager: primary card is clean; advanced section toggles open / closed and holds core stats + release URL + build / remove');
 
     // --- Cloud library card (multi-part release) -------------------------------------------------
     await tid('cloud-library-card').waitFor();
     await tid('cloud-info').waitFor();
+    await openAdvanced();
     const clean = (t) => t.replace(/[\u2066-\u2069]/g, ''); // bidi isolates are invisible
     const info = clean(await tid('cloud-info').innerText());
     const CORE_BYTES = stages.core.pkg.totalZipBytes;
     const EXT_BYTES = stages.extended.pkg.totalZipBytes;
     const fmt = (n) => (n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-    assert.ok(/ספרים\s*7,674/.test(info) && /cloud-e2e-1/.test(info) && /נבנתה/.test(info), info);
+    assert.ok(/מותקנת: ספרייה מלאה/.test(info) && /ספרים/.test(info) && !/cloud-e2e-1|מקור|src/.test(info), `human-readable status only: ${info}`);
+    const details = clean(await tid('cloud-details').innerText());
+    assert.ok(/ספרים בענן\s*7,674/.test(details) && /cloud-e2e-1/.test(details) && /נבנתה/.test(details), details);
     assert.ok(clean(await tid('cloud-size-core').innerText()).startsWith(fmt(CORE_BYTES)), await tid('cloud-size-core').innerText());
     assert.ok(clean(await tid('cloud-size-extended').innerText()).startsWith(fmt(EXT_BYTES)), await tid('cloud-size-extended').innerText());
     assert.strictEqual(await tid('cloud-storage-warning-full').count(), 0, 'no warning while the storage is unknown');
@@ -417,6 +440,7 @@ try {
     await page.waitForFunction(() => !document.querySelector('[data-testid="job-result"]'));
     step(`failure card shows the sub-step diagnostic + copy button (${copied})`);
 
+    await openAdvanced();
     await tid('remove-core').click();
     await tid('job-result').waitFor();
     const removed = await tid('job-result').innerText();
@@ -952,7 +976,10 @@ try {
     for (const id of ['daily-loc-il', 'daily-loc-diaspora']) assert.strictEqual(await tid(id).count(), 0, `${id} is gone`);
     assert.ok(!(await last('library-daily').innerText()).includes('חו"ל') && !(await last('library-daily').innerText()).includes('ארץ ישראל'), 'no location chips in the bar');
     assert.strictEqual((await last('daily-title-parasha').innerText()).trim(), 'בהעלותך · שני');
-    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ח\' ט"ו'), 'בהעלותך שני = במדבר ח טו');
+    // Two lines per card: the study label + the title. The old third reference line (במדבר ח' ט"ו) is gone.
+    const parashaCard = (await last('daily-item-parasha').innerText()).trim().split('\n').map((x) => x.trim()).filter(Boolean);
+    assert.strictEqual(parashaCard.length, 2, `parasha card has 2 lines: ${parashaCard.join(' | ')}`);
+    assert.ok(!(await last('daily-item-parasha').innerText()).includes('במדבר ח\' ט"ו'), 'no redundant reference line');
     for (const key of ['dafYomi', 'mishna', 'rambam1', 'rambam3']) {
       assert.ok((await last(`daily-item-${key}`).innerText()).includes('לא נמצא בספרייה'), `${key} greyed (not in the sample)`);
     }
@@ -974,7 +1001,7 @@ try {
     };
     await withZone('America/New_York');
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop()?.innerText.trim() === 'נשא · שני');
-    assert.ok((await last('daily-item-parasha').innerText()).includes('במדבר ד\' ל"ח'));
+    assert.ok(!(await last('daily-item-parasha').innerText()).includes('במדבר ד\' ל"ח'), 'no reference line on the card');
     assert.strictEqual(await page.evaluate(() => 'il' in (JSON.parse(localStorage.getItem('kodeshread.learning'))?.state ?? {})), false, 'no stored location preference');
     await withZone('Asia/Jerusalem');
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="daily-title-parasha"]')].pop()?.innerText.trim() === 'בהעלותך · שני');

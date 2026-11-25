@@ -4,7 +4,7 @@
  * it navigates the current book only.
  *
  *   DailyLearningList     today's Hebrew date and one row per study
- *                         cycle (פרשת השבוע + today's aliyah, דף היומי, משנה יומית, רמב"ם 1 / 3
+ *                         cycle, two lines each (label + title; a missing book adds "לא נמצא בספרייה" to the label)  (פרשת השבוע + today's aliyah, דף היומי, משנה יומית, רמב"ם 1 / 3
  *                         פרקים); a tap opens the exact place in a tab. Books missing from the
  *                         library are listed greyed out ("לא נמצא בספרייה").
  *   DailyLearningCard     the collapsible bar on the Library screen.
@@ -56,13 +56,10 @@ function ItemRow({ item, onOpen, onMissing }: { item: ResolvedItem; onOpen: (t: 
       testID={`daily-item-${item.key}`}
     >
       <Text style={s.itemLabel} numberOfLines={1}>
-        {item.label}
+        {available ? item.label : `${item.label} · לא נמצא בספרייה`}
       </Text>
       <Text style={[s.itemTitle, !available && s.textOff]} testID={`daily-title-${item.key}`}>
         {item.title}
-      </Text>
-      <Text style={s.itemDetail} numberOfLines={2}>
-        {available ? [main.ref, item.detail].filter(Boolean).join(' · ') + (main.exact ? '' : ' (תחילת הספר)') : 'לא נמצא בספרייה'}
       </Text>
       {extra.length ? (
         <View style={s.chips}>
@@ -128,7 +125,6 @@ const createStyles = (c: Palette) =>
     itemLabel: { fontSize: 11, color: c.textMuted, fontWeight: '600', ...alignRight },
     itemTitle: { fontSize: 16, fontWeight: '700', color: c.accent, ...alignRight },
     textOff: { color: c.textMuted },
-    itemDetail: { fontSize: 12, color: c.textMuted, ...alignRight },
     chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: 4 },
     chip: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: 10, backgroundColor: c.accentSoft },
     chipText: { fontSize: 12, color: c.accent, fontWeight: '600' },

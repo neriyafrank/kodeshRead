@@ -10,7 +10,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { USER_ROOT_NAME } from '../../shared/sources';
-import { CloudLibraryCard } from '../components/library/CloudLibraryCard';
+import { Collapsible } from '../components/Collapsible';
+import { CloudLibraryCard, CloudPackageDetails, useCloudManifest } from '../components/library/CloudLibraryCard';
 import { JobStatus } from '../components/library/JobStatus';
 import { PersonalBooks } from '../components/library/PersonalBooks';
 import { ResumeCards } from '../components/library/ResumeCard';
@@ -54,6 +55,8 @@ export default function LibraryManagerScreen() {
   const setManifestUrl = useLibrarySettings((x) => x.setManifestUrl);
   const [urlDraft, setUrlDraft] = useState(manifestUrl);
   const [check, setCheck] = useState<Check>({ status: 'idle' });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const cloud = useCloudManifest();
 
   const [urlSource, setUrlSource] = useState(manifestUrl);
   if (urlSource !== manifestUrl) {
@@ -112,75 +115,95 @@ export default function LibraryManagerScreen() {
         <ResumeCards />
       </View>
 
-      {/* ---------------- cloud library (multi-part release) ---------------- */}
-      <CloudLibraryCard />
+      {/* ---------------- primary card: what is installed + the main action ---------------- */}
+      <CloudLibraryCard cloud={cloud} />
 
-      {/* ---------------- core library ---------------- */}
-      <Text style={s.sectionTitle}>ספריית הליבה</Text>
-      <View style={s.card}>
-        {info ? (
-          <View style={s.stats} testID="core-info">
-            <Stat label="גרסה" value={info.version} />
-            <Stat label="נבנתה" value={fmtDate(info.builtAt)} />
-            <Stat label="מקור" value={info.source ?? '—'} />
-            <Stat label="ספרים" value={num(info.books)} />
-            <Stat label="פסקאות" value={num(info.paragraphs)} />
-            <Stat label="קישורי פרשנים" value={num(info.links)} />
-            {info.size != null ? <Stat label="גודל" value={`${formatMB(info.size)} MB`} /> : null}
-            <Stat label="שלב" value={info.part === 'core' ? (lib.extended ? 'ספרייה מלאה' : 'ספריית יסוד') : 'ספרייה מלאה'} />
-            {lib.extended ? <Stat label="הרחבה: ספרים" value={num(lib.extended.info.books)} /> : null}
-            {lib.extended?.info.size != null ? <Stat label="הרחבה: גודל" value={`${formatMB(lib.extended.info.size)} MB`} /> : null}
-          </View>
-        ) : (
-          <Text style={s.empty}>לא מותקנת ספריית ליבה. הורידו ספרייה מוכנה או בנו אחת מתיקייה במכשיר.</Text>
-        )}
-
-        <Text style={s.label}>כתובת הגרסה (manifest.json או קובץ ‎.gz / ‎.zip / ‎.db)</Text>
-        <TextInput
-          value={urlDraft}
-          onChangeText={setUrlDraft}
-          style={s.input}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="url"
-          placeholder={defaultManifestUrl()}
-          placeholderTextColor={c.textMuted}
-          testID="manifest-url"
-        />
-        {customUrl ? (
-          <Pressable onPress={() => setManifestUrl(null)} hitSlop={6}>
-            <Text style={s.link}>איפוס לכתובת ברירת המחדל</Text>
-          </Pressable>
-        ) : null}
-
-        <View style={s.btnRow}>
-          <Button label="בדוק עדכונים" onPress={onCheck} disabled={busy || check.status === 'checking' || isWeb} kind="secondary" testID="check-update" />
-          <Button label={info ? 'הורד והתקן' : 'הורד ספרייה מוכנה'} onPress={onDownload} disabled={busy || isWeb} testID="download-core" />
-        </View>
-
-        {check.status === 'checking' ? <ActivityIndicator color={c.accent} style={{ marginTop: spacing.sm }} /> : null}
-        {check.status === 'error' ? <Text style={s.error}>{check.message}</Text> : null}
-        {release ? (
-          <View style={s.release} testID="release-info">
-            {release.manifest ? (
-              <>
-                <Text style={s.releaseTitle}>{upToDate ? '✓ הספרייה מעודכנת' : info ? 'גרסה חדשה זמינה' : 'גרסה זמינה להורדה'}</Text>
-                <Text style={s.releaseText}>
-                  גרסה {release.manifest.version} · {fmtDate(release.manifest.builtAt)} · {num(release.manifest.books)} ספרים
-                </Text>
-                <Text style={s.releaseText}>
-                  הורדה {formatMB(release.size)} MB{release.manifest.dbSize ? ` · אחרי חילוץ ${formatMB(release.manifest.dbSize)} MB` : ''}
-                </Text>
-              </>
+      {/* ---------------- advanced / manual import (collapsed by default) ---------------- */}
+      <View style={s.card} testID="advanced-card">
+        <Pressable
+          onPress={() => setAdvancedOpen((v) => !v)}
+          style={({ pressed }) => [s.advHead, pressed && s.btnPressed]}
+          accessibilityRole="button"
+          aria-expanded={advancedOpen}
+          accessibilityState={{ expanded: advancedOpen }}
+          testID="advanced-toggle"
+        >
+          <Text style={s.advTitle}>מתקדם / ייבוא ידני</Text>
+          <Text style={s.caret}>{advancedOpen ? '▴' : '▾'}</Text>
+        </Pressable>
+        <Collapsible open={advancedOpen} testID="advanced-section">
+          <View style={s.advBody}>
+            <Text style={s.label}>פרטים טכניים</Text>
+            {info ? (
+              <View style={s.stats} testID="core-info">
+                <Stat label="גרסה" value={info.version} />
+                <Stat label="נבנתה" value={fmtDate(info.builtAt)} />
+                <Stat label="מקור" value={info.source ?? '—'} />
+                <Stat label="ספרים" value={num(info.books)} />
+                <Stat label="פסקאות" value={num(info.paragraphs)} />
+                <Stat label="קישורי פרשנים" value={num(info.links)} />
+                {info.size != null ? <Stat label="גודל" value={`${formatMB(info.size)} MB`} /> : null}
+                <Stat label="שלב" value={info.part === 'core' ? (lib.extended ? 'ספרייה מלאה' : 'ספריית יסוד') : 'ספרייה מלאה'} />
+                {lib.extended ? <Stat label="הרחבה: ספרים" value={num(lib.extended.info.books)} /> : null}
+                {lib.extended?.info.size != null ? <Stat label="הרחבה: גודל" value={`${formatMB(lib.extended.info.size)} MB`} /> : null}
+              </View>
             ) : (
-              <Text style={s.releaseText}>קובץ ישיר ({release.compression === 'none' ? 'db' : release.compression}) — ללא בדיקת SHA-256</Text>
+              <Text style={s.empty}>לא מותקנת ספריית ליבה.</Text>
             )}
-          </View>
-        ) : null}
+            <CloudPackageDetails cloud={cloud} />
 
-        <View style={s.divider} />
-        <Button label="בנה ספרייה מתיקיית אוצריא במכשיר" onPress={onBuild} disabled={busy || isWeb} kind="secondary" testID="build-core" />
-        {info ? <Button label="הסר את ספריית הליבה" onPress={onRemoveCore} disabled={busy} kind="danger" testID="remove-core" /> : null}
+            <View style={s.divider} />
+            <Text style={s.label}>כתובת הגרסה (manifest.json או קובץ ‎.gz / ‎.zip / ‎.db)</Text>
+            <TextInput
+              value={urlDraft}
+              onChangeText={setUrlDraft}
+              style={s.input}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+              placeholder={defaultManifestUrl()}
+              placeholderTextColor={c.textMuted}
+              testID="manifest-url"
+            />
+            {customUrl ? (
+              <Pressable onPress={() => setManifestUrl(null)} hitSlop={6}>
+                <Text style={s.link}>איפוס לכתובת ברירת המחדל</Text>
+              </Pressable>
+            ) : null}
+            <View style={s.btnRow}>
+              <Button label="בדוק כתובת" onPress={onCheck} disabled={busy || check.status === 'checking' || isWeb} kind="secondary" testID="check-url" />
+              <Button label={info ? 'הורד והתקן' : 'הורד והתקן מכתובת'} onPress={onDownload} disabled={busy || isWeb} testID="download-core" />
+            </View>
+            {check.status === 'checking' ? <ActivityIndicator color={c.accent} style={{ marginTop: spacing.sm }} /> : null}
+            {check.status === 'error' ? <Text style={s.error}>{check.message}</Text> : null}
+            {release ? (
+              <View style={s.release} testID="release-info">
+                {release.manifest ? (
+                  <>
+                    <Text style={s.releaseTitle}>{upToDate ? '✓ הספרייה מעודכנת' : info ? 'גרסה חדשה זמינה' : 'גרסה זמינה להורדה'}</Text>
+                    <Text style={s.releaseText}>
+                      גרסה {release.manifest.version} · {fmtDate(release.manifest.builtAt)} · {num(release.manifest.books)} ספרים
+                    </Text>
+                    <Text style={s.releaseText}>
+                      הורדה {formatMB(release.size)} MB{release.manifest.dbSize ? ` · אחרי חילוץ ${formatMB(release.manifest.dbSize)} MB` : ''}
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={s.releaseText}>קובץ ישיר ({release.compression === 'none' ? 'db' : release.compression}) — ללא בדיקת SHA-256</Text>
+                )}
+              </View>
+            ) : null}
+
+            <View style={s.divider} />
+            <Button label="בנה ספרייה מתיקיית אוצריא במכשיר" onPress={onBuild} disabled={busy || isWeb} kind="secondary" testID="build-core" />
+            {info ? (
+              <>
+                <View style={s.divider} />
+                <Button label="הסר את ספריית הליבה" onPress={onRemoveCore} disabled={busy} kind="danger" testID="remove-core" />
+              </>
+            ) : null}
+          </View>
+        </Collapsible>
       </View>
 
       {/* ---------------- personal books ---------------- */}
@@ -258,4 +281,8 @@ const createStyles = (c: Palette) =>
     releaseTitle: { fontSize: 15, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
     releaseText: { fontSize: 13, color: c.text, writingDirection: 'rtl' },
     divider: { height: 1, backgroundColor: c.border },
+    advHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing.sm },
+    advTitle: { fontSize: 16, fontWeight: '700', color: c.text, writingDirection: 'rtl' },
+    caret: { fontSize: 14, color: c.textMuted },
+    advBody: { gap: spacing.md, paddingTop: spacing.md },
   });

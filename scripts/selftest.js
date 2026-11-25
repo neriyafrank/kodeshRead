@@ -1799,6 +1799,26 @@ async function libraryCatalogTests() {
       // A corpus-wide commentary is general.
       assert.ok(catalog.generalCommentaries.some((g) => g.title === 'חידושי מהראל על השס'));
     });
+    await check('commentary rank: Onkelos #1, Rashi #2, Targum Yonatan last (after every other commentary)', () => {
+      const mk = (id, t, cat, lt) => ({ bookId: id, bookTitle: t, categoryPath: cat, linkType: lt || 'commentary' });
+      const groups = [
+        mk(1, 'גור אריה על בראשית', 'תנך/מפרשים/אחרונים/גור אריה'),
+        mk(2, 'תרגום יונתן על בראשית', 'תנך/תרגומים/תרגום יונתן', 'targum'),
+        mk(3, 'רמב"ן על בראשית', 'תנך/מפרשים/ראשונים/רמבן'),
+        mk(4, 'רש"י על בראשית', 'תנך/מפרשים/ראשונים/רשי'),
+        mk(5, 'אונקלוס על בראשית', 'תנך/תרגומים/אונקלוס', 'targum'),
+        mk(6, 'דעת זקנים על בראשית', 'תנך/מפרשים/ראשונים/דעת זקנים'),
+      ];
+      for (const input of [groups, [...groups].reverse()]) {
+        const names = rank.rankCommentaries(input, { context: { title: 'בראשית' } }).map((g) => g.name);
+        assert.strictEqual(names[0], 'אונקלוס');
+        assert.strictEqual(names[1], 'רש"י');
+        assert.strictEqual(names[names.length - 1], 'תרגום יונתן');
+      }
+      // A user pin still overrides the order.
+      const pinned = rank.rankCommentaries(groups, { context: { title: 'בראשית' }, pinned: [rank.commentatorKey('תרגום יונתן')] });
+      assert.strictEqual(pinned[0].name, 'תרגום יונתן');
+    });
     await check('catalog: commentaries from ראשונים / אחרונים / תרגומים are one group under their base, in canonical rank order', () => {
       const bereshit = idOfPath.get('תנך/תורה/בראשית');
       const list = catalog.commentariesOf(bereshit);
@@ -1806,12 +1826,14 @@ async function libraryCatalogTests() {
       assert.ok(list.length >= 20, `${list.length} commentaries on בראשית`);
       const eras = new Set(list.map(eraOf));
       for (const e of ['rishonim', 'acharonim', 'targum']) assert.ok(eras.has(e), `${e} commentaries grouped together`);
-      assert.deepStrictEqual(list.slice(0, 6).map((x) => x.name), ['אונקלוס', 'תרגום יונתן', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו'].filter((n) => list.some((x) => x.name === n)).slice(0, 6));
+      assert.deepStrictEqual(list.slice(0, 5).map((x) => x.name), ['אונקלוס', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו'].filter((n) => list.some((x) => x.name === n)).slice(0, 5));
+      if (list.some((x) => x.name === 'תרגום יונתן')) assert.strictEqual(list[list.length - 1].name, 'תרגום יונתן', 'Targum Yonatan is last');
       assert.strictEqual(list.find((x) => x.name === 'רש"י').rank < list.find((x) => x.name === 'רמב"ן').rank, true);
-      const firstNonCore = list.findIndex((x) => !x.core);
-      assert.ok(list.slice(0, firstNonCore).every((x) => x.core) && list.slice(firstNonCore).every((x) => !x.core), 'core commentators first');
+      const body = list.filter((x) => x.name !== 'תרגום יונתן');
+      const firstNonCore = body.findIndex((x) => !x.core);
+      assert.ok(body.slice(0, firstNonCore).every((x) => x.core) && body.slice(firstNonCore).every((x) => !x.core), 'core commentators first');
       const order = { targum: 0, rishonim: 1, acharonim: 2, modern: 3 };
-      const rest = list.slice(firstNonCore).filter((x) => eraOf(x));
+      const rest = body.slice(firstNonCore).filter((x) => eraOf(x));
       for (let i = 1; i < rest.length; i++) assert.ok(order[eraOf(rest[i - 1])] <= order[eraOf(rest[i])], `era order at ${rest[i].title}`);
       // Shulchan Aruch אורח חיים: משנה ברורה, מגן אברהם ... lead.
       const oc = catalog.commentariesOf(idOfPath.get('הלכה/שולחן ערוך/שולחן ערוך, אורח חיים'));
@@ -5381,16 +5403,18 @@ async function commentaryRankTests() {
       const r = rank.rankCommentaries(input);
       assert.strictEqual(r[0].corpus, 'tanach');
       assert.deepStrictEqual(names(r), [
-        'אונקלוס', 'תרגום יונתן', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'אור החיים', 'כלי יקר', 'בעל הטורים', 'מלבי"ם',
+        'אונקלוס', 'רש"י', 'רמב"ן', 'אבן עזרא', 'ספורנו', 'אור החיים', 'כלי יקר', 'בעל הטורים', 'מלבי"ם',
         // era fallback: תרגומים -> ראשונים -> אחרונים -> מחברי זמננו, alphabetical inside a tier
         'תרגום ערבי', 'דעת זקנים', 'ר סעדיה גאון', 'אור המאיר', 'גור אריה', 'הערות על מלבים', 'ביאור מודרני',
+        // Targum Yonatan is last of all (Onkelos #1, Rashi #2)
+        'תרגום יונתן',
       ]);
-      assert.deepStrictEqual(r.map((x) => x.tier).slice(9), ['עיקריים', 'תרגומים', 'ראשונים', 'ראשונים', 'אחרונים', 'אחרונים', 'אחרונים', 'נוספים']);
+      assert.deepStrictEqual(r.map((x) => x.tier).slice(8), ['עיקריים', 'תרגומים', 'ראשונים', 'ראשונים', 'אחרונים', 'אחרונים', 'אחרונים', 'נוספים', 'תרגומים']);
     }
   });
   await check('commentary rank: pinned favorites override everything, in pin order', () => {
     const r = rank.rankCommentaries(TANACH, { pinned: ['גור אריה', rank.commentatorKey('אבן עזרא')] });
-    assert.deepStrictEqual(names(r).slice(0, 4), ['גור אריה', 'אבן עזרא', 'אונקלוס', 'תרגום יונתן']);
+    assert.deepStrictEqual(names(r).slice(0, 4), ['גור אריה', 'אבן עזרא', 'אונקלוס', 'רש"י']);
     assert.ok(r[0].pinned && r[1].pinned && !r[2].pinned);
     assert.strictEqual(r[0].tier, 'אחרונים', 'a pinned commentary keeps its own tier badge');
     // Keys are canonical for core commentators: a ⭐ on רש"י holds for "רשי על שבת" too.
@@ -5399,7 +5423,7 @@ async function commentaryRankTests() {
     assert.deepStrictEqual(names(b), ['תוספות', 'רש"י']);
     // Default expansion: favorites + the top 3 others; short lists open entirely.
     const d = rank.defaultExpandedKeys(r);
-    assert.deepStrictEqual([...d], ['גור אריה', 'אבנ עזרא', 'אונקלוס', 'תרגומ יונתנ', 'רשי']);
+    assert.deepStrictEqual([...d], ['גור אריה', 'אבנ עזרא', 'אונקלוס', 'רשי', 'רמבנ']);
     assert.strictEqual(rank.defaultExpandedKeys(b).size, 2);
   });
 

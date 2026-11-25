@@ -323,7 +323,7 @@ function splitBooks(data) {
  * Bumped whenever the catalog's DERIVED output could change for the same books (pairing, roles, placement,
  * ranking rules): a cached snapshot (shared/catalogCache.js) of another version is ignored and rebuilt.
  */
-const CATALOG_VERSION = 1;
+const CATALOG_VERSION = 2;
 
 /** Everything cheap that follows from the classified books (no sorting, no pairing). */
 function derive(state) {

@@ -1,5 +1,7 @@
 /**
- * "ספרייה מוכנה מהענן": the two-stage cloud library (GitHub Release `library-latest`, shared/coreLibrary.js). Reads its
+ * The PRIMARY card of "ניהול ספרייה ועדכונים": what is installed (human-readable stage, book count, size, build date),
+ * one primary action and "בדוק עדכונים". Technical rows (cloud package sizes, version hash) are exported as
+ * `CloudPackageDetails` for the manager's collapsed "מתקדם / ייבוא ידני" section. The two-stage cloud library (GitHub Release `library-latest`, shared/coreLibrary.js). Reads its
  * library-manifest.json and offers, by what is installed (shared/libraryRelease.js libraryAction):
  *   nothing installed   ספריית יסוד (core only, small) | ספרייה מלאה (core + extended in ONE flow, combined size)
  *   core installed      "הרחב לספרייה מלאה": downloads ONLY the extended pack (its exact size)
@@ -48,20 +50,15 @@ function confirmAnyway(title: string, message: string, ok: string, onOk: () => v
 
 /** Short Hebrew description of a stage. */
 const DESCRIPTIONS = {
-  core: 'תנ"ך, משנה, תלמוד בבלי, משנה תורה ושולחן ערוך, עם המפרשים העיקריים. אפשר להרחיב בכל שלב.',
-  full: 'ספריית יסוד והרחבה: כל מאגר אוצריא, בהורדה אחת.',
-  extended: 'כל שאר הספרים והמפרשים. יורדת רק ההרחבה, ספריית היסוד לא יורדת שוב.',
+  core: 'תנ"ך, משנה, בבלי, משנה תורה ושולחן ערוך עם המפרשים העיקריים. אפשר להרחיב בהמשך.',
+  full: 'כל מאגר אוצריא בהורדה אחת.',
+  extended: 'כל שאר הספרים והמפרשים. יורדת רק ההרחבה.',
 } as const;
 
-export function CloudLibraryCard() {
-  const c = useAppTheme();
-  const s = useThemedStyles(createStyles);
-  const lib = useLibrary();
-  const actions = useLibraryActions();
-  const busy = useLibraryJobs((x) => !!x.job);
-  const generation = useLibraryJobs((x) => x.checkpointGeneration);
-  const [pending, setPending] = useState<PendingCloudDownload | null>(null);
-  const recorded = useLibrarySettings((x) => x.installedCloud);
+export type CloudManifestState = ReturnType<typeof useCloudManifest>;
+
+/** Fetches the cloud manifest once and on `retry()` ("בדוק עדכונים"). */
+export function useCloudManifest() {
   const manifestUrl = defaultCloudManifestUrl();
   const [state, setState] = useState<State>({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
@@ -82,6 +79,19 @@ export function CloudLibraryCard() {
     setState({ status: 'loading' });
     setAttempt((n) => n + 1);
   };
+  return { state, retry, manifestUrl };
+}
+
+export function CloudLibraryCard({ cloud }: { cloud: CloudManifestState }) {
+  const c = useAppTheme();
+  const s = useThemedStyles(createStyles);
+  const lib = useLibrary();
+  const actions = useLibraryActions();
+  const busy = useLibraryJobs((x) => !!x.job);
+  const generation = useLibraryJobs((x) => x.checkpointGeneration);
+  const [pending, setPending] = useState<PendingCloudDownload | null>(null);
+  const recorded = useLibrarySettings((x) => x.installedCloud);
+  const { state, retry, manifestUrl } = cloud;
 
   // The saved, unfinished download (re-read whenever a job ends: paused, failed, cancelled, done).
   useEffect(() => {
@@ -121,17 +131,40 @@ export function CloudLibraryCard() {
       void actions.discardCloudDownload().then(() => setPending(null));
     });
 
-  const core = manifest ? packageOf(manifest, 'core') : null;
-  const ext = manifest?.extended ? packageOf(manifest, 'extended') : null;
+
+  const info = lib.core?.info ?? null;
+  const ext = lib.extended?.info ?? null;
+  const stageLine =
+    installed.stage === 'none'
+      ? 'לא מותקנת ספרייה'
+      : installed.stage === 'core'
+        ? `מותקנת: ${STAGE_TITLES.core}`
+        : installed.stage === 'partial'
+          ? 'מותקנת ספרייה חלקית מגרסה קודמת'
+          : `מותקנת: ${STAGE_TITLES.full}`;
+  const books = info ? (info.books ?? 0) + (ext?.books ?? 0) : 0;
+  const bytes = info?.size != null ? info.size + (ext?.size ?? 0) : null;
+  const meta = info ? [`${books.toLocaleString('he-IL')} ספרים`, bytes != null ? formatBytes(bytes) : null, info.builtAt ? `נבנתה ${fmtDate(info.builtAt)}` : null].filter(Boolean).join(' · ') : '';
+  const checking = state.status === 'loading';
 
   return (
     <View style={s.wrap} testID="cloud-library-card">
-      <Text style={s.title}>ספרייה מוכנה מהענן</Text>
-      <Text style={s.body}>
-        ספריית אוצריא מאונדקסת לחיפוש, נבנית בענן ומורדת במספר חלקים. אפשר להתחיל בספריית יסוד קטנה ולהרחיב בכל שלב, או להוריד הכול בבת אחת. אפשר להפסיק ולהמשיך: חלקים שכבר ירדו תקינים לא יורדים שוב.
-      </Text>
+      <Text style={s.title}>הספרייה</Text>
       <View style={s.card} testID="cloud-edition">
-        {state.status === 'loading' ? <ActivityIndicator color={c.accent} testID="cloud-loading" /> : null}
+        <View style={s.gap} testID="cloud-info">
+          <Text style={s.installedLine} testID="cloud-installed-stage">
+            {stageLine}
+          </Text>
+          {meta ? (
+            <Text style={s.hint} testID="cloud-meta">
+              {isolateLtr(meta)}
+            </Text>
+          ) : null}
+        </View>
+        <Text style={s.body}>
+          {installed.stage === 'none' ? 'הורידו ספרייה מוכנה: אפשר להתחיל בספריית יסוד קטנה ולהרחיב בכל שלב.' : 'ההורדה ניתנת להפסקה והמשך: חלקים שכבר ירדו לא יורדים שוב.'}
+        </Text>
+        {checking ? <ActivityIndicator color={c.accent} testID="cloud-loading" /> : null}
         {state.status === 'error' ? (
           <View style={s.gap}>
             <Text style={s.error} testID="cloud-error">
@@ -143,23 +176,8 @@ export function CloudLibraryCard() {
           </View>
         ) : null}
 
-        {manifest && core ? (
-          <View style={s.info} testID="cloud-info">
-            <Row label={STAGE_TITLES.core} value={`${formatBytes(core.totalZipBytes)} · ${core.bookCount.toLocaleString('he-IL')} ספרים`} testID="cloud-size-core" />
-            {ext ? <Row label={STAGE_TITLES.extended} value={`${formatBytes(ext.totalZipBytes)} · ${ext.bookCount.toLocaleString('he-IL')} ספרים`} testID="cloud-size-extended" /> : null}
-            <Row label="ספרים" value={(core.bookCount + (ext?.bookCount ?? 0)).toLocaleString('he-IL')} testID="cloud-books" />
-            <Row label="נבנתה" value={fmtDate(manifest.builtAt)} />
-            <Row label="גרסה" value={`\u2066${manifest.version}\u2069`} />
-          </View>
-        ) : null}
-
         {pending && !busy ? <PendingDownload pending={pending} newer={!!manifest && manifest.version !== pending.manifest.version} onResume={resume} onDiscard={discard} disabled={!canDownload} /> : null}
 
-        {installed.stage !== 'none' ? (
-          <Text style={s.installedLine} testID="cloud-installed-stage">
-            {installed.stage === 'core' ? `מותקנת: ${STAGE_TITLES.core}` : installed.stage === 'partial' ? 'מותקנת ספרייה חלקית מגרסה קודמת' : `מותקנת: ${STAGE_TITLES.full}`}
-          </Text>
-        ) : null}
         {action?.mode === 'current' ? <Text style={s.ok}>✓ הגרסה המותקנת זהה לגרסה בענן</Text> : null}
         {action?.mode === 'update' ? (
           <Text style={s.update} testID="cloud-update">
@@ -222,8 +240,36 @@ export function CloudLibraryCard() {
             <Text style={s.secondaryText}>☁︎  הורד שוב</Text>
           </Pressable>
         ) : null}
+        <Pressable
+          onPress={retry}
+          disabled={busy || checking}
+          style={({ pressed }) => [s.secondary, (busy || checking) && s.disabled, pressed && s.pressed]}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: busy || checking }}
+          testID="check-update"
+        >
+          <Text style={s.secondaryText}>בדוק עדכונים</Text>
+        </Pressable>
       </View>
       {isWeb && !isPreviewCloudDownload() ? <Text style={s.hint}>ההורדה זמינה באפליקציית Android בלבד.</Text> : null}
+    </View>
+  );
+}
+
+/** Technical rows for the collapsed "מתקדם" section: cloud package sizes, build date and version. */
+export function CloudPackageDetails({ cloud }: { cloud: CloudManifestState }) {
+  const s = useThemedStyles(createStyles);
+  const manifest = cloud.state.status === 'ready' ? cloud.state.manifest : null;
+  const core = manifest ? packageOf(manifest, 'core') : null;
+  const ext = manifest?.extended ? packageOf(manifest, 'extended') : null;
+  if (!manifest || !core) return null;
+  return (
+    <View style={s.info} testID="cloud-details">
+      <Row label={STAGE_TITLES.core} value={`${formatBytes(core.totalZipBytes)} · ${core.bookCount.toLocaleString('he-IL')} ספרים`} testID="cloud-size-core" />
+      {ext ? <Row label={STAGE_TITLES.extended} value={`${formatBytes(ext.totalZipBytes)} · ${ext.bookCount.toLocaleString('he-IL')} ספרים`} testID="cloud-size-extended" /> : null}
+      <Row label="ספרים בענן" value={(core.bookCount + (ext?.bookCount ?? 0)).toLocaleString('he-IL')} testID="cloud-books" />
+      <Row label="נבנתה בענן" value={fmtDate(manifest.builtAt)} />
+      <Row label="גרסת הענן" value={`\u2066${manifest.version}\u2069`} />
     </View>
   );
 }

@@ -34,7 +34,6 @@ const { normKey, skeletonPhrase, expandAbbreviation } = require('./hebrewTorahDi
 const CORE_LISTS = {
   tanach: [
     'אונקלוס|תרגום אונקלוס|אונקלוס הגר',
-    'תרגום יונתן|יונתן בן עוזיאל|תרגום יונתן בן עוזיאל|תרגום יהונתן|תי"ב',
     'רש"י',
     'רמב"ן',
     'אבן עזרא|אב"ע|ראב"ע',
@@ -53,6 +52,8 @@ const CORE_LISTS = {
     'חזקוני',
     'אלשיך|תורת משה',
     'העמק דבר|נצי"ב',
+    // Last of every commentator on purpose (see LATE_DISPLAY): Onkelos #1, Rashi #2, Yonatan at the end.
+    'תרגום יונתן|יונתן בן עוזיאל|תרגום יונתן בן עוזיאל|תרגום יהונתן|תי"ב',
   ],
   mishna: [
     'ברטנורא|ברטנורה|רע"ב|ר"ע מברטנורא|רבי עובדיה מברטנורא',
@@ -132,6 +133,9 @@ const CORE_LISTS = {
   ],
 };
 
+/** Core entries that sort after EVERY other commentary (but before parallel works). */
+const LATE_DISPLAY = new Set(['תרגום יונתן']);
+
 /** Hebrew corpus names (for display / debugging). */
 const CORPUS_LABEL = {
   tanach: 'תנ"ך',
@@ -198,7 +202,7 @@ for (const [corpus, list] of Object.entries(CORE_LISTS)) {
     const aliases = spec.split('|');
     const forms = new Set();
     for (const a of aliases) for (const f of nameForms(a)) forms.add(f);
-    return { display: aliases[0], aliases, forms, index, corpus };
+    return { display: aliases[0], aliases, forms, index, corpus, late: LATE_DISPLAY.has(aliases[0]) };
   });
 }
 const ALL_CORPORA = Object.keys(CORE_LISTS);
@@ -378,6 +382,7 @@ function classifyCommentary(item, corpus) {
     corpus: corpus || null,
     core: !!entry,
     coreIndex: entry ? entry.index : null,
+    late: !!(entry && entry.late),
     era,
     tier,
     isSource,
@@ -411,6 +416,7 @@ function rankCommentaries(groups, opts) {
     r.isSource ? 0 : 1,
     // Parallel works after every commentary / translation, in their family order.
     r.isParallel ? 1 : 0,
+    r.late ? 1 : 0,
     r.isParallel ? r.parallelOrder : r.core ? r.coreIndex : inf,
     r.era && ERA_RANK[r.era] !== undefined ? ERA_RANK[r.era] : UNKNOWN_ERA_RANK,
   ];
