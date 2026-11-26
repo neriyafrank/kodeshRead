@@ -769,7 +769,7 @@ try {
     });
     step(`themes: font + theme persist across reload; Dark charcoal reaches reader (${activeBg} active verse), commentary drawer, TOC and library`);
 
-    // --- Shulchan Aruch TOC: סימנים | קבצי הלכות (same segmented switch as פרקים | פרשות) ----------------------
+    // --- Shulchan Aruch TOC: סימנים | נושאים (same segmented switch as פרקים | פרשות) ----------------------
     {
       await page.goto(BASE + '/', { timeout: 180000 });
       await tid('quick-jump-input').waitFor({ timeout: 180000 });
@@ -779,9 +779,9 @@ try {
       await openToc(0);
       assert.strictEqual(await tid('toc-mode-simanim').getAttribute('aria-checked'), 'true', 'סימנים mode by default');
       assert.strictEqual(await tid('toc-mode-topics').getAttribute('aria-checked'), 'false');
-      assert.deepStrictEqual(await all('toc-mode-').evaluateAll((e) => e.map((x) => x.innerText.trim())), ['סימנים', 'קבצי הלכות'], 'both labels, סימנים on the right (first in RTL)');
+      assert.deepStrictEqual(await all('toc-mode-').evaluateAll((e) => e.map((x) => x.innerText.trim())), ['סימנים', 'נושאים'], 'both labels, סימנים on the right (first in RTL)');
       const [ms, mt] = [await tid('toc-mode-simanim').boundingBox(), await tid('toc-mode-topics').boundingBox()];
-      assert.ok(ms.x > mt.x, 'סימנים sits to the right of קבצי הלכות (RTL, like פרקים | פרשות)');
+      assert.ok(ms.x > mt.x, 'סימנים sits to the right of נושאים (RTL, like פרקים | פרשות)');
       const sameRow = await Promise.all([tid('toc-mode-simanim').boundingBox(), tid('toc-mode-topics').boundingBox()]);
       assert.ok(Math.abs(sameRow[0].y - sameRow[1].y) < 2 && Math.abs(sameRow[0].height - sameRow[1].height) < 2, 'one segmented row');
       const activeLabel = () => page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"][aria-selected="true"] [data-testid="toc-label"]').last().innerText();
@@ -790,25 +790,39 @@ try {
       assert.ok((await labels0()).includes('סימן כה') && !(await labels0()).some((l) => l.startsWith('הלכות')), 'סימנים: simanim only, no topic headers');
       assert.strictEqual((await activeLabel()).trim(), 'סימן כה', 'the current siman is highlighted');
       await shot('r5f-sa-toc-simanim');
-      // קבצי הלכות: the topics with their siman ranges, the current topic highlighted, a topic opens its simanim.
+      // נושאים: the topics with their siman ranges, the current topic highlighted, a topic opens its simanim.
       await tid('toc-mode-topics').click();
       await page.waitForFunction(() => document.querySelector('[data-testid="toc-mode-topics"]')?.getAttribute('aria-checked') === 'true');
       await tid('toc-col-0').waitFor();
-      assert.deepStrictEqual(await labels0(), ['הלכות הנהגת אדם בבוקר (א׳–ז׳)', 'הלכות ציצית (ח׳–כ״ד)', 'הלכות תפילין (כ״ה–ל׳)']);
-      assert.strictEqual((await activeLabel()).trim(), 'הלכות תפילין (כ״ה–ל׳)', 'the current topic is highlighted (siman כה)');
+      assert.deepStrictEqual(await labels0(), ['הלכות הנהגת אדם בבוקר', 'הלכות ציצית', 'הלכות תפילין']);
+      assert.ok((await labels0()).every((l) => !/[()׳״–]/.test(l)), 'no siman range in a topic row (the simanim sit in the next column)');
+      {
+        // Zero horizontal overflow: topics -> simanim -> seifim all fit inside the drawer (once its width animation settled).
+        await page.waitForTimeout(600);
+        const m = await page.evaluate(() => {
+          const drawer = [...document.querySelectorAll('[data-testid="toc-drawer"]')].pop().getBoundingClientRect();
+          const cols = [...document.querySelectorAll('[data-testid^="toc-col-"]')].filter((e) => /^toc-col-\d+$/.test(e.dataset.testid)).map((e) => e.getBoundingClientRect());
+          const sc = [...document.querySelectorAll('[data-testid="toc-columns"]')].pop();
+          return { drawer: [drawer.left, drawer.right], cols: cols.map((r) => [Math.round(r.left), Math.round(r.right)]), overflow: sc.scrollWidth - sc.clientWidth };
+        });
+        assert.ok(m.cols.length >= 3, `three columns open: ${JSON.stringify(m.cols)}`);
+        assert.ok(m.cols.every(([l, r]) => l >= m.drawer[0] - 1 && r <= m.drawer[1] + 1), `columns inside the drawer: ${JSON.stringify(m)}`);
+        assert.ok(m.overflow <= 1, `no horizontal scroll (${m.overflow}px)`);
+      }
+      assert.strictEqual((await activeLabel()).trim(), 'הלכות תפילין', 'the current topic is highlighted (siman כה)');
       assert.strictEqual(await page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"][aria-selected="true"] [data-testid="toc-label"]').last().innerText().then((t) => t.trim()), 'סימן כה', 'its simanim open beside it, current siman highlighted');
       await shot('r5g-sa-toc-topics');
       await page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"]', { hasText: 'הלכות ציצית' }).last().click();
       await tid('toc-col-1').waitFor();
       await page.waitForTimeout(250);
-      assert.ok((await page.locator('[data-testid="toc-col-0"] [data-testid="toc-col-head"], [data-testid="toc-col-1"] [data-testid="toc-col-head"]').allInnerTexts()).some((t) => t.includes('לתחילת הלכות ציצית (ח׳–כ״ד)')), 'לתחילת <topic> header');
+      assert.ok((await page.locator('[data-testid="toc-col-0"] [data-testid="toc-col-head"], [data-testid="toc-col-1"] [data-testid="toc-col-head"]').allInnerTexts()).some((t) => t.includes('לתחילת הלכות ציצית')), 'לתחילת <topic> header');
       await page.locator('[data-testid="toc-col-1"] [data-testid="toc-open-section"]').last().click();
       await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('סימן ח'), null, { timeout: 20000 });
-      step('Shulchan Aruch TOC: סימנים (flat, current siman) | קבצי הלכות (topics with ranges, current topic); a topic jumps to its first siman');
+      step('Shulchan Aruch TOC: סימנים (flat, current siman) | נושאים (plain topic names, current topic); a topic jumps to its first siman');
       // Mode is remembered; a siman inside a topic navigates exactly.
       await openToc(0);
       assert.strictEqual(await tid('toc-mode-topics').getAttribute('aria-checked'), 'true', 'the mode persists');
-      assert.strictEqual((await activeLabel()).trim(), 'הלכות ציצית (ח׳–כ״ד)');
+      assert.strictEqual((await activeLabel()).trim(), 'הלכות ציצית');
       await page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"]', { hasText: /^סימן יא$/ }).last().click();
       await page.locator('[data-testid^="toc-verse-"]').first().waitFor();
       await page.locator('[data-testid="toc-col-2"] [data-testid="toc-open-section"]').last().click();

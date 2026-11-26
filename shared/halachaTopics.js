@@ -4,7 +4,7 @@
  *
  *   data:  { pending, sa: { oc, yd, eh, cm: [{ t: 'הלכות ציצית', from: 8, to: 24 }] }, tur: { ... }, turFallback: [...] }
  *
- * Used by the reader's TOC (`groupTocTree`: simanim grouped under "הלכות ציצית (ח׳–כ״ד)" headers, flat fallback when the
+ * Used by the reader's TOC (`groupTocTree`: simanim grouped under "הלכות ציצית" headers, flat fallback when the
  * headings do not match cleanly) and by Quick Jump (`matchTopics`: "שוע ציצית" -> the section book + the topic's first siman).
  * Every function takes the topic data as an optional last argument (tests inject fixtures); with `pending` data (JSON not
  * fetched yet) everything is a no-op.
@@ -95,7 +95,7 @@ const sirNumber = (node) => {
 
 /**
  * Groups the simanim of a Shulchan Aruch / Tur TocTree under their topic headers (synthetic nodes with negative ids,
- * `synthetic: true`, titles like "הלכות ציצית (ח׳–כ״ד)"). Returns the SAME tree when nothing can be grouped cleanly
+ * `synthetic: true`, titles are the plain topic names, e.g. "הלכות ציצית": the range is visible in the siman column). Returns the SAME tree when nothing can be grouped cleanly
  * (not a halacha-section book, fewer than 80% of a container's headings are numbered simanim, no topic data).
  * @param {{roots, children: Map, byId: Map, depth: number}} tree
  * @param {{ title: string, categoryPath?: string }} book
@@ -128,7 +128,7 @@ function groupTocTree(tree, book, data) {
       if (!t) return out.push(k);
       let node = byTopic.get(t);
       if (!node) {
-        node = { id: nextId--, parent_id: parent, level: k.level, title: topicLabel(t), ref_key: '~topic', start_line: k.start_line, synthetic: true };
+        node = { id: nextId--, parent_id: parent, level: k.level, title: t.t, ref_key: '~topic', start_line: k.start_line, synthetic: true };
         byTopic.set(t, node);
         byId.set(node.id, node);
         children.set(node.id, []);

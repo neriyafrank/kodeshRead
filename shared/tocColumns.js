@@ -219,4 +219,22 @@ function tocPanelWidth(columnWidths, opts) {
   return Math.round(Math.min(cap, Math.max(min, sum)));
 }
 
-module.exports = { buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail, TOC_COLUMN_WIDTH, estimateTextWidth, tocColumnWidth, tocPanelWidth };
+/**
+ * Shrinks column widths so their sum fits `cap` (no horizontal overflow): only the part of a column above `minCol` gives way,
+ * in proportion to it (labels then truncate with an ellipsis). When even all-`minCol` columns exceed `cap`, they stay at
+ * `minCol` and the columns scroll.
+ */
+function fitColumnWidths(widths, cap, minCol) {
+  const min = minCol != null ? minCol : 96;
+  const sum = widths.reduce((a, b) => a + b, 0);
+  if (!(cap > 0) || sum <= cap) return widths.slice();
+  const floor = widths.map((w) => Math.min(w, min));
+  const floorSum = floor.reduce((a, b) => a + b, 0);
+  if (floorSum >= cap) return floor;
+  const room = widths.reduce((a, w, i) => a + (w - floor[i]), 0);
+  const keep = (cap - floorSum) / room;
+  const out = widths.map((w, i) => Math.floor(floor[i] + (w - floor[i]) * keep));
+  return out;
+}
+
+module.exports = { fitColumnWidths, buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail, TOC_COLUMN_WIDTH, estimateTextWidth, tocColumnWidth, tocPanelWidth };

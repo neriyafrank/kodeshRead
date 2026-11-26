@@ -40,6 +40,7 @@ import {
   buildTocTree,
   fetchInlineVerses,
   filterToc,
+  fitColumnWidths,
   hasChildren,
   nodeEnd,
   nodeTrail,
@@ -66,6 +67,8 @@ interface TocNode {
   title: string;
   ref_key: string;
   start_line: number;
+  /** A topic header added by shared/halachaTopics.groupTocTree (long names wrap to two lines instead of truncating). */
+  synthetic?: boolean;
 }
 
 interface Props {
@@ -161,7 +164,7 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
   const modeOptions: { options: readonly (readonly [string, string])[]; active: string; set: (m: string) => void } | null = chumash
     ? { options: [['chapters', 'פרקים'], ['parshiot', 'פרשות']], active: parshiotMode ? 'parshiot' : 'chapters', set: (m) => setTocMode(m as 'chapters' | 'parshiot') }
     : ready?.grouped
-      ? { options: [['simanim', 'סימנים'], ['topics', 'קבצי הלכות']], active: topicsMode ? 'topics' : 'simanim', set: (m) => setHalachaMode(m as 'simanim' | 'topics') }
+      ? { options: [['simanim', 'סימנים'], ['topics', 'נושאים']], active: topicsMode ? 'topics' : 'simanim', set: (m) => setHalachaMode(m as 'simanim' | 'topics') }
       : null;
   return (
     <View style={s.panel}>
@@ -266,37 +269,41 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
   const currentVerse = verseList && deepest && currentLine >= deepest.start_line && currentLine <= nodeEnd(tree, deepest, total) ? verseForLine(verseList, currentLine) : null;
 
   // --- fit-to-content widths ---------------------------------------------------------------
-  const nodeWidths = useMemo(
-    () =>
-      columns.map((col) => {
-        const parent = col.parentId != null ? tree.byId.get(col.parentId) : undefined;
-        return tocColumnWidth(
-          col.items.map((n) => n.title),
-          {
-            fontSize: ROW_FONT,
-            chrome: ROW_CHROME,
-            branch: col.items.some((n) => hasChildren(tree, n.id)),
-            branchSpace: CHEVRON_SPACE,
-            header: parent ? `לתחילת ${parent.title}` : null,
-            headerFontSize: HEAD_FONT,
-            headerChrome: HEAD_CHROME,
-          },
-        );
-      }),
-    [columns, tree],
-  );
-  const verseWidth = useMemo(
-    () =>
+  // Each column's width from its rows alone (`rows`) and from rows + its "לתחילת …" header (`full`).
+  const widthsOf = (withHeader: boolean) => ({
+    nodes: columns.map((col) => {
+      const parent = col.parentId != null ? tree.byId.get(col.parentId) : undefined;
+      return tocColumnWidth(
+        col.items.map((n) => n.title),
+        {
+          fontSize: ROW_FONT,
+          chrome: ROW_CHROME,
+          branch: col.items.some((n) => hasChildren(tree, n.id)),
+          branchSpace: CHEVRON_SPACE,
+          header: withHeader && parent ? `לתחילת ${parent.title}` : null,
+          headerFontSize: HEAD_FONT,
+          headerChrome: HEAD_CHROME,
+        },
+      );
+    }),
+    verse:
       verseList && deepest
         ? tocColumnWidth(
             verseList.map((v) => v.title),
-            { fontSize: ROW_FONT, chrome: ROW_CHROME, header: `לתחילת ${deepest.title}`, headerFontSize: HEAD_FONT, headerChrome: HEAD_CHROME },
+            { fontSize: ROW_FONT, chrome: ROW_CHROME, header: withHeader ? `לתחילת ${deepest.title}` : null, headerFontSize: HEAD_FONT, headerChrome: HEAD_CHROME },
           )
         : 0,
-    [verseList, deepest],
-  );
+  });
   // Display order is LTR with the deepest column first (at the left edge).
-  const displayWidths = useMemo(() => [...(verseList ? [verseWidth] : []), ...nodeWidths.slice().reverse()], [verseList, verseWidth, nodeWidths]);
+  // Columns fit the drawer: when rows + headers do not, only the rows size the columns (the headers truncate with an
+  // ellipsis) and what still does not fit gives way proportionally, instead of overflowing the drawer.
+  const displayWidths = useMemo(() => {
+    const order = (w: ReturnType<typeof widthsOf>) => [...(verseList ? [w.verse] : []), ...w.nodes.slice().reverse()];
+    const full = order(widthsOf(true));
+    if (full.reduce((a, b) => a + b, 0) <= cap) return full;
+    return fitColumnWidths(order(widthsOf(false)), cap, 84);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, tree, verseList, deepest, cap]);
   const columnsWidth = displayWidths.reduce((a, b) => a + b, 0);
   const width = tocPanelWidth([columnsWidth], { min: MIN_PANEL_WIDTH, cap });
   // A panel wider than the columns (its minimum width): the deepest column takes the slack.
@@ -334,7 +341,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
       >
         {parent ? (
           <Pressable onPress={() => onJump(parent.start_line)} style={({ pressed }) => [s.colHead, pressed && s.pressed]} testID="toc-open-section">
-            <Text style={s.colHeadText} numberOfLines={1} testID="toc-col-head">
+            <Text style={s.colHeadText} numberOfLines={2} testID="toc-col-head">
               לתחילת {parent.title}
             </Text>
           </Pressable>
@@ -358,7 +365,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
                 testID={`toc-node-${item.id}`}
               >
                 {active ? <View style={s.activeBar} /> : null}
-                <Text style={[s.nodeTitle, active && s.nodeActive]} numberOfLines={1} testID="toc-label">
+                <Text style={[s.nodeTitle, active && s.nodeActive, item.synthetic && s.topicTitle]} numberOfLines={item.synthetic ? 2 : 1} testID="toc-label">
                   {item.title}
                 </Text>
                 {branch ? (
@@ -380,7 +387,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
     return (
       <View key={`v${deepest.id}`} ref={(n) => setWebDir(n, 'rtl')} style={[s.column, nativeDir('rtl'), { width: widthAt(0) }]} testID={`toc-col-${columns.length}`}>
         <Pressable onPress={() => onJump(deepest.start_line)} style={({ pressed }) => [s.colHead, pressed && s.pressed]} testID="toc-open-section">
-          <Text style={s.colHeadText} numberOfLines={1} testID="toc-col-head">
+          <Text style={s.colHeadText} numberOfLines={2} testID="toc-col-head">
             לתחילת {deepest.title}
           </Text>
         </Pressable>
@@ -701,6 +708,7 @@ const createStyles = (c: Palette) => ({
     activeBar: { position: 'absolute', start: 0, top: 0, bottom: 0, width: 3, backgroundColor: c.accent },
     pressed: { opacity: 0.6 },
     // flex: 1 fills the row from the right edge up to the "‹" indicator, which sits at the left.
+    topicTitle: { fontSize: ROW_FONT - 1, lineHeight: 18 },
     nodeTitle: { flex: 1, minWidth: 0, fontSize: ROW_FONT, color: c.text, ...alignRight },
     nodeActive: { color: c.accent, fontWeight: '700' },
     chevron: { fontSize: 17, color: c.textMuted, width: CHEVRON_SPACE - 4, textAlign: 'center' },

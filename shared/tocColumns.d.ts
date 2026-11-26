@@ -55,3 +55,6 @@ export interface TocColumnWidthOptions {
 }
 export function tocColumnWidth(labels: string[], opts?: TocColumnWidthOptions): number;
 export function tocPanelWidth(columnWidths: number[], opts?: { min?: number; cap?: number }): number;
+
+/** Shrinks column widths to fit `cap` (columns above `minCol` give way proportionally); all-minCol columns scroll when still too wide. */
+export function fitColumnWidths(widths: number[], cap: number, minCol?: number): number[];

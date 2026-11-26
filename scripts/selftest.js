@@ -530,7 +530,7 @@ async function main() {
         };
         const oc = await treeOf('שולחן ערוך, אורח חיים');
         const g = ht.groupTocTree(oc.flat, { title: oc.book.title, categoryPath: oc.book.categoryPath }, fixtureData);
-        assert.deepStrictEqual(g.roots.map((n) => n.title), ['הלכות הנהגת אדם בבוקר (א׳–ז׳)', 'הלכות ציצית (ח׳–כ״ד)', 'הלכות תפילין (כ״ה–ל׳)']);
+        assert.deepStrictEqual(g.roots.map((n) => n.title), ['הלכות הנהגת אדם בבוקר', 'הלכות ציצית', 'הלכות תפילין']);
         const kids = g.children.get(g.roots[1].id);
         assert.strictEqual(kids.length, 17);
         assert.deepStrictEqual([kids[0].title, kids[16].title], ['סימן ח', 'סימן כד']);
@@ -541,26 +541,34 @@ async function main() {
         assert.strictEqual(cols.length, 2);
         const line = kids[3].start_line + 1; // inside siman יא
         const path2 = toc.pathForLine(g, line);
-        assert.deepStrictEqual(path2.map((id) => g.byId.get(id).title), ['הלכות ציצית (ח׳–כ״ד)', 'סימן יא']);
+        assert.deepStrictEqual(path2.map((id) => g.byId.get(id).title), ['הלכות ציצית', 'סימן יא']);
         assert.ok(toc.filterToc(g, 'ציצית').some((n) => n.synthetic), 'the topic is findable by name');
         assert.ok(toc.filterToc(g, 'כה').some((n) => n.title === 'סימן כה'), 'simanim stay findable by number');
-        // The two TOC modes: סימנים = the flat tree (current siman pre-selected), קבצי הלכות = topics -> simanim (current topic + siman).
+        // The two TOC modes: סימנים = the flat tree (current siman pre-selected), נושאים = topics -> simanim (current topic + siman).
         assert.deepStrictEqual(toc.pathForLine(oc.flat, line).map((id) => oc.flat.byId.get(id).title), ['סימן יא']);
         assert.ok(oc.flat.roots.every((n) => !n.synthetic) && oc.flat.roots.length === 30, 'סימנים mode: the plain siman list, no topic nodes');
         assert.strictEqual(toc.tocColumns(oc.flat, []).length, 1);
         const topicRows = g.roots.map((n) => [n.title, n.start_line]);
-        assert.strictEqual(topicRows[1][1], kids[0].start_line, 'קבצי הלכות mode: a topic row jumps to its first siman');
+        assert.strictEqual(topicRows[1][1], kids[0].start_line, 'נושאים mode: a topic row jumps to its first siman');
         const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
         const drawer = src('src/components/reader/TocDrawer.tsx');
-        assert.ok(drawer.includes("['simanim', 'סימנים'], ['topics', 'קבצי הלכות']") && drawer.includes("['chapters', 'פרקים'], ['parshiot', 'פרשות']"), 'one segmented switch for Chumash and Shulchan Aruch / Tur');
+        assert.ok(drawer.includes("['simanim', 'סימנים'], ['topics', 'נושאים']") && drawer.includes("['chapters', 'פרקים'], ['parshiot', 'פרשות']"), 'one segmented switch for Chumash and Shulchan Aruch / Tur');
         assert.ok(/ready\?\.grouped/.test(drawer) && drawer.includes('grouped !== tree ? grouped : null'), 'no switch (flat TOC untouched) when there is no topic data');
         const store = src('src/state/learningStore.ts');
         assert.ok(store.includes("halachaMode: 'simanim'") && /halachaMode === 'topics' \|\| p\.halachaMode === 'simanim'/.test(store), 'persisted, sanitized, default סימנים');
+        // Topic rows are the plain names: no siman range (it is visible in the adjacent siman column).
+        assert.ok(g.roots.filter((n) => n.synthetic).every((n) => !/[()׳״–]/.test(n.title)), 'topic titles carry no range');
+        const fit = toc.fitColumnWidths;
+        assert.deepStrictEqual(fit([120, 110, 100], 400), [120, 110, 100], 'already fits: untouched');
+        const fitted = fit([200, 150, 150], 340, 84);
+        assert.ok(fitted.reduce((a, b) => a + b, 0) <= 340 && fitted.every((w, i) => w <= [200, 150, 150][i] && w >= 84), `shrinks to the cap, never below the minimum: ${fitted}`);
+        assert.ok(fitted[0] > fitted[1], 'the wider column keeps more room');
+        assert.deepStrictEqual(fit([200, 200, 200, 200], 300), [96, 96, 96, 96], 'too many columns: minimum widths (scroll)');
         // Tur: each section container is grouped under its own topics.
         const tur = await treeOf('טור');
         const gt = ht.groupTocTree(tur.flat, { title: tur.book.title, categoryPath: tur.book.categoryPath }, fixtureData);
         const secOc = gt.roots.find((r) => r.title === 'אורח חיים');
-        assert.ok(gt.children.get(secOc.id).some((n) => n.title === 'הלכות ציצית (ח׳–כ״ד)') && gt.children.get(secOc.id).some((n) => n.title === 'הלכות שבת (כ״ה–ל׳)'));
+        assert.ok(gt.children.get(secOc.id).some((n) => n.title === 'הלכות ציצית') && gt.children.get(secOc.id).some((n) => n.title === 'הלכות שבת'));
         // Simanim 1-7 have no Tur topic in the fixture: they stay as plain siman rows next to the topics.
         assert.ok(gt.children.get(secOc.id).filter((n) => !n.synthetic).length === 7);
         // Fallbacks: too few simanim, a commentary, a non-halacha book, pending data -> the very same flat tree.
