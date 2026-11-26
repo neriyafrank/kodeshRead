@@ -271,15 +271,11 @@ try {
     await tid('search-input').fill('אמר');
     for (const id of ['all', 'tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) await tid(`corpus-chip-${id}`).waitFor();
     assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'true');
-    // Counts resolve once the catalog is built: 2 Tanach books, the sample's משנה שבת, 3 Bavli tractates.
-    const chipCount = (id) => page.waitForFunction((x) => !!document.querySelector(`[data-testid="corpus-chip-${x}-count"]`) && document.querySelector(`[data-testid="corpus-chip-${x}-count"]`).textContent !== '…', id, { timeout: 30000 });
-    await chipCount('bavli');
-    assert.deepStrictEqual(
-      await Promise.all(['tanach', 'mishna', 'bavli', 'rambam', 'shulchan-aruch'].map((id) => tid(`corpus-chip-${id}-count`).innerText())),
-      ['2', '1', '3', '0', '1'],
-      'matched book counts of the presets (base books only: no Rashi / Tosafot / Ramban / Onkelos)',
-    );
-    assert.ok(Number(await tid('corpus-chip-mefarshim-count').innerText()) >= 8, 'the commentary preset counts the commentaries');
+    // The preset pills show only their names: no book counts (numbers live on the results filter bar only).
+    for (const id of ['all', 'tanach', 'mishna', 'bavli', 'yerushalmi', 'rambam', 'shulchan-aruch', 'mefarshim']) {
+      assert.strictEqual(await tid(`corpus-chip-${id}-count`).count(), 0, `no book count on the ${id} pill`);
+      assert.ok(!/\d/.test(await tid(`corpus-chip-${id}`).innerText()), `the ${id} pill text has no digits`);
+    }
     // בבלי: only Bavli base tractates, never Rashi / Tosafot; the scope button names the preset + count.
     await tid('corpus-chip-bavli').click();
     await allResults('^(שבת|ראש השנה|תענית)');
@@ -511,7 +507,7 @@ try {
     assert.ok(advCount > simpleCount, `advanced ${advCount} > simple ${simpleCount}`);
     // The same jump / filter bar over the advanced results; its total is the result count.
     await tid('adv-group-bar').waitFor({ timeout: 10000 });
-    assert.strictEqual(Number((await tid('adv-group-pill-all-count').innerText()).replace(/\D/g, '')), Math.min(advCount, 1000));
+    assert.strictEqual(Number((await tid('adv-group-pill-all-count').innerText()).replace(/\D/g, '')), Math.min(advCount, 40000));
     assert.ok(await tid('adv-group-pill-0').count(), 'advanced results are grouped');
     // Exact matches first: every card before the divider contains the typed word itself.
     const cardHits = () =>
@@ -555,7 +551,7 @@ try {
     await tid('adv-query').fill('אמר רבא -חסדא');
     await tid('adv-corpus-bavli').click();
     assert.strictEqual(await checked('adv-corpus-all'), 'false');
-    assert.strictEqual(await tid('adv-corpus-bavli-count').innerText(), '3', 'Advanced Search shows the same matched counts');
+    assert.strictEqual(await tid('adv-corpus-bavli-count').count(), 0, 'Advanced Search pills show no book counts either');
     await tid('adv-submit').click();
     await page.waitForFunction(
       () => {

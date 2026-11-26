@@ -1793,6 +1793,10 @@ async function corporaTests() {
     const adv = fs.readFileSync(path.join(ROOT, 'src/app/advanced-search.tsx'), 'utf8');
     for (const src of [simple, adv]) assert.ok(src.includes("from '../../shared/corpora'") && src.includes('useCorpora') && src.includes('CorpusPresets'));
     assert.ok(simple.includes('corpus-chip') && adv.includes('adv-corpus'));
+    const chips = fs.readFileSync(path.join(ROOT, 'src/components/search/CorpusPresets.tsx'), 'utf8');
+    assert.ok(!/-count`|\{k\.count/.test(chips) && !chips.includes('ספרים`'), 'preset pills render no book counts (result counts live on the filter bar only)');
+    assert.strictEqual(search.COUNT_CAP, 40000, 'search result cap');
+    assert.strictEqual(require('../shared/searchStream').STREAM_CAP, 40000, 'stream cap follows the count cap');
     assert.ok(!fs.readFileSync(path.join(ROOT, 'shared/search.js'), 'utf8').includes('corpusCondition'), 'no second (SQL folder pattern) definition of the presets');
   });
 }

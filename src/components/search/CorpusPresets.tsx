@@ -1,8 +1,8 @@
 /**
  * Preset corpus selector shared by Simple Search (one compact scrolling row) and Advanced Search
- * (wrapping chips): "הכל" + the presets of shared/corpora.js (תנ"ך, משנה, בבלי, ... ) each with the
- * number of books it resolved to, so an empty or unresolved preset is visible at a glance. Themed,
- * RTL (the first chip sits at the start/right edge).
+ * (wrapping chips): "הכל" + the presets of shared/corpora.js (תנ"ך, משנה, בבלי, ... ). Chips show only the
+ * name (no book counts: numbers live exclusively on the results filter bar); a preset that resolved to no
+ * books is dimmed. Themed, RTL (the first chip sits at the start/right edge).
  */
 import { ScrollView, Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -12,7 +12,7 @@ import { spacing, useThemedStyles, type Palette } from '../../theme';
 export interface PresetItem {
   id: string;
   label: string;
-  /** Matched books (undefined while the catalog loads: shows "…"). */
+  /** Matched books: never rendered, only dims an empty preset (null / undefined while the catalog loads). */
   count?: number | null;
 }
 
@@ -38,17 +38,12 @@ export function CorpusPresets({ items, selected, onToggle, testIDPrefix, wrap }:
         style={[s.chip, on && s.chipOn, empty && !on && s.chipEmpty]}
         accessibilityRole="checkbox"
         aria-checked={on}
-        accessibilityLabel={k.count != null ? `${k.label}, ${k.count} ספרים` : k.label}
+        accessibilityLabel={k.label}
         testID={`${testIDPrefix}-${k.id}`}
       >
         <Text style={[s.text, on && s.textOn]} numberOfLines={1}>
           {k.label}
         </Text>
-        {k.count !== undefined ? (
-          <Text style={[s.count, on && s.countOn]} testID={`${testIDPrefix}-${k.id}-count`}>
-            {k.count === null ? '…' : k.count}
-          </Text>
-        ) : null}
       </Pressable>
     );
   });
@@ -69,6 +64,4 @@ const createStyles = (c: Palette) =>
     chipEmpty: { opacity: 0.55 },
     text: { fontSize: 14, color: c.text, ...alignRight },
     textOn: { color: c.accent, fontWeight: '700' },
-    count: { fontSize: 11, color: c.textMuted, minWidth: 14, textAlign: 'center' },
-    countOn: { color: c.accent },
   });

@@ -7,7 +7,7 @@
  * Counts grow in place while results stream in; groups are only ever appended (results arrive in library
  * order), the row has a fixed height and the counts use tabular digits, so nothing jumps under the finger.
  */
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text } from 'react-native';
 
 import { createGroupTracker, groupModeFor, type ResultGroup } from '../../../shared/resultGroups';
@@ -17,19 +17,24 @@ import { alignRight } from '../../lib/direction';
 import { spacing, useThemedStyles, type Palette } from '../../theme';
 
 /**
- * Groups of a (streaming) result list. Recomputed per batch: one pass over at most a few thousand rows, with
- * the group of each book resolved once (createGroupTracker caches it per book id).
+ * Groups of a (streaming) result list (up to 40,000 rows). Incremental: while the rows only grow at the end
+ * (the streaming case) just the NEW rows are added to the same tracker, so a batch costs O(batch), not
+ * O(all rows so far); any other change (new search, scope, library) starts a fresh tracker.
  */
 export function useResultGroups(rows: SearchRow[], scope: SearchScope, resultKey: string) {
   const { bookIndex } = useLibrary();
   const mode = groupModeFor(scope);
-  const tracker = useMemo(
-    () => createGroupTracker(mode, { scope, bookInfo: (id: number) => bookIndex.books.get(id) }).add(rows),
+  const state = useRef<{ tracker: ReturnType<typeof createGroupTracker>; rows: SearchRow[]; n: number; mode: string; bookIndex: unknown; resultKey: string; scope: SearchScope } | null>(null);
+  const { tracker, groups } = useMemo(() => {
+    const prev = state.current;
+    const extends_ =
+      !!prev && prev.mode === mode && prev.bookIndex === bookIndex && prev.resultKey === resultKey && prev.scope === scope && rows.length >= prev.n && (prev.n === 0 || (rows[0] === prev.rows[0] && rows[prev.n - 1] === prev.rows[prev.n - 1]));
+    const t = extends_ && prev ? prev.tracker.add(prev.n ? rows.slice(prev.n) : rows) : createGroupTracker(mode, { scope, bookInfo: (id: number) => bookIndex.books.get(id) }).add(rows);
+    state.current = { tracker: t, rows, n: rows.length, mode, bookIndex, resultKey, scope };
+    return { tracker: t, groups: t.groups() };
     // `resultKey` identifies the search the rows belong to.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [rows, mode, bookIndex, resultKey],
-  );
-  const groups = useMemo(() => tracker.groups(), [tracker]);
+  }, [rows, mode, bookIndex, resultKey, scope]);
   return { groups, tracker, mode };
 }
 

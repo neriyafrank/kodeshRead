@@ -333,7 +333,7 @@ function scopeClause(scope) {
 }
 
 const PAGE_SIZE = 40;
-const COUNT_CAP = 1000;
+const COUNT_CAP = 40000;
 
 /**
  * True when the SQLite build has FTS5. Android builds always do (expo-sqlite

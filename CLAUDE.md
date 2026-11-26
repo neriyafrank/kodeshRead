@@ -133,7 +133,7 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 
 > **Progressive search, result groups, search -> reader jumps:** `shared/searchStream.js` `streamPlan` streams plan results
 > (exact phase first; core -> extended -> user/starter, each database's rows emitted before the next is queried; first batch 20,
-> then 100; cap `STREAM_CAP` = `COUNT_CAP`, cursor continues in `searchPlan`) under a `createSearchSession` searchId + AbortController
+> then 100; cap `STREAM_CAP` = `COUNT_CAP` = 40,000 (the group tracker in `useResultGroups` is incremental: O(batch) per batch), cursor continues in `searchPlan`) under a `createSearchSession` searchId + AbortController
 > (a newer query / ביטול stops at the next batch, `lifecycleReducer` 'batch' / 'end' drop stale ids; `streaming` flag, "N+ · מחפש עוד…",
 > dimmed sweep bar). `usePlanResults` runs only while its screen is focused (a covered copy never re-searches). `shared/resultGroups.js`
 > + `ResultGroupsBar.tsx`: jump / filter pills with live counts above the results (whole library -> broad categories, משנה תורה preset ->
@@ -176,7 +176,7 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > book of THAT corpus (`libraryCatalog.CANON`), and strict commentary exclusion passes (commentary / translation folders, "X על Y" /
 > פירוש / תרגום titles, known commentators, the catalog's `isCommentary`). A selection resolves to a `books` scope
 > (`corpusScope`, `scope.corpora` remembers the presets; name "בבבלי (37 ספרים)" feeds the progress banner) - the SQL folder-pattern
-> scope is gone. UI: `CorpusPresets.tsx` + `src/db/useCorpora.ts` (counts per preset). Self-tested (section 15, incl. the real
+> scope is gone. UI: `CorpusPresets.tsx` (names only: no book counts on the pills; result counts live on `ResultGroupsBar`) + `src/db/useCorpora.ts`. Self-tested (section 15, incl. the real
 > `otzaria_index_only.txt`: 39 / 63 / 37 / 39 / 83+ / 4 books), e2e in `e2e:search`.
 
 > **Cloud library (multi-part release):** `.github/workflows/build-library.yml` (workflow_dispatch: `source_repo`,

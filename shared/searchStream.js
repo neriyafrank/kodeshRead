@@ -20,7 +20,7 @@
 const search = require('./search');
 const hs = require('./hebrewSearch');
 
-/** Rows streamed per run (the result count shows "1000+" beyond it; paging continues from the cursor). */
+/** Rows streamed per run (40,000; the result count shows "40000+" beyond it; paging continues from the cursor). */
 const STREAM_CAP = search.COUNT_CAP;
 /** First emit: enough to fill the screen. */
 const FIRST_BATCH = 20;
