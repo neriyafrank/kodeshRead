@@ -536,7 +536,7 @@ try {
     // survives leaving and coming back to the screen
     await tid('open-library-manager').click();
     await tid('library-manager').waitFor();
-    await page.goBack();
+    await tid('header-back').click(); // non-Reader header Back = normal stack back (Home > Manager > Back = Home)
     await tid('starter-toggle').waitFor();
     assert.strictEqual(await tid('starter-toggle').getAttribute('aria-expanded'), 'false', 'still collapsed after navigating away');
     await tid('starter-toggle').click();

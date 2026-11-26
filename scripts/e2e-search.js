@@ -661,7 +661,21 @@ try {
     await tid('header-back').click();
     await tid('open-search').waitFor({ timeout: 20000 });
     assert.ok(!/\/(search|advanced-search|reader)/.test(new URL(page.url()).pathname), 'Simple Search ← lands on Home');
-    step('Simple Search ← goes straight Home');
+    {
+      // Reader > Search > in-app Back returns to the Reader (normal stack back), the Reader's own Back goes Home.
+      await tid('quick-jump-input').fill('שבת ב.');
+      await page.locator('[data-testid="quick-jump-result"]', { hasText: 'שבת' }).first().click();
+      await tid('reader-search').waitFor({ timeout: 20000 });
+      await tid('reader-search').click();
+      await page.waitForURL(/\/search/);
+      await tid('header-back').click();
+      await tid('reader-search').waitFor({ timeout: 20000 });
+      assert.ok(/\/reader/.test(new URL(page.url()).pathname), 'Search ← returns to the Reader');
+      await tid('reader-back').click();
+      await tid('open-search').waitFor({ timeout: 20000 });
+      step('Reader > Search > ← returns to the Reader; the Reader ← goes Home');
+    }
+    step('Simple Search ← pops to Home (Home > Search > Back)');
     await tid('open-search').click();
     await page.waitForURL(/\/search$/);
     await tid('search-input').waitFor();

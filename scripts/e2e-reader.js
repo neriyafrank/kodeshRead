@@ -138,6 +138,15 @@ try {
       }
     }
     assert.deepStrictEqual(await tabsInStore(), refs.map((r) => r[1]));
+    {
+      // Reader > Search > in-app Back = Reader (pops one entry); the Reader's own Back jumps straight Home (clicked throughout this file).
+      await tid('reader-search').click();
+      await page.waitForURL(/\/search/);
+      await tid('header-back').click();
+      await tid('reader-back').waitFor({ timeout: 20000 });
+      assert.ok(/\/reader/.test(new URL(page.url()).pathname), 'Search ← pops back to the Reader');
+      step('header Back: Reader > Search > ← returns to the Reader (the Reader ← still goes Home, see below)');
+    }
     assert.strictEqual((await tid('tabs-counter').innerText()).trim(), '5');
     // The active (newest) tab is scrolled into view and highlighted.
     const active = await tid('tab-' + (await page.evaluate(() => JSON.parse(localStorage.getItem('kodeshread.tabs')).state.tabs.at(-1).bookId)));

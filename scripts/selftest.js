@@ -6473,17 +6473,25 @@ async function navHistoryTests() {
     assert.strictEqual(nav.screenOf('/reader?x=1'), 'reader');
     assert.strictEqual(nav.screenOf('/'), 'home');
   });
+  await check('nav history: non-Reader header Back pops one entry (Reader > Search > Back = Reader; Search > Advanced > Back = Search; Home > Search > Back = Home)', () => {
+    const run = (path) => path.reduce((st, p) => nav.open(st, '/' + p), nav.createHistory());
+    assert.deepStrictEqual(nav.appBackOne(run(['reader', 'search'])), ['home', 'reader']);
+    assert.deepStrictEqual(nav.appBackOne(run(['search', 'advanced-search'])), ['home', 'search']);
+    assert.deepStrictEqual(nav.appBackOne(run(['search'])), ['home']);
+    assert.deepStrictEqual(nav.appBackOne(run(['library-manager'])), ['home']);
+    assert.deepStrictEqual(nav.appBackOne(['home']), ['home'], 'no previous screen: Home');
+  });
   await check('nav history: Advanced Search header back returns to Simple Search (deduplicated), then Search back goes Home', () => {
     let st = nav.createHistory();
     for (const h of ['/search', '/advanced-search', '/reader']) st = nav.open(st, h);
     st = nav.open(st, '/advanced-search'); // reader -> advanced (collapse)
     st = nav.open(st, '/search'); // advanced header back
     assert.deepStrictEqual(st, ['home', 'search']);
-    assert.deepStrictEqual(nav.appBack(st), ['home'], 'Simple Search header back then goes Home');
+    assert.deepStrictEqual(nav.appBackOne(st), ['home'], 'Simple Search header back then pops to Home');
     assert.deepStrictEqual(nav.open(['home', 'advanced-search'], '/search'), ['home', 'advanced-search', 'search'], 'without Simple Search underneath it is pushed');
   });
-  await check('nav history: the in-app Back button jumps straight Home and empties the back stack, from any screen', () => {
-    for (const path of [['search'], ['search', 'reader'], ['reader', 'search', 'reader'], ['library-manager'], ['reader', 'search', 'library-manager']]) {
+  await check('nav history: the READER in-app Back button jumps straight Home and empties the back stack, from any screen', () => {
+    for (const path of [['reader'], ['search', 'reader'], ['reader', 'search', 'reader'], ['library-manager', 'reader']]) {
       let st = nav.createHistory();
       for (const p of path) st = nav.open(st, '/' + p);
       st = nav.appBack(st);
@@ -6491,7 +6499,7 @@ async function navHistoryTests() {
       assert.strictEqual(nav.systemBack(st).handled, false, 'Android Back afterwards does not re-enter the previous screen');
     }
   });
-  await check('nav history: UI wiring (all navigation goes through useAppNav / dismissTo; header Back = goHome; overlays close on Back)', () => {
+  await check('nav history: UI wiring (all navigation goes through useAppNav / dismissTo; Reader header Back = goHome, other screens = back; overlays close on Back)', () => {
     const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
     const appNav = src('src/lib/appNav.ts');
     assert.ok(appNav.includes('router.dismissTo(href') && appNav.includes('router.push(href') && appNav.includes("router.dismissTo('/')") && appNav.includes("router.replace('/')"));
@@ -6500,10 +6508,11 @@ async function navHistoryTests() {
       assert.ok(s.includes('useAppNav()') && !/router\.(navigate|push|back|replace)\(/.test(s), `${f}: navigates only through useAppNav`);
     }
     assert.ok(src('src/app/reader.tsx').includes('const goLibrary = nav.goHome'));
-    assert.ok(src('src/app/advanced-search.tsx').includes("nav.open('/search')") && !src('src/app/advanced-search.tsx').includes('nav.goHome'), 'advanced search header back returns to Simple Search');
+    assert.ok(src('src/app/advanced-search.tsx').includes('nav.back()') && !src('src/app/advanced-search.tsx').includes('nav.goHome'), 'advanced search header back is a normal stack back');
+    assert.ok(appNav.includes('back: () =>') && appNav.includes('router.back()'));
     for (const f of ['src/app/search.tsx', 'src/app/library-manager.tsx']) {
       const s = src(f);
-      assert.ok(s.includes('headerBackVisible: false') && s.includes('<HomeBackButton onPress={nav.goHome} />'), f);
+      assert.ok(s.includes('headerBackVisible: false') && s.includes('<HomeBackButton onPress={nav.back} />') && !s.includes('nav.goHome'), f);
     }
     const ov = src('src/components/Overlay.tsx');
     assert.strictEqual((ov.match(/onRequestClose=\{onClose\}/g) || []).length, 2, 'bottom sheets and drawers close on system Back before the stack pops');

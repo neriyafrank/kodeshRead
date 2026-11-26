@@ -273,9 +273,10 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > **Navigation history & Back:** `shared/navHistory.js` is the pure model; `src/lib/appNav.ts` (`useAppNav`) is the only way screens navigate.
 > `open` returns to an existing occurrence of a screen with `dismissTo` (else `push`), so each screen is in the back stack at most once
 > (no `Search <-> Reader` build-up). Android system Back = the stack's native pop (overlays' `Modal.onRequestClose` close first; Home -> OS exit).
-> The in-app header Back of the top-level screens (`HomeBackButton`, reader / search / library-manager) is `goHome`: straight to Home, empty stack;
-> the Advanced Search header ← is the exception: it returns to Simple Search (`nav.open('/search')`, deduplicated).
-> Self-tested (`nav history:` checks), `e2e:search`.
+> In-app header Back: ONLY the Reader (`reader-back`) is `nav.goHome` (straight to Home, empty stack); Simple Search, Advanced Search,
+> Library Manager and any other screen (`HomeBackButton` / adv-back) use `nav.back` = one normal deduplicated pop (`router.back()`, Home when there
+> is no previous screen): Reader > Search > Back = Reader, Search > Advanced > Back = Search, Home > Search > Back = Home.
+> Self-tested (`nav history:` checks, `shared/navHistory.appBackOne`), `e2e:search` / `e2e:reader` / `e2e:library`.
 
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).

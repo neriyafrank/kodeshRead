@@ -7,7 +7,8 @@ import { HOME, screenOf, type NavHref } from '../../shared/navHistory';
  * The only way screens navigate (model + rules: shared/navHistory.js).
  *  - `open`: a screen already in the stack is returned to with `dismissTo` (everything above it is popped, params
  *    refreshed); otherwise it is pushed. So a screen is never in the stack twice (no Search <-> Reader ping-pong).
- *  - `goHome`: the in-app Back button. Pops everything above Home; Android Back afterwards leaves the app.
+ *  - `goHome`: the READER's in-app Back button. Pops everything above Home; Android Back afterwards leaves the app.
+ *  - `back`: the in-app Back button of every other screen: pops one entry (Home when there is no previous screen).
  * Android system Back is the stack's native pop (one entry per press, overlays' `Modal.onRequestClose` first).
  */
 export function useAppNav() {
@@ -16,6 +17,11 @@ export function useAppNav() {
   return useMemo(
     () => ({
       open: (href: NavHref) => (currentStack(container).includes(screenOf(href)) ? router.dismissTo(href as Href) : router.push(href as Href)),
+      back: () => {
+        const stack = currentStack(container);
+        if (stack.length > 1) router.back();
+        else if (!(stack.length === 1 && stack[0] === HOME)) router.replace('/');
+      },
       goHome: () => {
         const stack = currentStack(container);
         if (stack.length === 1 && stack[0] === HOME) return;

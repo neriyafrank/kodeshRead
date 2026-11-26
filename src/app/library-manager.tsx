@@ -111,7 +111,7 @@ export default function LibraryManagerScreen() {
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="library-manager">
-      <Stack.Screen options={{ title: 'ניהול ספרייה ועדכונים', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.goHome} /> }} />
+      <Stack.Screen options={{ title: 'ניהול ספרייה ועדכונים', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.back} /> }} />
 
       <JobStatus />
       <View style={s.resumeWrap}>

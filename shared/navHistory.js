@@ -7,7 +7,8 @@
  *    (expo-router `dismissTo`), so `Search -> Reader -> Search -> Reader ...` never piles up.
  *  - Android system Back (hardware / gesture) pops exactly one entry; on Home it is not handled (default exit).
  *    Overlays (TOC, `Aa`, filters ... = RN `Modal.onRequestClose`) consume the press first.
- *  - The in-app header Back ALWAYS goes Home and empties the stack.
+ *  - The in-app header Back of the READER (`goHome` / `appBack`) goes Home and empties the stack; every other screen's
+ *    header Back (`back` / `appBackOne`) pops one entry like system Back, falling back to Home without a previous screen.
  */
 
 const HOME = 'home';
@@ -41,4 +42,9 @@ function appBack() {
   return [HOME];
 }
 
-module.exports = { HOME, screenOf, createHistory, open, systemBack, appBack };
+/** In-app header Back of every non-Reader screen: pops one entry (Home when there is none). */
+function appBackOne(stack) {
+  return stack.length <= 1 ? [HOME] : stack.slice(0, -1);
+}
+
+module.exports = { HOME, screenOf, createHistory, open, systemBack, appBack, appBackOne };

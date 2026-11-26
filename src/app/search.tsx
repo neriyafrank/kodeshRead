@@ -130,7 +130,7 @@ export default function SearchScreen() {
 
   return (
     <View style={s.screen}>
-      <Stack.Screen options={{ title: 'חיפוש בטקסט', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.goHome} /> }} />
+      <Stack.Screen options={{ title: 'חיפוש בטקסט', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.back} /> }} />
       <View style={s.top}>
         <View style={s.searchRow}>
           <View style={s.inputRow}>
