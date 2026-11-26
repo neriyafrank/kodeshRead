@@ -453,6 +453,127 @@ async function main() {
       assert.strictEqual(ht.rangeLabel({ from: 8, to: 24 }), 'ח׳–כ״ד');
       assert.strictEqual(ht.topicLabel({ t: 'הלכות ציצית', from: 8, to: 24 }), 'הלכות ציצית (ח׳–כ״ד)');
     });
+    await check('halacha topics: TOC grouping for single-file Tur, commentaries, standalone works; exclusions and partial books', () => {
+      const ht = require('../shared/halachaTopics');
+      const toc = require('../shared/tocColumns');
+      const T = (t, from, to) => ({ t, from, to });
+      const data = {
+        pending: false,
+        sa: { oc: [T('הלכות הנהגת אדם בבוקר', 1, 7), T('הלכות ציצית', 8, 24), T('הלכות תפילין', 25, 30)], yd: [T('הלכות שחיטה', 1, 5), T('הלכות בשר בחלב', 6, 10)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9), T('הלכות הלואה', 10, 20)] },
+        tur: { oc: [T('הלכות הנהגת אדם בבוקר', 1, 7), T('הלכות ציצית', 8, 24), T('הלכות תפילין', 25, 30)], yd: [T('הלכות שחיטה', 1, 5), T('הלכות בשר בחלב', 6, 10)], eh: [T('הלכות אישות', 1, 9)], cm: [T('הלכות דיינים', 1, 9), T('הלכות הלואה', 10, 20)] },
+        turFallback: [],
+      };
+      let id = 0;
+      const num = (n) => dict.intToHebrewNumeral(n);
+      /** nodes: [{ title, level, kids? }] -> flat toc rows (start_line = running counter, children right after their parent). */
+      const rows = (spec) => {
+        const out = [];
+        let line = 1;
+        const add = (n, parent, level) => {
+          const row = { id: ++id, parent_id: parent, level, title: n.title, ref_key: n.title.replace(/^סימן /, ''), start_line: line };
+          line += 2;
+          out.push(row);
+          for (const k of n.kids || []) add(k, row.id, level + 1);
+        };
+        for (const n of spec) add(n, null, 1);
+        return out;
+      };
+      const simanim = (from, to, bare) => Array.from({ length: to - from + 1 }, (_, i) => ({ title: bare ? num(from + i) : `סימן ${num(from + i)}` }));
+      const treeOf = (spec) => toc.buildTocTree(rows(spec));
+      const group = (title, path, spec) => {
+        const t = treeOf(spec);
+        return { flat: t, g: ht.groupTocTree(t, { title, categoryPath: path }, data) };
+      };
+      const titles = (g, parentId) => (g.children.get(parentId) || []).map((n) => n.title);
+
+      // 1. Single-file Tur: four part headings, simanim nested underneath -> topics under each part.
+      const turSpec = [{ title: 'אורח חיים', kids: simanim(1, 30) }, { title: 'יורה דעה', kids: simanim(1, 10) }, { title: 'אבן העזר', kids: simanim(1, 9) }, { title: 'חושן משפט', kids: simanim(1, 20) }];
+      {
+        const { flat, g } = group('טור', 'הלכה/טור', turSpec);
+        assert.notStrictEqual(g, flat, 'Tur (one file, 4 part headings) gets the נושאים mode');
+        assert.deepStrictEqual(g.roots.map((n) => n.title), ['אורח חיים', 'יורה דעה', 'אבן העזר', 'חושן משפט'], 'the four parts stay the top level');
+        assert.deepStrictEqual(titles(g, g.roots[0].id), ['הלכות הנהגת אדם בבוקר', 'הלכות ציצית', 'הלכות תפילין']);
+        assert.deepStrictEqual(titles(g, g.roots[1].id), ['הלכות שחיטה', 'הלכות בשר בחלב'], 'YD uses its own topics, not OC\'s');
+        assert.deepStrictEqual(titles(g, g.roots[3].id), ['הלכות דיינים', 'הלכות הלואה']);
+        const ts = g.children.get(g.roots[0].id)[1];
+        assert.strictEqual(g.children.get(ts.id).length, 17, 'ציצית holds simanim ח-כד');
+        assert.strictEqual(g.depth, flat.depth + 1);
+        // Real-library shapes: a wrapper root over the parts, abbreviated / unnamed part headings, bare-numeral siman headings.
+        const wrapped = group('טור', 'הלכה/טור', [{ title: 'טור', kids: turSpec }]);
+        assert.notStrictEqual(wrapped.g, wrapped.flat, 'a book-title node over the parts');
+        const abbr = group('טור', 'הלכה/טור', [{ title: 'טור או"ח', kids: simanim(1, 30) }, { title: 'טור יו"ד', kids: simanim(1, 10) }]);
+        assert.deepStrictEqual(titles(abbr.g, abbr.g.roots[1].id), ['הלכות שחיטה', 'הלכות בשר בחלב'], 'abbreviated part headings');
+        const unnamed = group('טור', 'הלכה/טור', [{ title: 'חלק א', kids: simanim(1, 30) }, { title: 'חלק ב', kids: simanim(1, 10) }]);
+        assert.deepStrictEqual(titles(unnamed.g, unnamed.g.roots[1].id), ['הלכות שחיטה', 'הלכות בשר בחלב'], 'unrecognised part headings: taken in order');
+        const bare = group('טור', 'הלכה/טור', turSpec.map((p) => ({ title: p.title, kids: p.kids.map((k) => ({ title: k.title.replace('סימן ', '') })) })));
+        assert.notStrictEqual(bare.g, bare.flat, 'bare-numeral siman headings ("כה")');
+        // Flat list whose numbering restarts per part: synthetic part headers are added.
+        const flatTur = group('טור', 'הלכה/טור', [...simanim(1, 30), ...simanim(1, 10)]);
+        assert.deepStrictEqual(flatTur.g.roots.map((n) => n.title), ['אורח חיים', 'יורה דעה']);
+        assert.deepStrictEqual(titles(flatTur.g, flatTur.g.roots[1].id), ['הלכות שחיטה', 'הלכות בשר בחלב']);
+        // Split files ("טור, אורח חיים") are plain single-part books.
+        const split = group('טור, אורח חיים', 'הלכה/טור', simanim(1, 30));
+        assert.deepStrictEqual(split.g.roots.map((n) => n.title), ['הלכות הנהגת אדם בבוקר', 'הלכות ציצית', 'הלכות תפילין']);
+      }
+
+      // 2. Commentaries and standalone works inherit the part (title, folder, known work) or find it in their headings.
+      const oc30 = () => simanim(1, 30);
+      const works = [
+        ['משנה ברורה', 'הלכה', oc30(), 'oc'],
+        ['ביאור הלכה', 'הלכה', oc30(), 'oc'],
+        ['שער הציון', 'הלכה', oc30(), 'oc'],
+        ['מגן אברהם', 'הלכה/שולחן ערוך/מפרשים/מגן אברהם', oc30(), 'oc'],
+        ['פרי מגדים על אורח חיים', 'הלכה/שולחן ערוך/מפרשים/פרי מגדים', oc30(), 'oc'],
+        ['ש"ך על יורה דעה', 'הלכה/שולחן ערוך/מפרשים/שך', simanim(1, 10), 'yd'],
+        ['קצות החושן', 'הלכה/שולחן ערוך/מפרשים/קצות החושן', simanim(1, 20), 'cm'],
+        ['חלקת מחוקק', 'הלכה/שולחן ערוך/מפרשים/חלקת מחוקק', simanim(1, 9), 'eh'],
+        ['בית יוסף על אורח חיים', 'הלכה/טור/מפרשים/בית יוסף', oc30(), 'oc'],
+        ['דרכי משה', 'הלכה/טור/מפרשים/דרכי משה', null, null],
+        ['ערוך השולחן', 'הלכה', null, null],
+      ];
+      for (const [title, path, kids, sec] of works) {
+        const { flat, g } = group(title, path, kids ? kids : turSpec);
+        assert.ok(ht.tocSectionOfBook(title, path), `${title}: recognised`);
+        assert.notStrictEqual(g, flat, `${title}: נושאים mode`);
+        if (sec) assert.strictEqual(ht.tocSectionOfBook(title, path).sec || sec, sec, `${title}: part ${sec}`);
+      }
+      assert.strictEqual(ht.tocSectionOfBook('בית יוסף', 'הלכה/טור/מפרשים/בית יוסף').kind, 'tur', 'Tur commentaries use the Tur topics');
+      assert.strictEqual(ht.tocSectionOfBook('משנה ברורה', 'הלכה').kind, 'sa');
+      // A work covering several parts finds them in its own headings (no part known from the title).
+      const ah = group('ערוך השולחן', 'הלכה', turSpec);
+      assert.deepStrictEqual(ah.g.roots.map((n) => n.title), ['אורח חיים', 'יורה דעה', 'אבן העזר', 'חושן משפט']);
+
+      // 3. Exclusions: other siman numbering / not siman-based -> the TOC is untouched.
+      for (const [title, path] of [
+        ['קיצור שולחן ערוך', 'הלכה'], ['קיצור שלחן ערוך', 'הלכה'], ['שו"ת הרשב"א', 'שו"ת'], ['שו"ת בית יוסף', 'הלכה/שו"ת'], ['חיי אדם', 'הלכה'], ['חכמת אדם', 'הלכה'], ['בן איש חי', 'הלכה'],
+        ['ערוך השולחן העתיד', 'הלכה'], ['הערות על ערוך השולחן העתיד', 'הלכה'], ['שולחן ערוך, הקדמה', 'הלכה/שולחן ערוך'], ['משנה תורה, הלכות שבת', 'הלכה/משנה תורה/ספר זמנים'], ['בראשית', 'תנך/תורה'],
+      ]) {
+        assert.strictEqual(ht.tocSectionOfBook(title, path), null, `${title}: excluded`);
+        const { flat, g } = group(title, path, oc30());
+        assert.strictEqual(g, flat, `${title}: flat TOC untouched`);
+      }
+      // Inside the Shulchan Aruch folder a responsa / different-numbering title is still excluded.
+      assert.strictEqual(ht.tocSectionOfBook('קיצור שולחן ערוך', 'הלכה/שולחן ערוך'), null);
+
+      // 4. Partial works: only topics with simanim in the book appear; no matching simanim / too few / out of range -> flat.
+      {
+        const partial = group('ביאור הלכה', 'הלכה', simanim(8, 20)); // covers only ח-כ
+        assert.deepStrictEqual(partial.g.roots.map((n) => n.title), ['הלכות ציצית'], 'topics with 0 simanim in the book are hidden');
+        assert.strictEqual(partial.g.children.get(partial.g.roots[0].id).length, 13);
+        const cm = group('קצות החושן', 'הלכה/שולחן ערוך/מפרשים/קצות החושן', simanim(10, 20));
+        assert.deepStrictEqual(cm.g.roots.map((n) => n.title), ['הלכות הלואה']);
+        const few = group('משנה ברורה', 'הלכה', simanim(1, 3));
+        assert.strictEqual(few.g, few.flat, 'fewer than 5 simanim: no grouping');
+        const beyond = group('קצות החושן', 'הלכה/שולחן ערוך/מפרשים/קצות החושן', simanim(400, 450));
+        assert.strictEqual(beyond.g, beyond.flat, 'simanim past the part\'s last siman (wrong part): no grouping');
+        const noTopic = group('משנה ברורה', 'הלכה', simanim(100, 110));
+        assert.strictEqual(noTopic.g, noTopic.flat, 'no topic covers these simanim: flat TOC');
+        const prose = group('משנה ברורה', 'הלכה', Array.from({ length: 12 }, (_, i) => ({ title: `שער ${i + 1}` })));
+        assert.strictEqual(prose.g, prose.flat, 'headings that are not simanim: flat TOC');
+        const t30 = treeOf(simanim(1, 30));
+        assert.strictEqual(ht.groupTocTree(t30, { title: 'משנה ברורה', categoryPath: 'הלכה' }, { pending: true, sa: {}, tur: {} }), t30, 'pending data: nothing');
+      }
+    });
     await check('halacha topics: Quick Jump (שוע ציצית, שו"ע בשר בחלב, טור שבת) + numeric queries + TOC grouping', async () => {
       const ht = require('../shared/halachaTopics');
       const toc = require('../shared/tocColumns');
