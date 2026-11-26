@@ -97,26 +97,16 @@ jobs:
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           # Build-time only (the checkout is never committed back): versionName only, versionCode untouched.
-          # NOTE: values written to $GITHUB_ENV are NOT visible in the same step, so the version is passed to node
-          # explicitly (reading process.env.VERSION_NAME here used to give undefined -> no `version` key -> 1.0.0).
-          VERSION_NAME="$VERSION_NAME" node -e "
+          node -e "
             const fs=require('fs');
-            const v=process.env.VERSION_NAME;
-            if(!v){console.error('VERSION_NAME is empty');process.exit(1);}
             const j=JSON.parse(fs.readFileSync('app.json','utf8'));
-            j.expo.version=v;
+            j.expo.version=process.env.VERSION_NAME;
             fs.writeFileSync('app.json', JSON.stringify(j,null,2)+'\\n');
             console.log('app.json version =', j.expo.version, '| android.versionCode =', j.expo.android.versionCode);
           "
-          grep -n '"version"' app.json
 
       - name: Expo prebuild (android)
         run: npx expo prebuild --platform android --clean
-
-      - name: Force versionName in generated Gradle project
-        run: |
-          # Safety net: whatever Expo wrote, versionName is exactly $VERSION_NAME; versionCode is left untouched.
-          sed -i -E "s/^([[:space:]]*)versionName[[:space:]]+\"[^\"]*\"/\1versionName \"${VERSION_NAME}\"/" android/app/build.gradle
 
       - name: Check versionName in generated Gradle project
         run: |
