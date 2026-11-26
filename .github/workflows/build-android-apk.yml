@@ -8,6 +8,10 @@ name: Build Android APK
 # that keystore (plugins/withAndroidReleaseSigning.js, same key every run = in-place upgrades on the
 # phone). Without them the generated project signs with the debug keystore, so the APK still installs.
 #
+# Every run gets a unique versionName (YYYY.MM.DD-<run number>, injected into app.json at build time only;
+# versionCode stays unchanged so older APKs can still be installed over newer ones while testing).
+# publish_release=true (default) creates a GitHub Release `v<versionName>` with kodeshread-v<versionName>.apk
+# attached and auto-generated notes (commits since the previous release); it is never marked "latest".
 # publish_release=true also (re)creates the `app-latest` release with the APK attached. It is never
 # marked "latest", so the app's `releases/latest/download/manifest.json` library URL is unaffected.
 
@@ -15,9 +19,14 @@ on:
   workflow_dispatch:
     inputs:
       publish_release:
-        description: Also publish / update the `app-latest` GitHub Release with the APK attached
+        description: Publish a versioned GitHub Release (tag vYYYY.MM.DD-RUN) with the APK and auto-generated notes
         type: boolean
-        default: false
+        default: true
+      release_name:
+        description: Optional short label appended to the Release title
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: write # only used by the optional release step
@@ -78,8 +87,32 @@ jobs:
             echo "::notice::ANDROID_KEYSTORE_* secrets not set: building with the debug keystore (installable, but not upgradeable from a build signed with another key)."
           fi
 
+      - name: Compute unique version
+        id: ver
+        run: |
+          VERSION_NAME="$(date -u +'%Y.%m.%d')-${GITHUB_RUN_NUMBER}"
+          RELEASE_TAG="v${VERSION_NAME}"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          # Build-time only (the checkout is never committed back): versionName only, versionCode untouched.
+          node -e "
+            const fs=require('fs');
+            const j=JSON.parse(fs.readFileSync('app.json','utf8'));
+            j.expo.version=process.env.VERSION_NAME;
+            fs.writeFileSync('app.json', JSON.stringify(j,null,2)+'\\n');
+            console.log('app.json version =', j.expo.version, '| android.versionCode =', j.expo.android.versionCode);
+          "
+
       - name: Expo prebuild (android)
         run: npx expo prebuild --platform android --clean
+
+      - name: Check versionName in generated Gradle project
+        run: |
+          grep -n 'versionName\|versionCode' android/app/build.gradle
+          grep -q "versionName \"$VERSION_NAME\"" android/app/build.gradle \
+            || { echo "::error::versionName $VERSION_NAME missing from android/app/build.gradle"; exit 1; }
 
       - name: Gradle assembleRelease
         working-directory: android
@@ -101,7 +134,10 @@ jobs:
           cp "$src" "dist-apk/$name"
           # The release asset is a byte-identical copy of the artifact file.
           cp "dist-apk/$name" dist-apk/kodeshRead-latest.apk
+          # Unique, versioned copy used for the GitHub Release (attached as-is, not zipped).
+          cp "$src" "dist-apk/kodeshread-${RELEASE_TAG}.apk"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "release_apk=kodeshread-${RELEASE_TAG}.apk" >> "$GITHUB_OUTPUT"
           ls -l dist-apk
 
       - name: Verify APK (signature, alignment, size, SHA-256)
@@ -133,6 +169,18 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 30
+
+      - name: Publish versioned GitHub Release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ inputs.release_name != '' && format('{0} — {1}', env.RELEASE_TAG, inputs.release_name) || env.RELEASE_TAG }}
+          files: dist-apk/${{ steps.apk.outputs.release_apk }}
+          generate_release_notes: true
+          make_latest: "false"
+          fail_on_unmatched_files: true
 
       - name: Publish app-latest release
         if: ${{ inputs.publish_release }}
@@ -178,7 +226,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### APK: \`${{ steps.apk.outputs.name }}\`"
+            echo "### APK: \`${{ steps.apk.outputs.release_apk }}\` (versionName \`${{ steps.ver.outputs.version_name }}\`)"
             echo "- Signing: ${{ steps.keystore.outputs.signed == 'true' && 'release keystore (secrets)' || 'debug keystore (no secrets set)' }}"
             echo "- Download: the run's **Artifacts** section${{ inputs.publish_release && ', or the `app-latest` release' || '' }}"
           } >> "$GITHUB_STEP_SUMMARY"
