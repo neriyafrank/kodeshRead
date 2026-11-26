@@ -21,6 +21,8 @@ export interface Lifecycle {
   scanned: number;
   startedAt: number;
   counting: boolean;
+  /** Progressive search: rows are on screen and more are still arriving. */
+  streaming: boolean;
   results: LifecycleResults | null;
 }
 export type LifecycleAction =
@@ -29,6 +31,8 @@ export type LifecycleAction =
   | { type: 'page'; id: number; results: LifecycleResults }
   | { type: 'count'; id: number; count: { count: number; capped: boolean } }
   | { type: 'more'; id: number; rows: any[]; hasMore: boolean; cursor: any }
+  | { type: 'batch'; id: number; base: { key: string; terms: string[]; elapsed: number }; rows: any[]; cursor?: any }
+  | { type: 'end'; id: number; base?: { key: string; terms: string[]; elapsed: number; error?: string }; count: { count: number; capped: boolean }; hasMore: boolean; cursor: any }
   | { type: 'cancel'; id: number };
 
 export const BANNER_DELAY_MS: number;

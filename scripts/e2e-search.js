@@ -9,6 +9,9 @@
  * multi-select Scope Picker (canonical catalog: ספרי בסיס / פרשנים לפי ספר, books + commentaries,
  * בחר הכל, כל הפרשנים על …, removable chips) and the dedicated Advanced Search screen
  * (fields, toggles, proximity, corpus chips, picked books, highlighted variants, back to Simple Search).
+ * Progressive results (first batch at once, the rest streamed behind a subtle indicator, stable layout) and the
+ * results jump / filter bar (broad categories with live counts, filter, הכל, reset on a new search), in Simple and
+ * Advanced Search.
  *
  * Requires the `playwright` package with a Chromium build (not a project
  * dependency). The web preview's SQLite has no FTS5, so it exercises the
@@ -101,6 +104,15 @@ try {
       const hits = [...document.querySelectorAll('[data-testid="search-hit"]')];
       return hits.length > 0 && hits.every((el) => el.textContent.replace(/[\u0591-\u05C7]/g, '').replace(/[^\u05D0-\u05EA]/g, '') === 'שבת');
     }, null, { timeout: 20000 });
+    const allResultsNow = (src) =>
+      page.waitForFunction(
+        (re) => {
+          const els = [...document.querySelectorAll('[data-testid="search-result"]')].filter((el) => el.getBoundingClientRect().height > 0);
+          return els.length > 0 && els.every((el) => new RegExp(re).test(el.innerText));
+        },
+        src,
+        { timeout: 15000 },
+      );
     const countOf = async (id) => parseInt((await tid(id).innerText()).replace(/[^\d]/g, ' ').trim().split(' ')[0], 10);
     await tid('search-count').waitFor();
     await page.waitForFunction(() => /^\d+ תוצאות/.test((document.querySelector('[data-testid="search-count"]') || {}).textContent || ''), null, { timeout: 20000 });
@@ -168,15 +180,63 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="search-hit"]')].length > 0 && [...document.querySelectorAll('[data-testid="search-hit"]')].every((el) => el.textContent.replace(/[^א-ת]/g, '') === 'אמר'), null, { timeout: 15000 });
     await page.waitForTimeout(1500);
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('[data-testid="search-hit"]')].every((el) => el.textContent.replace(/[^א-ת]/g, '') === 'אמר')), 'late results of the superseded query never appear');
-    // The first page shows immediately; the total resolves behind a subtle indicator.
-    await setDelay(0, 1500);
-    await tid('search-input').fill('ויאמר אל');
-    await tid('search-result').first().waitFor({ timeout: 15000 });
-    const countTxt = async () => (await tid('search-count').innerText().catch(() => '')) || '';
-    await page.waitForFunction(() => /מחשב סך הכל/.test((document.querySelector('[data-testid="search-count"]') || {}).textContent || ''), null, { timeout: 5000 }).catch(() => undefined);
-    const counting = /מחשב סך הכל/.test(await countTxt());
-    if (counting) await page.waitForFunction(() => !/מחשב סך הכל/.test((document.querySelector('[data-testid="search-count"]') || {}).textContent || ''), null, { timeout: 15000 });
-    step(`newer query supersedes a slow one; first page before the total${counting ? ' (count indicator shown)' : ''}`);
+    step('newer query supersedes a slow one');
+
+    // Progressive results: the first batch shows immediately, the rest streams in behind a subtle, non-blocking
+    // indicator (dimmed sweep bar, "N+ … מחפש עוד…"), the jump / filter bar counts grow in place.
+    await page.evaluate(() => {
+      globalThis.__KODESHREAD_STREAM_DELAY_MS__ = 450;
+      globalThis.__KODESHREAD_STREAM_BATCH__ = 60;
+    });
+    await tid('search-input').fill('ויאמר');
+    await tid('search-streaming').waitFor({ state: 'attached', timeout: 15000 });
+    const pillCount = (id) => tid(id).innerText().then((t) => t.trim());
+    assert.ok(/^\d+\+ תוצאות.*מחפש עוד…/.test(await tid('search-count').innerText()), `streaming count: ${await tid('search-count').innerText()}`);
+    const early = await pillCount('group-pill-all-count');
+    assert.ok(/^\d+\+$/.test(early), `growing total: ${early}`);
+    assert.strictEqual(await tid('search-status').count(), 0, 'no blocking banner while results stream in');
+    const barY = (await tid('group-bar').boundingBox()).y;
+    const firstCard = await firstLine();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="search-streaming"]'), null, { timeout: 30000 });
+    assert.strictEqual(await pillCount('group-pill-all-count'), '454', 'final total');
+    assert.ok(parseInt(early, 10) < 454, `${early} -> 454`);
+    assert.strictEqual((await tid('group-bar').boundingBox()).y, barY, 'the bar never moves while counts grow');
+    assert.strictEqual(await firstLine(), firstCard, 'rows already on screen stay in place');
+    assert.ok(/^454 תוצאות/.test(await tid('search-count').innerText()));
+    await page.evaluate(() => {
+      globalThis.__KODESHREAD_STREAM_DELAY_MS__ = 0;
+      globalThis.__KODESHREAD_STREAM_BATCH__ = undefined;
+    });
+    step(`progressive results: first batch at once, ${early} -> 454 streamed in behind a subtle indicator`);
+
+    // Jump / filter bar (whole library = broad categories): one tap filters, הכל resets, a new search resets it.
+    const pills = () => page.evaluate(() => [...document.querySelectorAll('[data-testid^="group-pill-"][data-testid$="-label"]')].map((el) => [el.dataset.testid.replace(/-label$/, ''), el.textContent]));
+    const groupPills = await pills();
+    assert.deepStrictEqual(groupPills.map((x) => x[1]), ['הכל', 'תנ"ך', 'ש"ס בבלי'], JSON.stringify(groupPills));
+    assert.deepStrictEqual([await pillCount('group-pill-0-count'), await pillCount('group-pill-1-count')], ['410', '44']);
+    assert.strictEqual(await tid('group-pill-all').getAttribute('aria-selected'), 'true');
+    await shot('2a-group-bar');
+    await tid('group-pill-1').click();
+    await allResultsNow('^(שבת|ראש השנה|תענית|רש"י על שבת|תוספות על שבת)');
+    assert.strictEqual(await tid('group-pill-1').getAttribute('aria-selected'), 'true');
+    assert.strictEqual(await tid('group-pill-all').getAttribute('aria-selected'), 'false');
+    {
+      // The filtered list opens at its top: the first card sits fully below the bar.
+      const bar = await tid('group-bar').boundingBox();
+      const top = await page.evaluate(() => Math.min(...[...document.querySelectorAll('[data-testid="search-result"]')].map((e) => e.getBoundingClientRect()).filter((r) => r.height > 0).map((r) => r.top)));
+      assert.ok(top >= bar.y + bar.height - 1, `first filtered card at the top (${top} vs bar bottom ${bar.y + bar.height})`);
+    }
+    await shot('2b-group-filtered');
+    await tid('group-pill-0').click();
+    await allResultsNow('^(בראשית|במדבר|.* על בראשית)');
+    await tid('group-pill-all').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="search-result"]')].some((el) => el.innerText.startsWith('בראשית')), null, { timeout: 10000 });
+    assert.strictEqual(await tid('group-pill-all').getAttribute('aria-selected'), 'true');
+    await tid('group-pill-1').click();
+    await tid('search-input').fill('שבת');
+    await page.waitForFunction(() => (document.querySelector('[data-testid="group-pill-all"]') || {}).getAttribute?.('aria-selected') === 'true' && !document.querySelector('[data-testid="search-streaming"]'), null, { timeout: 15000 });
+    assert.ok((await pills()).length >= 2, 'the new search has its own groups');
+    step(`jump / filter bar: ${groupPills.slice(1).map((x) => x[1]).join(' · ')} with live counts; a pill filters, הכל and a new search reset`);
 
     // "לא נמצאו תוצאות" never flashes while the search is still running.
     await setDelay(1500, 0);
@@ -449,6 +509,10 @@ try {
     await page.waitForFunction(() => /^\d+ תוצאות/.test((document.querySelector('[data-testid="adv-count"]') || {}).textContent || ''), null, { timeout: 30000 });
     const advCount = await countOf('adv-count');
     assert.ok(advCount > simpleCount, `advanced ${advCount} > simple ${simpleCount}`);
+    // The same jump / filter bar over the advanced results; its total is the result count.
+    await tid('adv-group-bar').waitFor({ timeout: 10000 });
+    assert.strictEqual(Number((await tid('adv-group-pill-all-count').innerText()).replace(/\D/g, '')), Math.min(advCount, 1000));
+    assert.ok(await tid('adv-group-pill-0').count(), 'advanced results are grouped');
     // Exact matches first: every card before the divider contains the typed word itself.
     const cardHits = () =>
       page.evaluate(() =>

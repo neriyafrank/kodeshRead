@@ -7,7 +7,9 @@
  *  - linguistic toggles: תחיליות וסופיות (on), כתיב מלא/חסר, ראשי תיבות (off);
  *  - קרבת מילים: פסקה | ביטוי מדויק | קרבה 3 / 5 / 10 (+ שמור על סדר המילים);
  *  - סינון לפי מדור: הכל, הספר הנוכחי, תנ"ך, משנה, בבלי, רמב"ם, שולחן ערוך, מפרשים;
- *  - "חפש" runs the query (exact matches first, then expanded variants, all highlighted);
+ *  - "חפש" runs the query (exact matches first, then expanded variants, all highlighted); results stream in
+ *    progressively under a jump / filter bar of result groups (ResultGroupsBar) and the top / visible ones are
+ *    prefetched for a zero-delay open;
  *    "נקה הכל" restores the defaults. The form folds into a summary bar over the results.
  *
  * Route params (optional): bookId + title name the "current book" chip.
@@ -20,15 +22,19 @@ import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } fr
 
 import { ADVANCED_DEFAULTS, NEAR_DISTANCES, buildQuery, type ProximityMode, type SearchPlan } from '../../shared/hebrewSearch';
 import { CORPORA } from '../../shared/corpora';
+import { filterByGroup } from '../../shared/resultGroups';
 import type { SearchRow, SearchScope } from '../../shared/search';
 import { CorpusPresets } from '../components/search/CorpusPresets';
 import { ResultCard } from '../components/search/ResultCard';
+import { ResultGroupsBar, useResultGroups } from '../components/search/ResultGroupsBar';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
 import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
+import { useResultPrefetch } from '../components/search/useResultPrefetch';
 import { useCorpora } from '../db/useCorpora';
 import { alignRight, inputAlignRight } from '../lib/direction';
+import { cancelPrefetch } from '../services/searchPrefetch';
 import { advancedDefaults, scopeLabel, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
@@ -98,7 +104,8 @@ export default function AdvancedSearchScreen() {
   // The query runs on "חפש": a snapshot of the form.
   const [submitted, setSubmitted] = useState<{ plan: SearchPlan; scope: SearchScope } | null>(null);
   const [formOpen, setFormOpen] = useState(true);
-  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, counting, progress } = usePlanResults(submitted?.plan ?? null, submitted?.scope ?? { kind: 'all' }, 0, submitted);
+  const submittedScope = useMemo<SearchScope>(() => submitted?.scope ?? { kind: 'all' }, [submitted]);
+  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, streaming, progress } = usePlanResults(submitted?.plan ?? null, submittedScope, 0, submitted);
   const draftPlan = useMemo(() => planOf(advanced), [advanced]);
 
   const setField = (k: keyof AdvancedState['fields'], v: string) => setAdvanced({ fields: { ...advanced.fields, [k]: v } });
@@ -142,13 +149,23 @@ export default function AdvancedSearchScreen() {
   const onOpen = useCallback(
     (row: SearchRow) => {
       Keyboard.dismiss();
+      cancelPrefetch(); // the reader's own queries go first
       openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true, terms: shown?.terms ?? [] });
       router.navigate('/reader');
     },
     [openBook, router, shown?.terms],
   );
 
-  const rows = useMemo(() => shown?.rows ?? [], [shown?.rows]);
+  // Jump / filter bar over the (streaming) results; a new search resets it to הכל.
+  const allRows = useMemo(() => shown?.rows ?? [], [shown?.rows]);
+  const resultKey = shown?.key ?? '';
+  const { groups, tracker } = useResultGroups(allRows, submittedScope, resultKey);
+  const [pickedGroup, setPickedGroup] = useState<{ key: string; group: string | null }>({ key: '', group: null });
+  const group = pickedGroup.key === resultKey && groups.some((g) => g.key === pickedGroup.group) ? pickedGroup.group : null;
+  const rows = useMemo(() => filterByGroup(allRows, group, tracker), [allRows, group, tracker]);
+  // A picked group opens its results from the top (the list is keyed by the group).
+  const selectGroup = useCallback((g: string | null) => setPickedGroup({ key: resultKey, group: g }), [resultKey]);
+  const prefetch = useResultPrefetch(rows, !!current && !loading && !streaming, `${resultKey}|${group ?? ''}`);
   const renderItem = useCallback(
     ({ item, index }: { item: SearchRow; index: number }) => {
       const firstExpanded = item.phase === 1 && (index === 0 || rows[index - 1]?.phase !== 1);
@@ -338,13 +355,16 @@ export default function AdvancedSearchScreen() {
           <View style={s.resultsHeader}>
             {!loading && current ? (
               <Text style={s.count} testID="adv-count">
-                {countLabel(current, counting)}
+                {countLabel(current, streaming)}
               </Text>
             ) : null}
             <View style={s.flex} />
             {submitted.plan.hasExpansions ? <Text style={s.note}>התאמות מדויקות תחילה</Text> : null}
           </View>
-          <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} scope={submitted.scope} progress={progress} onCancel={cancel} onRetry={rerun} testIDPrefix="adv" />
+          <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} streaming={streaming} scope={submitted.scope} progress={progress} onCancel={cancel} onRetry={rerun} testIDPrefix="adv" />
+          {!current?.error && allRows.length ? (
+            <ResultGroupsBar groups={groups} total={allRows.length} streaming={streaming} selected={group} onSelect={selectGroup} testIDPrefix="adv-group" />
+          ) : null}
           {current?.error ? (
             <Text style={s.empty}>שגיאה בחיפוש: {current.error}</Text>
           ) : current && current.rows.length === 0 && !current.hasMore ? (
@@ -353,12 +373,16 @@ export default function AdvancedSearchScreen() {
             </Text>
           ) : (
             <FlashList
+              key={group ?? 'all'}
               data={rows}
               keyExtractor={(r) => String(r.id)}
               renderItem={renderItem}
               extraData={shown?.terms}
               onEndReached={loadMore}
               onEndReachedThreshold={0.6}
+              onScroll={prefetch.onScroll}
+              scrollEventThrottle={64}
+              onViewableItemsChanged={prefetch.onViewableItemsChanged}
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={s.list}
               ListFooterComponent={

@@ -126,10 +126,27 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > **Search progress UI:** `shared/searchLifecycle.js` (pure state machine: idle -> searching -> done | cancelled; every action
 > carries a monotonic request id so stale / post-cancel results are ignored; Hebrew elapsed formatting with LTR-isolated numbers)
 > drives `usePlanResults` (`src/components/search/`): loading state dispatched first, work starts after the next paint, an
-> `AbortController` per run (`shared/search.js` `signal` / `onProgress`: real verify / count batch counts), first page shown while
-> the total resolves (`counting`). `SearchProgress.tsx` = native-driver sweep bar + banner (scope / stage, live timer and `ביטול`
+> `AbortController` per run (`shared/search.js` `signal` / `onProgress`: real verify batch counts), first batch shown while
+> the rest streams in (`streaming`, see "Progressive search" below). `SearchProgress.tsx` = native-driver sweep bar + banner (scope / stage, live timer and `ביטול`
 > after 300 ms, `החיפוש בוטל` + `חפש שוב`) + `LoadingMoreFooter`, used by Simple and Advanced Search. e2e slows runs with
-> `globalThis.__KODESHREAD_SEARCH_DELAY_MS__` / `__KODESHREAD_COUNT_DELAY_MS__`. Self-tested (section 13), e2e in `e2e:search`.
+> `globalThis.__KODESHREAD_SEARCH_DELAY_MS__` / `__KODESHREAD_STREAM_DELAY_MS__` (older alias `__KODESHREAD_COUNT_DELAY_MS__`). Self-tested (section 13), e2e in `e2e:search`.
+
+> **Progressive search, result groups, search -> reader jumps:** `shared/searchStream.js` `streamPlan` streams plan results
+> (exact phase first; core -> extended -> user/starter, each database's rows emitted before the next is queried; first batch 20,
+> then 100; cap `STREAM_CAP` = `COUNT_CAP`, cursor continues in `searchPlan`) under a `createSearchSession` searchId + AbortController
+> (a newer query / ביטול stops at the next batch, `lifecycleReducer` 'batch' / 'end' drop stale ids; `streaming` flag, "N+ · מחפש עוד…",
+> dimmed sweep bar). `usePlanResults` runs only while its screen is focused (a covered copy never re-searches). `shared/resultGroups.js`
+> + `ResultGroupsBar.tsx`: jump / filter pills with live counts above the results (whole library -> broad categories, משנה תורה preset ->
+> Hilchot books, several presets -> presets, one preset / picked books -> books, folder -> sub-folders, one book -> top TOC level;
+> append-only order, fixed 40px row). Reader jumps (`BookReader.tsx`): a request (fresh `nonce` per `openBook`) is consumed only by the
+> FOCUSED reader once its window is loaded; search jumps (with terms) re-centre the window; in-window jumps are verified after layout;
+> the saved position never overrides a jump. Searched words glow (`termGlow` palette, ~1.5 s hold + 1 s stepped fade) via `markTerms`,
+> which wraps only a word's letters + niqqud / te'amim (`search.wordCoreSpan` / `highlightRanges`). Prefetch: `shared/prefetchCache.js`
+> (bounded LRU 8 windows / 1.5M chars, sequential queue, `loadReaderWindow` 40 above / 80 below) + `src/services/searchPrefetch.ts`
+> (per library generation; `useResultPrefetch` after the search settles, paused on fast scroll, cancelled by a new search / opening a
+> book); `BookReader` hydrates its first render from `takePrefetched`. e2e hooks: `__KODESHREAD_STREAM_DELAY_MS__` /
+> `__KODESHREAD_STREAM_BATCH__`, `__KODESHREAD_PREFETCH__`, `term-glow-<line>`, result card `id="result-<book>-<line>"`. Self-tested
+> (section 18), `e2e:search` / `e2e:reader`.
 
 > **Canonical library catalog & multi-select scope:** `shared/libraryCatalog.js` (pure JS, no schema change) is the
 > single tree behind the Library screen (`LibraryColumns.tsx`: `ספרי בסיס` | `מפרשים לפי ספר`, live filter, inline

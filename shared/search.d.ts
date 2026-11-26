@@ -109,3 +109,15 @@ export function makeTermMatcher(terms: string[] | null | undefined): TermMatcher
 /** Wraps words of sanitized inline HTML matching `terms` (tokens, "x*" prefixes, phrases) in <mark>…</mark>. */
 export function markTerms(html: string, terms: string[]): string;
 export function formatTocPath(tocPath: string | null | undefined): string;
+
+/** Phases of a plan (exact first, then expanded-only), each with its MATCH and optional JS verifier. */
+export function planPhases(plan: SearchPlan, fts?: boolean): { plan: SearchPlan; match: string; verify: ((tokens: string[]) => boolean) | null }[];
+/** Databases a scope can match in, in priority (id-namespace) order: core, extended, personal / starter. */
+export function scopeSources(db: LibraryDb, scope?: SearchScope | null): { name: string; adapter: { all(sql: string, params?: unknown[]): Promise<any[]> }; idBase?: number }[];
+export const VERIFY_BATCH: number;
+export const MAX_COUNT_SCAN: number;
+/** [start, end) of the letters of a displayed word (with every niqqud / te'amim mark that follows them). */
+export function wordCoreSpan(word: string): [number, number];
+/** UTF-16 ranges of the words of plain (possibly vocalized) text that match the search terms. */
+export function highlightRanges(text: string, terms: string[]): { start: number; end: number }[];
+export function sourceCandidates(adapter: { all(sql: string, params?: unknown[]): Promise<any[]> }, phase: ReturnType<typeof planPhases>[number], opts: { scope?: SearchScope; fts?: boolean } | undefined, afterId: number | null, take: number): Promise<any[]>;

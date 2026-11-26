@@ -19,6 +19,8 @@ export interface Palette {
   accentSoft: string;
   /** Jump-target glow (2 s). */
   highlight: string;
+  /** Warm glow behind searched words after opening a search result ("r, g, b"; alpha fades). */
+  termGlow: string;
   /** Background of the active verse / paragraph (the one the commentary drawer shows). */
   selection: string;
   /** Margin verse numbers. */
@@ -40,6 +42,7 @@ export const palettes: Record<ThemeName, Palette> = {
     accent: '#8A5A12',
     accentSoft: '#F4E7CF',
     highlight: '#FFE9A8',
+    termGlow: '255, 170, 0',
     selection: '#F4E7CF',
     verseNumber: '#9A8F7E',
     danger: '#A3361F',
@@ -57,6 +60,7 @@ export const palettes: Record<ThemeName, Palette> = {
     accent: '#8B4A1C',
     accentSoft: '#E6D4AE',
     highlight: '#EFCF7C',
+    termGlow: '230, 130, 10',
     selection: '#E6D4AE',
     verseNumber: '#9A8462',
     danger: '#9C3317',
@@ -74,6 +78,7 @@ export const palettes: Record<ThemeName, Palette> = {
     accent: '#D2AE6D',
     accentSoft: '#3A3428',
     highlight: '#3D4769',
+    termGlow: '255, 184, 64',
     selection: '#2D3347',
     verseNumber: '#8C8A86',
     danger: '#F08A6E',

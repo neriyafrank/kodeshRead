@@ -571,22 +571,26 @@ function planPhases(plan, fts) {
   return [exact, rest];
 }
 
+/** Candidate rows of one phase from ONE database (keyset by id, library order). */
+function sourceCandidates(adapter, phase, opts, afterId, take) {
+  const src = planSource(phase, opts);
+  const hasAfter = afterId != null;
+  return adapter.all(
+    `SELECT p.id AS id, p.book_id AS book_id, p.line_index AS line_index, p.toc_path AS toc_path,
+            p.display_text AS display_text, p.is_heading AS is_heading,${phase.verify ? ' p.clean_text AS clean_text,' : ''}
+            (SELECT title FROM books WHERE id = p.book_id) AS book_title
+       ${src.sql}${hasAfter ? ` AND ${src.idCol} > ?` : ''}
+      ORDER BY ${src.idCol}
+      LIMIT ?`,
+    [...src.params, ...(hasAfter ? [afterId] : []), take],
+  );
+}
+
 async function planCandidates(db, phase, opts, afterId, take) {
   const out = [];
   for (const s of scopeSources(db, opts && opts.scope)) {
     if (out.length >= take) break;
-    const src = planSource(phase, opts);
-    const hasAfter = afterId != null;
-    const rows = await s.adapter.all(
-      `SELECT p.id AS id, p.book_id AS book_id, p.line_index AS line_index, p.toc_path AS toc_path,
-              p.display_text AS display_text, p.is_heading AS is_heading,${phase.verify ? ' p.clean_text AS clean_text,' : ''}
-              (SELECT title FROM books WHERE id = p.book_id) AS book_title
-         ${src.sql}${hasAfter ? ` AND ${src.idCol} > ?` : ''}
-        ORDER BY ${src.idCol}
-        LIMIT ?`,
-      [...src.params, ...(hasAfter ? [afterId] : []), take - out.length],
-    );
-    out.push(...rows);
+    out.push(...(await sourceCandidates(s.adapter, phase, opts, afterId, take - out.length)));
   }
   return out;
 }
@@ -802,16 +806,79 @@ function markTerms(html, terms) {
       pieces.push(part);
       continue;
     }
-    part.split(/(\s+|[־׀])/).forEach((w, i) => {
+    part.split(WORD_SPLIT_RE).forEach((w, i) => {
       if (i % 2 === 0 && w) wordIdx.push(pieces.length);
       pieces.push(w);
     });
   }
   const flags = matcher.hits(wordIdx.map((i) => toTokens(pieces[i])));
   wordIdx.forEach((pi, k) => {
-    if (flags[k]) pieces[pi] = `<mark>${pieces[pi]}</mark>`;
+    if (!flags[k]) return;
+    // Only the letters (with their niqqud / te'amim) glow: quotes, brackets and sof pasuq stay outside.
+    const w = pieces[pi];
+    const [a, b] = wordCoreSpan(w);
+    pieces[pi] = b > a ? `${w.slice(0, a)}<mark>${w.slice(a, b)}</mark>${w.slice(b)}` : `<mark>${w}</mark>`;
   });
   return pieces.join('');
+}
+
+/** Word separators of the highlighter: whitespace, maqaf, paseq. */
+const WORD_SPLIT_RE = /(\s+|[\u05BE\u05C0])/;
+const LETTER_RE = /[\u05D0-\u05EA0-9A-Za-z]/;
+/**
+ * Marks that belong to the letter before them: niqqud, te'amim, dagesh, shin / sin dots, meteg, rafe,
+ * qamats qatan, upper / lower dots, CGJ. Maqaf (05BE), paseq (05C0), sof pasuq (05C3) and nun hafukha
+ * (05C6) are punctuation, not marks.
+ */
+const MARK_RE = /[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7\u034F\u200D]/;
+
+/**
+ * [start, end) of the letters of one displayed word: from its first letter to its last letter plus
+ * every combining mark that follows it (a vowel / cantillation mark is never cut off its letter), and
+ * a geresh right after the last letter (גמ׳). Leading / trailing quotes, brackets, punctuation and sof
+ * pasuq are outside. [0, 0] for a word without letters.
+ */
+function wordCoreSpan(word) {
+  const w = String(word || '');
+  let a = 0;
+  while (a < w.length && !LETTER_RE.test(w[a])) a++;
+  if (a >= w.length) return [0, 0];
+  let b = w.length;
+  while (b > a && !LETTER_RE.test(w[b - 1])) b--;
+  while (b < w.length && MARK_RE.test(w[b])) b++;
+  if (b < w.length && (w[b] === "'" || w[b] === '\u05F3') && (b + 1 >= w.length || !LETTER_RE.test(w[b + 1]))) b++;
+  return [a, b];
+}
+
+/**
+ * Character ranges ([{ start, end }], UTF-16 offsets into `text`) of the words of plain text that match
+ * the search `terms` (normalized like the index: niqqud, te'amim, finals and gershayim never prevent a
+ * hit). Each range covers the word's letters with all their marks (wordCoreSpan), so a highlight never
+ * separates a letter from its niqqud; consecutive hit words (a phrase) are merged across the whitespace /
+ * maqaf between them.
+ */
+function highlightRanges(text, terms) {
+  const t = String(text || '');
+  const matcher = makeTermMatcher(terms);
+  if (!t || matcher.empty) return [];
+  const words = [];
+  let pos = 0;
+  t.split(WORD_SPLIT_RE).forEach((piece, i) => {
+    if (i % 2 === 0 && piece) words.push({ start: pos, text: piece });
+    pos += piece.length;
+  });
+  const flags = matcher.hits(words.map((w) => toTokens(w.text)));
+  const out = [];
+  words.forEach((w, k) => {
+    if (!flags[k]) return;
+    const [a, b] = wordCoreSpan(w.text);
+    if (b <= a) return;
+    const range = { start: w.start + a, end: w.start + b };
+    const last = out[out.length - 1];
+    if (last && flags[k - 1] && /^[\s\u05BE\u05C0]*$/.test(t.slice(last.end, range.start))) last.end = range.end;
+    else out.push(range);
+  });
+  return out;
 }
 
 /** "Part > Chapter > Section" from the stored toc_path (separator agnostic). */
@@ -825,6 +892,13 @@ function formatTocPath(tocPath) {
 
 module.exports = {
   searchPlan,
+  planPhases,
+  scopeSources,
+  sourceCandidates,
+  VERIFY_BATCH,
+  MAX_COUNT_SCAN,
+  wordCoreSpan,
+  highlightRanges,
   countPlan,
   FTS_RESERVED_RE,
   PAGE_SIZE,

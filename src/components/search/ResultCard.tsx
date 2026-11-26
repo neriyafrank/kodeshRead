@@ -35,6 +35,8 @@ export const ResultCard = memo(function ResultCard({ row, terms, onPress }: Prop
       accessibilityRole="button"
       accessibilityLabel={`${row.book_title} ${crumb}`}
       testID="search-result"
+      // Web: id="result-<book>-<line>" (e2e reads the target line of a result).
+      nativeID={`result-${row.book_id}-${row.line_index}`}
     >
       <View style={s.header}>
         <Text style={s.title} numberOfLines={1}>

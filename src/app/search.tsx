@@ -6,8 +6,12 @@
  *    words are AND-ed and "quoted text" is an exact phrase. Punctuation never breaks a query;
  *  - scope: Entire Library / folder / book (ScopeSheet), or a preset base-book corpus strip (הכל, תנ"ך, משנה,
  *    בבלי, ... with the matched book count; shared/corpora.js, the same presets as Advanced Search);
- *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the line and
- *    highlights it for 2 seconds;
+ *  - progressive results (usePlanResults -> shared/searchStream.js): the first rows appear at once, the rest
+ *    streams in behind a subtle indicator; a jump / filter bar of result groups with live counts sits above
+ *    the list (ResultGroupsBar: categories / Hilchot / books / sections depending on the scope);
+ *  - KWIC result cards; tapping opens (or re-uses) the book's tab, jumps to the line (a fresh jump nonce on
+ *    every tap, even for a book that is already open) and makes the searched words glow;
+ *  - the visible / top results are prefetched in the background once the search settles (zero-delay open);
  *  - "חיפוש מתקדם" opens the dedicated Advanced Search screen (/advanced-search) with the query.
  *
  * Route params (optional): bookId + title preset the scope to that book
@@ -20,16 +24,20 @@ import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-na
 
 import { CORPORA } from '../../shared/corpora';
 import { buildQuery } from '../../shared/hebrewSearch';
+import { filterByGroup } from '../../shared/resultGroups';
 import type { SearchRow } from '../../shared/search';
 import { SearchIcon, SlidersIcon } from '../components/Icons';
 import { CorpusPresets } from '../components/search/CorpusPresets';
 import { ResultCard } from '../components/search/ResultCard';
+import { ResultGroupsBar, useResultGroups } from '../components/search/ResultGroupsBar';
 import { ScopeChips } from '../components/search/ScopeChips';
 import { ScopeSheet } from '../components/search/ScopeSheet';
 import { LoadingMoreFooter, SearchProgress } from '../components/search/SearchProgress';
 import { countLabel, usePlanResults } from '../components/search/usePlanResults';
+import { useResultPrefetch } from '../components/search/useResultPrefetch';
 import { useCorpora } from '../db/useCorpora';
 import { alignRight, inputAlignRight } from '../lib/direction';
+import { cancelPrefetch } from '../services/searchPrefetch';
 import { scopeLabel, useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
@@ -80,7 +88,19 @@ export default function SearchScreen() {
 
   // Literal plan: no expansion, no operators.
   const plan = useMemo(() => buildQuery(query), [query]);
-  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, counting, progress } = usePlanResults(plan, scope, DEBOUNCE_MS);
+  const { current, shown, loading, cancelled, cancel, rerun, loadMore, loadingMore, streaming, progress } = usePlanResults(plan, scope, DEBOUNCE_MS);
+
+  // Jump / filter bar: groups follow the scope, counts grow while results stream in. The picked group belongs
+  // to one result set (a new search resets it to הכל).
+  const allRows = useMemo(() => shown?.rows ?? [], [shown?.rows]);
+  const resultKey = shown?.key ?? '';
+  const { groups, tracker } = useResultGroups(allRows, scope, resultKey);
+  const [pickedGroup, setPickedGroup] = useState<{ key: string; group: string | null }>({ key: '', group: null });
+  const group = pickedGroup.key === resultKey && groups.some((g) => g.key === pickedGroup.group) ? pickedGroup.group : null;
+  const rows = useMemo(() => filterByGroup(allRows, group, tracker), [allRows, group, tracker]);
+  // A picked group opens its results from the top (the list is keyed by the group).
+  const selectGroup = useCallback((g: string | null) => setPickedGroup({ key: resultKey, group: g }), [resultKey]);
+  const prefetch = useResultPrefetch(rows, !!current && !loading && !streaming, `${resultKey}|${group ?? ''}`);
 
   const openAdvanced = useCallback(() => {
     Keyboard.dismiss();
@@ -94,6 +114,7 @@ export default function SearchScreen() {
     (row: SearchRow) => {
       Keyboard.dismiss();
       remember(query);
+      cancelPrefetch(); // the reader's own queries go first
       openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true, terms: shown?.terms ?? [] });
       router.navigate('/reader');
     },
@@ -161,14 +182,19 @@ export default function SearchScreen() {
           <View style={s.flex} />
           {!loading && current ? (
             <Text style={s.count} testID="search-count">
-              {countLabel(current, counting)}
+              {countLabel(current, streaming)}
             </Text>
           ) : null}
         </View>
         <CorpusPresets items={presetItems} selected={presetIds.length ? presetIds : scope.kind === 'all' ? ['all'] : []} onToggle={toggleCorpus} testIDPrefix="corpus-chip" />
         <ScopeChips scope={scope} onChange={setScope} />
       </View>
-      {plan.empty ? null : <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} scope={scope} progress={progress} onCancel={cancel} onRetry={rerun} />}
+      {plan.empty ? null : (
+        <SearchProgress phase={loading ? 'searching' : cancelled ? 'cancelled' : 'quiet'} streaming={streaming} scope={scope} progress={progress} onCancel={cancel} onRetry={rerun} />
+      )}
+      {!plan.empty && !current?.error && allRows.length ? (
+        <ResultGroupsBar groups={groups} total={allRows.length} streaming={streaming} selected={group} onSelect={selectGroup} />
+      ) : null}
 
       {plan.empty ? (
         <View style={s.help}>
@@ -203,12 +229,16 @@ export default function SearchScreen() {
         </Text>
       ) : (
         <FlashList
-          data={shown?.rows ?? []}
+          key={group ?? 'all'}
+          data={rows}
           keyExtractor={(r) => String(r.id)}
           renderItem={renderItem}
           extraData={shown?.terms}
           onEndReached={loadMore}
           onEndReachedThreshold={0.6}
+          onScroll={prefetch.onScroll}
+          scrollEventThrottle={64}
+          onViewableItemsChanged={prefetch.onViewableItemsChanged}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="on-drag"
           contentContainerStyle={s.list}

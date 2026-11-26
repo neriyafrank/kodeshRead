@@ -39,6 +39,10 @@
  *    folder grouped under their base in rank order; multi-select search scope (FTS5 == fallback).
  * 13. Search progress UI (shared/searchLifecycle.js): lifecycle transitions, request-id race safety,
  *    cancellation / abort + real progress in shared/search.js, Hebrew RTL elapsed formatting.
+ * 18. Search -> Reader upgrade: progressive / streaming search (shared/searchStream.js: core first, batches,
+ *    searchId cancellation, never a stale row), context-aware result groups (shared/resultGroups.js: whole library
+ *    -> broad categories, משנה תורה -> Hilchot books, ...), nikud / ta'amim-aware highlight ranges, the bounded
+ *    prefetch LRU + queue (shared/prefetchCache.js) and the reader's jump / glow / prefetch wiring.
  * 16. Canonical book roles (shared/bookRoles.js) + parallel works (shared/parallelWorks.js): the four
  *    roles on the real otzaria_index_only.txt (zero commentary leaks, strict exclusions, no heuristic
  *    nesting), and fixture libraries for each family: שו"ע או"ח סימן יב סעיף ג <-> טור / ערוך השולחן /
@@ -1153,6 +1157,8 @@ async function main() {
   await marginLetterTests();
   // 17. Library cold start: persisted catalog snapshot, lazy Quick Jump aliases, cheap startup queries.
   await coldStartTests();
+  // 18. Search -> Reader: progressive search, result groups, term glow ranges, prefetch cache, jump wiring.
+  await searchUpgradeTests();
 
   console.log(`\n${passes} passed, ${failures} failed`);
   process.exit(failures ? 1 : 0);
@@ -1935,7 +1941,7 @@ async function searchProgressTests() {
       assert.ok(src.includes('<SearchProgress') && src.includes('LoadingMoreFooter') && !src.includes('ActivityIndicator'), f);
     }
     const hook = ui('src/components/search/usePlanResults.ts');
-    assert.ok(hook.includes('AbortController') && hook.includes('nextFrame') && hook.includes('createRequestCounter'));
+    assert.ok(hook.includes('AbortController') && hook.includes('nextFrame') && hook.includes('createSearchSession') && hook.includes('streamPlan'));
     // The empty-results text only needs a finished result: `current` is null while searching / cancelled.
     assert.ok(ui('src/app/search.tsx').includes('current && current.rows.length === 0 && !current.hasMore'));
   });
@@ -8069,5 +8075,365 @@ async function coldStartTests() {
   } finally {
     for (const db of open) try { db.raw.close(); } catch {}
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Section 18: the Search -> Reader upgrade. Progressive search (shared/searchStream.js), context-aware result
+ * groups (shared/resultGroups.js), nikud / ta'amim-aware highlight ranges (shared/search.js), the bounded
+ * prefetch LRU + queue (shared/prefetchCache.js) and the UI wiring (reader jump fix, glow, prefetch hydration).
+ */
+async function searchUpgradeTests() {
+  const ss = require('../shared/searchStream');
+  const rg = require('../shared/resultGroups');
+  const pc = require('../shared/prefetchCache');
+  const lc = require('../shared/searchLifecycle');
+  const corpora = require('../shared/corpora');
+  const dbFile = path.join(ROOT, 'assets/db/library.db');
+  const db = openDb(dbFile);
+  const ids = (rows) => rows.map((r) => r.id);
+  const allPages = async (adapter, plan, opts) => {
+    const out = [];
+    let cursor = null;
+    for (;;) {
+      const page = await search.searchPlan(adapter, plan, { fts: true, limit: 200, cursor, ...opts });
+      out.push(...page.rows);
+      if (!page.hasMore) return out;
+      cursor = page.cursor;
+    }
+  };
+  try {
+    // ---- 1. progressive search -------------------------------------------------------------------------
+    await check('streaming search: first batch at once, then fixed-size chunks; the stream equals the paged results', async () => {
+      for (const word of ['ויאמר', 'שבת', 'אמר רבא']) {
+        const plan = hs.buildQuery(word);
+        const batches = [];
+        const res = await ss.streamPlan(db, plan, { fts: true, firstBatch: 20, batchSize: 100, onBatch: (b) => batches.push(b) });
+        const streamed = batches.flatMap((b) => b.rows);
+        const paged = await allPages(db, plan);
+        assert.deepStrictEqual(ids(streamed), ids(paged.slice(0, streamed.length)), `${word}: same rows, same order`);
+        assert.strictEqual(res.total, streamed.length);
+        if (streamed.length > 20) assert.strictEqual(batches[0].rows.length, 20, `${word}: first emit = 20`);
+        for (const b of batches.slice(1, -1)) assert.ok(b.rows.length <= 100, `${word}: chunk ${b.rows.length}`);
+        batches.forEach((b, i) => assert.strictEqual(b.total, batches.slice(0, i + 1).reduce((n, x) => n + x.rows.length, 0)));
+        assert.strictEqual(res.capped, paged.length > ss.STREAM_CAP);
+      }
+    });
+
+    await check('streaming search: capped runs return a cursor that searchPlan continues exactly (load more)', async () => {
+      const plan = hs.buildQuery('אמר');
+      const paged = await allPages(db, plan);
+      assert.ok(paged.length > 60, `sample has ${paged.length} rows`);
+      const got = [];
+      const res = await ss.streamPlan(db, plan, { fts: true, maxRows: 50, firstBatch: 7, batchSize: 10, onBatch: (b) => got.push(...b.rows) });
+      assert.deepStrictEqual([res.total, res.capped, res.hasMore, got.length], [50, true, true, 50]);
+      const next = await search.searchPlan(db, plan, { fts: true, cursor: res.cursor, limit: 10 });
+      assert.deepStrictEqual(ids(next.rows), ids(paged.slice(50, 60)), 'paging continues right after the last streamed row');
+      // The no-FTS5 fallback streams the same rows.
+      const like = [];
+      await ss.streamPlan(db, plan, { fts: false, maxRows: 50, onBatch: (b) => like.push(...b.rows) });
+      assert.deepStrictEqual(ids(like), ids(got));
+    });
+
+    await check('streaming search: the fast core database is emitted before the next database is even queried', async () => {
+      const log = [];
+      const spy = (name, adapter) => ({ all: async (sql, p) => (log.push(`query:${name}`), adapter.all(sql, p)) });
+      const empty = { all: async () => [] };
+      const router = sources.createRouter([
+        { name: 'core', adapter: spy('core', db), idBase: 0 },
+        { name: 'user', adapter: spy('user', empty), idBase: sources.USER_ID_BASE },
+      ]);
+      const plan = hs.buildQuery('"שני כחות"');
+      await ss.streamPlan(router, plan, { fts: true, onBatch: (b) => log.push(`emit:${b.source}:${b.rows.length}`) });
+      const firstEmit = log.findIndex((x) => x.startsWith('emit:core'));
+      const firstUser = log.indexOf('query:user');
+      assert.ok(firstEmit >= 0 && firstUser > firstEmit, `core rows reach the UI first: ${log.join(' ')}`);
+    });
+
+    await check('streaming search: cancel / a newer searchId stops the run at the next batch boundary, no stale row is delivered', async () => {
+      const plan = hs.buildQuery('אמר');
+      // (a) a superseded run (session.begin() of a newer query) rejects with AbortError and emits nothing more.
+      const session = ss.createSearchSession();
+      const a = session.begin();
+      const seenA = [];
+      let resolvePause;
+      const runA = ss.streamPlan(db, plan, {
+        fts: true, searchId: a.searchId, signal: a.signal, isCurrent: session.isCurrent, firstBatch: 5, batchSize: 5,
+        onBatch: (x) => seenA.push(x.searchId),
+        pause: () => new Promise((r) => (resolvePause = r)),
+      });
+      while (!resolvePause) await new Promise((r) => setTimeout(r, 1));
+      const b = session.begin(); // the user typed a new query
+      assert.ok(!session.isCurrent(a.searchId) && session.isCurrent(b.searchId) && a.signal.aborted);
+      resolvePause();
+      await assert.rejects(runA, (e) => e.name === 'AbortError');
+      assert.deepStrictEqual(seenA, [a.searchId], 'exactly the batch emitted before the newer query, nothing after');
+      // (b) the newer run streams normally; cancel() mid-run stops it too.
+      const seenB = [];
+      let n = 0;
+      await assert.rejects(
+        ss.streamPlan(db, plan, { fts: true, searchId: b.searchId, signal: b.signal, isCurrent: session.isCurrent, firstBatch: 5, batchSize: 5, onBatch: (x) => seenB.push(x.rows.length), pause: async () => (++n === 3 ? session.cancel() : undefined) }),
+        (e) => e.name === 'AbortError',
+      );
+      assert.deepStrictEqual(seenB, [5, 5, 5]);
+      // (c) the lifecycle reducer merges batches of the current id only.
+      const base = { key: 'k2', terms: ['x'], elapsed: 3 };
+      let st = [{ type: 'start', id: 1, key: 'k1', now: 0 }, { type: 'batch', id: 1, base: { ...base, key: 'k1' }, rows: [{ id: 1 }] }, { type: 'start', id: 2, key: 'k2', now: 5 }].reduce(lc.lifecycleReducer, lc.initialLifecycle());
+      st = lc.lifecycleReducer(st, { type: 'batch', id: 1, base, rows: [{ id: 99 }] }); // stale
+      assert.strictEqual(st.status, 'searching', 'a stale batch never ends the newer search');
+      st = lc.lifecycleReducer(st, { type: 'batch', id: 2, base, rows: [{ id: 10 }, { id: 11 }], cursor: { phase: 0, afterId: 11 } });
+      assert.deepStrictEqual([st.status, st.streaming, ids(st.results.rows), st.results.count], ['done', true, [10, 11], null]);
+      st = lc.lifecycleReducer(st, { type: 'batch', id: 1, base, rows: [{ id: 98 }] });
+      st = lc.lifecycleReducer(st, { type: 'batch', id: 2, base, rows: [{ id: 12 }], cursor: { phase: 0, afterId: 12 } });
+      assert.deepStrictEqual(ids(st.results.rows), [10, 11, 12]);
+      const ended = lc.lifecycleReducer(st, { type: 'end', id: 2, count: { count: 3, capped: false }, hasMore: false, cursor: null });
+      assert.deepStrictEqual([ended.streaming, ended.results.count, ended.results.hasMore], [false, { count: 3, capped: false }, false]);
+      // ביטול mid-stream keeps the rows, stops the stream, and paging continues from the last batch.
+      const cancelled = lc.lifecycleReducer(st, { type: 'cancel', id: 2 });
+      assert.deepStrictEqual([cancelled.status, cancelled.streaming, cancelled.results.count, cancelled.results.hasMore, cancelled.results.cursor], ['done', false, { count: 3, capped: true }, true, { phase: 0, afterId: 12 }]);
+      assert.strictEqual(lc.lifecycleReducer(cancelled, { type: 'batch', id: 2, base, rows: [{ id: 13 }] }).results.rows.length, 3, 'nothing lands after ביטול');
+      // Zero matches: 'end' straight from searching.
+      const none = [{ type: 'start', id: 3, key: 'z', now: 0 }, { type: 'end', id: 3, base: { key: 'z', terms: [], elapsed: 1 }, count: { count: 0, capped: false }, hasMore: false, cursor: null }].reduce(lc.lifecycleReducer, lc.initialLifecycle());
+      assert.deepStrictEqual([none.status, none.results.rows, none.results.hasMore], ['done', [], false]);
+    });
+
+    // ---- 2. context-aware result groups -----------------------------------------------------------------
+    // Every book of the real Otzaria library map.
+    const lines = fs.readFileSync(path.join(ROOT, 'otzaria_index_only.txt'), 'utf8').split(/\r?\n/).filter((l) => l.endsWith('.txt'));
+    const books = lines.map((l, i) => {
+      const parts = l.replace(/^\.\//, '').replace(/\.txt$/, '').split('/');
+      const title = parts.pop();
+      return { id: i + 1, title, categoryPath: parts.join('/') };
+    });
+    const byId = new Map(books.map((b) => [b.id, b]));
+    const ctxOf = (scope) => ({ scope, bookInfo: (id) => byId.get(id) });
+    const rowsOf = (list, per = 2) => list.flatMap((b) => Array.from({ length: per }, (_, k) => ({ id: b.id * 10 + k, book_id: b.id, book_title: b.title, toc_path: `פרק ${k + 1} > הלכה א` })));
+
+    await check('result groups: the whole library groups by broad top-level categories (תנ"ך, ש"ס בבלי, הלכה, מדרש, מחשבה, ...)', () => {
+      assert.strictEqual(rg.groupModeFor({ kind: 'all' }), 'category');
+      const groups = rg.summarizeGroups(rowsOf(books, 1), 'category', ctxOf({ kind: 'all' }));
+      const labels = groups.map((g) => g.label);
+      for (const l of ['תנ"ך', 'משנה', 'ש"ס בבלי', 'ירושלמי', 'הלכה', 'מדרש', 'שו"ת', 'מחשבה', 'מוסר', 'קבלה', 'חסידות']) assert.ok(labels.includes(l), `${l} in ${labels.join(', ')}`);
+      assert.ok(groups.length <= 20, `broad: ${groups.length} groups`);
+      assert.strictEqual(groups.reduce((n, g) => n + g.count, 0), books.length);
+      // Commentaries stay with their corpus (רש"י על בראשית is תנ"ך, not a group of its own); personal books get one group.
+      const rashi = books.find((b) => b.title === 'רשי על בראשית');
+      assert.strictEqual(rg.groupOf({ book_id: rashi.id }, 'category', ctxOf()).label, 'תנ"ך');
+      assert.strictEqual(rg.groupOf({ book_id: sources.USER_ID_BASE + 5, book_title: 'x' }, 'category', ctxOf()).label, 'ספרים אישיים');
+      // Wrapper folders ("אוצריא/") are skipped.
+      assert.strictEqual(rg.broadCategory('אוצריא/תלמוד בבלי/סדר מועד', 1).label, 'ש"ס בבלי');
+    });
+
+    await check('result groups: a משנה תורה scope groups by the individual Hilchot books', () => {
+      const rambamIds = corpora.resolveCorpusBooks(books, ['rambam']);
+      assert.ok(rambamIds.length >= 83, `${rambamIds.length} Mishneh Torah books`);
+      const scope = { kind: 'books', ids: rambamIds, name: 'משנה תורה', corpora: ['rambam'] };
+      assert.strictEqual(rg.groupModeFor(scope), 'hilchot');
+      const groups = rg.summarizeGroups(rowsOf(rambamIds.map((id) => byId.get(id)), 3), 'hilchot', ctxOf(scope));
+      assert.strictEqual(groups.length, rambamIds.length, 'one pill per Hilchot book');
+      const labels = groups.map((g) => g.label);
+      for (const l of ['הלכות שבת', 'הלכות תפילה וברכת כהנים', 'הלכות ציצית', 'הלכות תשובה']) assert.ok(labels.includes(l), `${l} (${labels.slice(0, 5).join(', ')} ...)`);
+      assert.ok(labels.filter((l) => l.startsWith('הלכות')).length >= 80, 'short "הלכות X" labels, no "משנה תורה," prefix');
+      assert.ok(groups.every((g) => g.count === 3));
+    });
+
+    await check('result groups: other scopes use the next natural level (presets, books, folders, sections); incremental == one-shot, append-only', () => {
+      const bavli = corpora.resolveCorpusBooks(books, ['bavli']).map((id) => byId.get(id));
+      const tanach = corpora.resolveCorpusBooks(books, ['tanach']).map((id) => byId.get(id));
+      // One preset: its books ("ברכות", "שבת", ...).
+      const one = { kind: 'books', ids: bavli.map((b) => b.id), name: 'בבלי', corpora: ['bavli'] };
+      assert.strictEqual(rg.groupModeFor(one), 'book');
+      assert.deepStrictEqual(rg.summarizeGroups(rowsOf(bavli, 1), 'book', ctxOf(one)).map((g) => g.label).slice(0, 2), bavli.slice(0, 2).map((b) => b.title));
+      // Several presets: the presets.
+      const two = { kind: 'books', ids: [...tanach, ...bavli].map((b) => b.id), name: 'x', corpora: ['tanach', 'bavli'] };
+      assert.strictEqual(rg.groupModeFor(two), 'corpus');
+      assert.deepStrictEqual(rg.summarizeGroups(rowsOf([...tanach, ...bavli], 1), 'corpus', ctxOf(two)).map((g) => [g.label, g.count]), [['תנ"ך', tanach.length], ['בבלי', bavli.length]]);
+      // A folder: its sub-folders; a single book: its top-level divisions.
+      const sa = { kind: 'category', path: 'הלכה', name: 'הלכה' };
+      const halacha = books.filter((b) => b.categoryPath === 'הלכה' || b.categoryPath.startsWith('הלכה/'));
+      const folderLabels = rg.summarizeGroups(rowsOf(halacha, 1), 'folder', ctxOf(sa)).map((g) => g.label);
+      assert.ok(folderLabels.includes('משנה תורה') && folderLabels.includes('שולחן ערוך'), folderLabels.slice(0, 8).join(', '));
+      assert.strictEqual(rg.groupModeFor({ kind: 'book', bookId: 1, title: 'x' }), 'section');
+      assert.deepStrictEqual(rg.summarizeGroups(rowsOf([books[0]], 3), 'section', ctxOf()).map((g) => g.label), ['פרק 1', 'פרק 2', 'פרק 3']);
+      assert.strictEqual(rg.shortTitle('שולחן ערוך, אורח חיים'), 'אורח חיים');
+      assert.strictEqual(rg.shortTitle('חזון איש, זרעים'), 'חזון איש, זרעים', 'only known work heads are stripped');
+      // Streaming: adding batch by batch == one shot; groups only ever append, counts grow in place.
+      const rows = rowsOf(books.filter((_, i) => i % 7 === 0), 2);
+      const tracker = rg.createGroupTracker('category', ctxOf());
+      let prev = [];
+      for (let i = 0; i < rows.length; i += 37) {
+        tracker.add(rows.slice(i, i + 37));
+        const now = tracker.groups();
+        assert.deepStrictEqual(now.slice(0, prev.length).map((g) => g.key), prev.map((g) => g.key), 'existing pills never move');
+        now.slice(0, prev.length).forEach((g, k) => assert.ok(g.count >= prev[k].count));
+        prev = now;
+      }
+      assert.deepStrictEqual(prev, rg.summarizeGroups(rows, 'category', ctxOf()));
+      // Filtering by a group keeps exactly its rows, in order.
+      const pick = prev[1];
+      const filtered = rg.filterByGroup(rows, pick.key, tracker);
+      assert.strictEqual(filtered.length, pick.count);
+      assert.ok(filtered.every((r) => tracker.keyOf(r) === pick.key));
+      assert.strictEqual(rg.filterByGroup(rows, null, tracker), rows);
+    });
+
+    // ---- 3. nikud / ta'amim-aware highlight ranges -----------------------------------------------------
+    await check('highlight: ציצית / ציצת match vocalized words with te\'amim; ranges keep every mark with its letter', () => {
+      const t = (q) => hs.buildQuery(q).terms;
+      const verse = 'וְעָשׂ֨וּ לָהֶ֥ם צִיצִ֛ת עַל־כַּנְפֵ֥י בִגְדֵיהֶ֖ם';
+      const [r] = search.highlightRanges(verse, t('ציצת'));
+      assert.strictEqual(verse.slice(r.start, r.end), 'צִיצִ֛ת');
+      const plene = 'וְהָיָה לָכֶם לְצִיצִית וּרְאִיתֶם';
+      const adv = hs.buildQuery({ query: 'ציצית' }, { ...hs.ADVANCED_DEFAULTS, prefixesAndSuffixes: true }).terms;
+      assert.deepStrictEqual(search.highlightRanges(plene, adv).map((x) => plene.slice(x.start, x.end)), ['לְצִיצִית']);
+      // Trailing marks: a word ending in a vowel / cantillation keeps it inside the range.
+      const ending = 'אֶת־הָאָֽרֶץ׃ וַיֹּ֥אמֶר';
+      const [e] = search.highlightRanges(ending, t('הארץ'));
+      assert.strictEqual(ending.slice(e.start, e.end), 'הָאָֽרֶץ', 'sof pasuq and maqaf stay outside');
+      // Punctuation stays outside, gershayim / geresh inside abbreviations; phrases merge across spaces.
+      const q = '(שבת), אמר רב חסדא: שו"ע גמ׳';
+      const show = (terms) => search.highlightRanges(q, terms).map((x) => q.slice(x.start, x.end));
+      assert.deepStrictEqual(show(t('שבת')), ['שבת']);
+      assert.deepStrictEqual(show(t('"רב חסדא"')), ['רב חסדא']);
+      assert.deepStrictEqual(show(t('שוע')), ['שו"ע']);
+      assert.deepStrictEqual(show(t('גמ')), ['גמ׳']);
+      assert.deepStrictEqual(search.highlightRanges(q, []), []);
+      // markTerms (the reader) wraps the same letters: brackets / commas outside, text unchanged.
+      assert.strictEqual(search.markTerms('(שבת), קודש', t('שבת')), '(<mark>שבת</mark>), קודש');
+      assert.strictEqual(search.markTerms('הָאָֽרֶץ׃', t('הארץ')), '<mark>הָאָֽרֶץ</mark>׃');
+    });
+
+    await check('highlight: on every vocalized sample paragraph a range never starts on a mark and never cuts a mark off its letter', async () => {
+      const rows = await db.all("SELECT display_text FROM paragraphs WHERE display_text GLOB '*[ְ-ׇ]*' LIMIT 400", []);
+      assert.ok(rows.length > 100, `${rows.length} vocalized paragraphs`);
+      const isMark = (ch) => /[֑-ׇֽֿׁׂׅׄ]/.test(ch || '');
+      let ranges = 0;
+      for (const { display_text } of rows) {
+        const text = reader.prepareDisplayText(display_text, { showNikkud: true, showCantillation: true }).replace(/<[^>]*>/g, '');
+        const words = normalizeHebrew(text).split(' ').filter((w) => w.length > 2);
+        const terms = [words[0], words[Math.floor(words.length / 2)]].filter(Boolean);
+        for (const r of search.highlightRanges(text, terms)) {
+          ranges++;
+          assert.ok(/[א-ת0-9A-Za-z]/.test(text[r.start]), `starts on a letter: ${JSON.stringify(text.slice(r.start, r.end))}`);
+          assert.ok(!isMark(text[r.end]), `no mark left outside: ${JSON.stringify(text.slice(r.start, r.end + 1))}`);
+          assert.ok(terms.some((x) => normalizeHebrew(text.slice(r.start, r.end)).split(' ').includes(x)), 'the range is the hit');
+        }
+        const marked = search.markTerms(text, terms);
+        assert.strictEqual(marked.replace(/<\/?mark>/g, ''), text, 'marking never alters the text');
+      }
+      assert.ok(ranges > rows.length, `${ranges} ranges checked`);
+    });
+
+    // ---- 4. prefetch LRU + queue ------------------------------------------------------------------------
+    const win = (bookId, line, chars = 10, total = 1000) => ({ bookId, line, total, range: pc.prefetchRange(line, total), rows: [{ line_index: line, display_text: 'x'.repeat(chars) }] });
+    await check('prefetch cache: bounded LRU evicts the least recently used entry by count and by text size', () => {
+      const c = pc.createLruCache({ maxEntries: 3, maxChars: 10000 });
+      c.set('a', win(1, 10));
+      c.set('b', win(1, 20));
+      c.set('c', win(1, 30));
+      c.get('a'); // a is fresh again
+      c.set('d', win(1, 40));
+      assert.deepStrictEqual(c.keys(), ['c', 'a', 'd'], 'b (least recently used) evicted');
+      assert.strictEqual(c.size, 3);
+      const big = pc.createLruCache({ maxEntries: 10, maxChars: 1000 });
+      big.set('x', win(1, 1, 400));
+      big.set('y', win(1, 2, 400));
+      big.set('z', win(1, 3, 400));
+      assert.deepStrictEqual(big.keys(), ['y', 'z'], 'text budget evicts the oldest');
+      assert.ok(big.chars <= 1000);
+      assert.strictEqual(big.set('huge', win(1, 4, 5000)), false, 'a window over the whole budget is never cached');
+      assert.ok(!big.has('huge'));
+      big.clear();
+      assert.deepStrictEqual([big.size, big.chars], [0, 0]);
+      // findWindow: a cached window opens its own target and any line with enough context on both sides.
+      const cache = pc.createLruCache();
+      cache.set(pc.keyOf(7, 500), { ...win(7, 500), rows: [{ line_index: 460 }] });
+      assert.ok(pc.findWindow(cache, 7, 500) && pc.findWindow(cache, 7, 520));
+      assert.strictEqual(pc.findWindow(cache, 7, 465), null, 'too close to the window edge');
+      assert.strictEqual(pc.findWindow(cache, 8, 500), null, 'another book');
+      assert.ok(pc.covers({ bookId: 7, total: 50, range: pc.prefetchRange(3, 50), rows: [{}] }, 7, 3), 'book start is an edge, not missing context');
+    });
+
+    await check('prefetch queue: sequential, capped to the top targets, skips cached ones, pauses, and a cancel / new run stops before the next read', async () => {
+      const cache = pc.createLruCache();
+      const loads = [];
+      let gate = null;
+      const load = async (t) => {
+        loads.push(`${t.bookId}:${t.line}`);
+        if (gate) await gate;
+        return win(t.bookId, t.line);
+      };
+      const q = pc.createPrefetchQueue({ load, cache, gapMs: 0 });
+      const targets = Array.from({ length: 12 }, (_, i) => ({ bookId: 1, line: 100 * (i + 1) }));
+      const r1 = await q.run([...targets, targets[0]]);
+      assert.deepStrictEqual([r1.loaded, loads.length], [pc.PREFETCH_TARGETS, pc.PREFETCH_TARGETS], 'top targets only, duplicates dropped');
+      assert.strictEqual(cache.size, Math.min(pc.PREFETCH_TARGETS, pc.MAX_ENTRIES));
+      const r2 = await q.run(targets.slice(0, 3));
+      assert.deepStrictEqual([r2.loaded, r2.skipped], [0, 3], 'already cached');
+      // Cancel mid-run: the in-flight read finishes, nothing new starts.
+      loads.length = 0;
+      let open;
+      gate = new Promise((r) => (open = r));
+      const run = q.run([{ bookId: 2, line: 10 }, { bookId: 2, line: 400 }, { bookId: 2, line: 800 }]);
+      await new Promise((r) => setTimeout(r, 5));
+      q.cancel(); // the user opened a book / started a new search
+      open();
+      gate = null;
+      const r3 = await run;
+      assert.deepStrictEqual([r3.cancelled, loads], [true, ['2:10']]);
+      // Pause holds the queue until resume (fast scrolling); a new run replaces a paused one.
+      loads.length = 0;
+      q.pause();
+      const paused = q.run([{ bookId: 3, line: 10 }]);
+      await new Promise((r) => setTimeout(r, 10));
+      assert.deepStrictEqual(loads, [], 'nothing is read while paused');
+      q.resume();
+      assert.strictEqual((await paused).loaded, 1);
+      q.pause();
+      const stale = q.run([{ bookId: 4, line: 10 }]);
+      const fresh = q.run([{ bookId: 5, line: 10 }]);
+      q.resume();
+      assert.strictEqual((await stale).cancelled, true);
+      assert.strictEqual((await fresh).loaded, 1);
+      assert.ok(!loads.includes('4:10'));
+    });
+
+    await check('prefetch: loadReaderWindow reads the small window the reader opens a result from (sample DB)', async () => {
+      const plan = hs.buildQuery('ויאמר');
+      const page = await search.searchPlan(db, plan, { fts: true, limit: 5 });
+      const r = page.rows[3];
+      const w = await pc.loadReaderWindow(db, r.book_id, r.line_index);
+      assert.ok(w.rows.length > 0 && w.rows.length <= pc.PREFETCH_BEFORE + pc.PREFETCH_AFTER + 1);
+      assert.ok(w.rows.some((x) => x.line_index === r.line_index && typeof x.link_count === 'number'), 'the target row with its link count');
+      assert.ok(w.range.from <= r.line_index && w.range.to >= r.line_index && w.total > 0);
+      const cache = pc.createLruCache();
+      cache.set(pc.keyOf(r.book_id, r.line_index), w);
+      assert.strictEqual(pc.findWindow(cache, r.book_id, r.line_index), w);
+    });
+
+    // ---- 5. UI wiring ---------------------------------------------------------------------------------
+    await check('search -> reader wiring: streaming hook, group bar, prefetch, focused jump with nonce, re-centre, verify, glow', () => {
+      const src = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+      const hook = src('src/components/search/usePlanResults.ts');
+      assert.ok(hook.includes('streamPlan(') && hook.includes("type: 'batch'") && hook.includes("type: 'end'") && hook.includes('cancelPrefetch()') && !hook.includes('countPlan('));
+      for (const f of ['src/app/search.tsx', 'src/app/advanced-search.tsx']) {
+        const s = src(f);
+        assert.ok(s.includes('<ResultGroupsBar') && s.includes('useResultGroups(') && s.includes('filterByGroup(') && s.includes('useResultPrefetch(') && s.includes('streaming={streaming}'), f);
+        assert.ok(/cancelPrefetch\(\);[^\n]*\n\s*openBook\(/.test(s), `${f}: prefetch yields before opening a book`);
+      }
+      const bar = src('src/components/search/ResultGroupsBar.tsx');
+      assert.ok(bar.includes("'הכל'") && bar.includes('height: 40') && bar.includes("fontVariant: ['tabular-nums']") && !/(marginLeft|marginRight|paddingLeft|paddingRight)/.test(bar));
+      const r = src('src/components/reader/BookReader.tsx');
+      assert.ok(r.includes('useIsFocused()') && r.includes('focusedRef.current') && /\[pendingJump, totalLines, ready, focused, runJump\]/.test(r), 'only the focused, loaded reader consumes a jump');
+      assert.ok(r.includes('recenter: !!pj.terms?.length') && r.includes('verifyLanded(') && r.includes('if (saveTimer.current) clearTimeout(saveTimer.current);'), 'search jumps re-centre, in-window jumps are verified, saved scroll never wins');
+      assert.ok(r.includes('takePrefetched<ReaderRow>(') && r.includes('cachedWindow(boot.hit') && r.includes('cancelPrefetch();'), 'hydrates from the prefetch cache');
+      assert.ok(r.includes('useTermGlow(') && r.includes('TERM_GLOW_FADE_MS') && r.includes('termGlow'), 'fading warm glow on the searched words');
+      const tabs = src('src/state/tabsStore.ts');
+      assert.ok(/nonce: \+\+nonce/.test(tabs), 'every openBook carries a fresh jump nonce');
+      const theme = src('src/theme.ts');
+      assert.strictEqual((theme.match(/termGlow: '/g) || []).length, 3, 'a warm glow colour per theme');
+    });
+  } finally {
+    db.close();
   }
 }

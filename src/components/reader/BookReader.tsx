@@ -8,6 +8,16 @@
  *   typography-derived item-size estimate drives the draw distance instead.
  * - Jumps (Quick Jump / TOC / search) scroll inside the window when the target is
  *   loaded, otherwise the window is re-centred; the target row glows for 2s.
+ * - Every jump request carries a fresh nonce (tabsStore.openBook), so tapping a search result for a book that is
+ *   already open always lands on the new target: the request is consumed only by the FOCUSED reader (a copy kept
+ *   underneath the search screen never swallows it), only once the window is loaded (a request arriving during
+ *   the initial load is picked up when it finishes), it always wins over the saved scroll position, a search
+ *   jump re-centres the window (a fresh list mounted at the target: no estimate drift), and in-window jumps are
+ *   re-checked after layout and corrected if the row is not on screen.
+ * - Search jumps carry the searched terms: the matched words (niqqud / te'amim-aware, shared/search.js
+ *   markTerms) glow warmly in the target paragraph and fade out smoothly after ~2.5 s.
+ * - Prefetched windows (src/services/searchPrefetch.ts) open a search result without any query: the reader's
+ *   first render already shows the target.
  * - The exact position (top line + pixel offset into it) is saved to the tab.
  * - Typography (shared/typography.js): the line height grows with the visible marks (niqqud /
  *   te'amim) so stacked marks never touch the neighbouring lines, Android keeps the font
@@ -20,6 +30,7 @@
  *   press targets and change no stored line, index or link.
  */
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
+import { useIsFocused } from 'expo-router';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -52,12 +63,14 @@ import { lineHeightMultiplier, splitVerseMarker, verseGutterWidth } from '../../
 import { formatCopy } from '../../../shared/copyFormat';
 import { markTerms } from '../../../shared/search';
 import { parallelMember } from '../../../shared/parallelWorks';
+import type { ReaderWindow } from '../../../shared/prefetchCache';
 import type { LineDivider } from '../../../shared/torahParshiot';
 import { useLibrary } from '../../db/LibraryContext';
 import { readerFont } from '../../fonts';
 import { useChumashBook, useChumashDividers } from '../../services/parshiotNav';
+import { cancelPrefetch, takePrefetched } from '../../services/searchPrefetch';
 import { useSettings } from '../../state/settingsStore';
-import { useTabs, type ReaderTab } from '../../state/tabsStore';
+import { useTabs, type JumpRequest, type ReaderTab } from '../../state/tabsStore';
 import { spacing, useAppTheme, type Palette } from '../../theme';
 import { RichText } from '../RichText';
 import { CommentaryPane, commentaryPaneHeight } from './CommentaryPane';
@@ -71,6 +84,12 @@ const ANCHOR = spacing.sm;
 /** Scroll events right after a programmatic jump are not user scrolling. */
 const JUMP_SETTLE_MS = 600;
 const HIGHLIGHT_MS = 2000;
+/** Searched words: full glow, then a smooth fade (stepped: nested text spans cannot use the native driver). */
+const TERM_GLOW_HOLD_MS = 1500;
+const TERM_GLOW_FADE_MS = 1000;
+const TERM_GLOW_STEPS = 10;
+/** In-window jumps: re-check that the target row is on screen this many times after layout. */
+const VERIFY_ATTEMPTS = 3;
 const SAVE_DEBOUNCE_MS = 300;
 const useNative = Platform.OS !== 'web';
 
@@ -84,6 +103,13 @@ interface WindowState {
   epoch: number;
   initialIndex: number;
   initialViewOffset: number;
+}
+
+/** The reader window of a prefetched search-result target (opened without any query). */
+function cachedWindow(hit: ReaderWindow<ReaderRow>, line: number, epoch: number): WindowState {
+  let idx = indexOfLine(hit.rows, line);
+  if (idx < 0) idx = hit.rows.length - 1;
+  return { rows: hit.rows, range: hit.range, epoch, initialIndex: Math.max(0, idx), initialViewOffset: -ANCHOR };
 }
 
 interface Typography {
@@ -102,7 +128,11 @@ interface Props {
 }
 
 export function BookReader({ tab }: Props) {
-  const { adapter } = useLibrary();
+  const { adapter, generation } = useLibrary();
+  // Only the reader on screen consumes jump requests (expo-router keeps covered screens mounted).
+  const focused = useIsFocused();
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
   const palette = useAppTheme();
   const fontSize = useSettings((s) => s.fontSize);
   const lineHeight = useSettings((s) => s.lineHeight);
@@ -118,10 +148,23 @@ export function BookReader({ tab }: Props) {
 
   const { tabId, bookId } = tab;
   const { height: windowHeight } = useWindowDimensions();
-  const [totalLines, setTotalLines] = useState<number | null>(null);
-  const [win, setWin] = useState<WindowState | null>(null);
+  // Zero-delay open: a search result whose window was prefetched renders on the very first frame.
+  const [boot] = useState(() => {
+    const pj = useTabs.getState().pendingJump;
+    if (!focused || !pj || pj.tabId !== tabId) return null;
+    const hit = takePrefetched<ReaderRow>(adapter, generation, bookId, pj.line);
+    return hit ? { pj, hit } : null;
+  });
+  const [totalLines, setTotalLines] = useState<number | null>(boot ? boot.hit.total : null);
+  const [win, setWin] = useState<WindowState | null>(() => (boot ? cachedWindow(boot.hit, boot.pj.line, 1) : null));
   // `end`: last highlighted line when a whole unit (commentary block / verse) is the target.
-  const [highlight, setHighlight] = useState<{ line: number; end?: number; nonce: number; terms?: string[] } | null>(null);
+  const [highlight, setHighlight] = useState<{ line: number; end?: number; nonce: number; terms?: string[] } | null>(() => {
+    if (!boot || !boot.pj.highlight) return null;
+    const row = boot.hit.rows[Math.max(0, indexOfLine(boot.hit.rows, boot.pj.line))];
+    if (!row) return null;
+    const end = boot.pj.highlightEnd;
+    return { line: row.line_index, end: end != null && end > row.line_index ? end : undefined, nonce: boot.pj.nonce, terms: boot.pj.terms };
+  });
   const [error, setError] = useState<string | null>(null);
   /** Paragraph the commentary drawer is showing (null = drawer closed). */
   const [selected, setSelected] = useState<{ line: number; tocPath: string | null } | null>(null);
@@ -133,13 +176,13 @@ export function BookReader({ tab }: Props) {
   const dividers = useChumashDividers(bookId, chumash);
 
   const listRef = useRef<FlashListRef<ReaderRow>>(null);
-  const winRef = useRef<WindowState | null>(null);
+  const winRef = useRef<WindowState | null>(win);
   const commitWin = useCallback((next: WindowState) => {
     winRef.current = next;
     setWin(next);
   }, []);
   const loadingEdge = useRef({ forward: false, backward: false });
-  const epochRef = useRef(0);
+  const epochRef = useRef(win ? win.epoch : 0);
 
   // --- typography -----------------------------------------------------------
   const font = readerFont(fontFamily);
@@ -187,8 +230,10 @@ export function BookReader({ tab }: Props) {
   /** Re-centre the window on `target`, `lineOffset` px into that row at the reading line. */
   const loadAround = useCallback(
     async (target: number, total: number, lineOffset: number) => {
-      const range = windowAround(target, total);
-      const rows = await loadRows(range.from, range.to);
+      // A prefetched window (search result) opens without a query; the reader extends it while scrolling.
+      const hit = takePrefetched<ReaderRow>(adapter, generation, bookId, target);
+      const range = hit ? hit.range : windowAround(target, total);
+      const rows = hit ? hit.rows : await loadRows(range.from, range.to);
       let idx = indexOfLine(rows, target);
       if (idx < 0) idx = rows.length - 1;
       epochRef.current += 1;
@@ -202,11 +247,31 @@ export function BookReader({ tab }: Props) {
       }
       return row?.line_index ?? target;
     },
-    [loadRows, scheduleSave, commitWin],
+    [adapter, generation, bookId, loadRows, scheduleSave, commitWin],
   );
 
+  /** After an in-window jump: once laid out, the target row must be on screen (FlashList estimates can drift). */
+  const verifyLanded = useCallback((line: number, attempt = 0) => {
+    requestAnimationFrame(() =>
+      setTimeout(() => {
+        const list = listRef.current;
+        const w = winRef.current;
+        if (!list || !w) return;
+        const idx = indexOfLine(w.rows, line);
+        const layout = idx >= 0 ? list.getLayout(idx) : undefined;
+        const height = listHeight.current;
+        if (idx < 0 || !height) return;
+        const top = layout ? layout.y + list.getFirstItemOffset() - lastY.current : NaN;
+        const onScreen = layout != null && top >= -2 && top < height - Math.min(48, layout.height);
+        if (onScreen || attempt >= VERIFY_ATTEMPTS) return;
+        settleUntil.current = Date.now() + JUMP_SETTLE_MS;
+        void Promise.resolve(list.scrollToIndex({ index: idx, animated: false, viewOffset: -ANCHOR })).then(() => verifyLanded(line, attempt + 1));
+      }, 60),
+    );
+  }, []);
+
   const jumpTo = useCallback(
-    async (line: number, withHighlight: boolean, terms?: string[], end?: number) => {
+    async (line: number, withHighlight: boolean, terms?: string[], end?: number, opts?: { recenter?: boolean; nonce?: number }) => {
       const total = totalLines;
       if (total == null) return;
       const target = Math.min(Math.max(1, line), total);
@@ -214,7 +279,8 @@ export function BookReader({ tab }: Props) {
       const idx = w ? indexOfLine(w.rows, target) : -1;
       settleUntil.current = Date.now() + JUMP_SETTLE_MS;
       let landed: number;
-      if (w && idx >= 0 && target >= w.range.from && target <= w.range.to && listRef.current) {
+      // Search results re-centre: a fresh list mounted at the target is exact on every platform.
+      if (!opts?.recenter && w && idx >= 0 && target >= w.range.from && target <= w.range.to && listRef.current) {
         // Place the target on the reading line, just below the breadcrumb bar.
         const row = w.rows[idx];
         landed = row.line_index;
@@ -222,17 +288,41 @@ export function BookReader({ tab }: Props) {
         // The final programmatic scroll does not always emit onScroll: record the position here.
         position.current = { currentLineIndex: row.line_index, tocPath: row.toc_path, lineOffset: 0 };
         scheduleSave();
+        verifyLanded(row.line_index);
       } else {
         landed = await loadAround(target, total, 0);
       }
-      if (withHighlight) setHighlight({ line: landed, end: end != null && end > landed ? end : undefined, nonce: Date.now(), terms });
+      if (withHighlight) setHighlight({ line: landed, end: end != null && end > landed ? end : undefined, nonce: opts?.nonce ?? Date.now(), terms });
     },
-    [totalLines, loadAround, scheduleSave],
+    [totalLines, loadAround, scheduleSave, verifyLanded],
+  );
+
+  /** Runs one jump request (consumed first, so it runs exactly once). */
+  const runJump = useCallback(
+    (pj: JumpRequest) => {
+      consumeJump(pj.nonce);
+      // Explicit jump: the saved scroll position of this tab must never override it.
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      void jumpTo(pj.line, pj.highlight, pj.terms, pj.highlightEnd, { recenter: !!pj.terms?.length, nonce: pj.nonce });
+    },
+    [consumeJump, jumpTo],
   );
 
   // Initial load: book size, then the window around the pending jump or saved position.
   useEffect(() => {
     let alive = true;
+    cancelPrefetch(); // opening a book: background prefetching yields to the reader's queries
+    if (boot) {
+      // Hydrated from the prefetch cache on the first render: no query at all.
+      consumeJump(boot.pj.nonce);
+      const row = boot.hit.rows[Math.max(0, indexOfLine(boot.hit.rows, boot.pj.line))];
+      settleUntil.current = Date.now() + JUMP_SETTLE_MS;
+      if (row) {
+        position.current = { currentLineIndex: row.line_index, tocPath: row.toc_path, lineOffset: 0 };
+        scheduleSave();
+      }
+      return;
+    }
     (async () => {
       try {
         const [book] = await adapter.forBook(bookId).all<{ total_lines: number }>('SELECT total_lines FROM books WHERE id = ?', [bookId]);
@@ -240,7 +330,7 @@ export function BookReader({ tab }: Props) {
         if (!book) throw new Error('הספר לא נמצא');
         setTotalLines(book.total_lines);
         const pj = useTabs.getState().pendingJump;
-        if (pj && pj.tabId === tabId) {
+        if (pj && pj.tabId === tabId && focusedRef.current) {
           consumeJump(pj.nonce);
           const landed = await loadAround(pj.line, book.total_lines, 0);
           if (alive && pj.highlight) setHighlight({ line: landed, end: pj.highlightEnd != null && pj.highlightEnd > landed ? pj.highlightEnd : undefined, nonce: pj.nonce, terms: pj.terms });
@@ -260,17 +350,27 @@ export function BookReader({ tab }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Jump requests arriving while this tab is open (TOC, Quick Jump to an open book).
+  // Jump requests arriving while this tab is open (TOC, Quick Jump, a search result for an open book). They wait
+  // until this reader is focused (a search screen on top keeps it covered) and its window has loaded.
+  const ready = win != null;
   useEffect(() => {
-    if (!pendingJump || totalLines == null || !winRef.current) return;
-    consumeJump(pendingJump.nonce);
-    jumpTo(pendingJump.line, pendingJump.highlight, pendingJump.terms, pendingJump.highlightEnd);
-  }, [pendingJump, totalLines, consumeJump, jumpTo]);
+    if (!pendingJump || totalLines == null || !ready || !focused) return;
+    // One frame after focus: the screen is laid out again before the list scrolls.
+    const pj = pendingJump;
+    let alive = true;
+    requestAnimationFrame(() => {
+      if (alive && useTabs.getState().pendingJump?.nonce === pj.nonce) runJump(pj);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [pendingJump, totalLines, ready, focused, runJump]);
 
-  // Highlight lasts 2 seconds.
+  // The row glows for 2 seconds; searched words glow a little longer and fade out.
   useEffect(() => {
     if (!highlight) return;
-    const t = setTimeout(() => setHighlight(null), HIGHLIGHT_MS + 100);
+    const ms = highlight.terms?.length ? TERM_GLOW_HOLD_MS + TERM_GLOW_FADE_MS : HIGHLIGHT_MS;
+    const t = setTimeout(() => setHighlight(null), Math.max(ms, HIGHLIGHT_MS) + 100);
     return () => clearTimeout(t);
   }, [highlight]);
 
@@ -598,29 +698,69 @@ function TorahDivider({ divider, palette: c, fontSize }: { divider: LineDivider;
   );
 }
 
+/**
+ * 1 -> 0 glow level of the searched words after a jump: full for TERM_GLOW_HOLD_MS, then a smooth stepped fade
+ * over TERM_GLOW_FADE_MS (only the one target row re-renders, TERM_GLOW_STEPS times).
+ */
+function useTermGlow(nonce: number): number {
+  // The level belongs to one nonce: a new jump starts at full glow without an extra render.
+  const [state, setState] = useState({ nonce, level: nonce ? 1 : 0 });
+  const level = state.nonce === nonce ? state.level : nonce ? 1 : 0;
+  useEffect(() => {
+    if (!nonce) return;
+    let step = 0;
+    let iv: ReturnType<typeof setInterval> | undefined;
+    const hold = setTimeout(() => {
+      iv = setInterval(() => {
+        step += 1;
+        const next = Math.max(0, 1 - step / TERM_GLOW_STEPS);
+        setState({ nonce, level: next });
+        if (next <= 0 && iv) clearInterval(iv);
+      }, TERM_GLOW_FADE_MS / TERM_GLOW_STEPS);
+    }, TERM_GLOW_HOLD_MS);
+    return () => {
+      clearTimeout(hold);
+      if (iv) clearInterval(iv);
+    };
+  }, [nonce]);
+  return level;
+}
+
 const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress, onLongPress, marked, selectable, highlightNonce, highlightTerms, divider }: RowProps) {
+  const glow = useTermGlow(highlightNonce && highlightTerms?.length ? highlightNonce : 0);
+  const glowing = glow > 0;
   const { html, verse } = useMemo(() => {
     const prepared = prepareDisplayText(row.display_text, { showNikkud: typo.showNikkud, showCantillation: typo.showCantillation });
     // "(א) ..." -> the verse number goes to the margin column, the text keeps a clean edge.
     const split = row.is_heading ? { marker: null, text: prepared } : splitVerseMarker(prepared);
-    // The search hit stays marked for the highlight's lifetime (2 s), then the row re-renders plain.
-    const body = highlightNonce && highlightTerms?.length ? markTerms(split.text, highlightTerms) : split.text;
+    // The searched words are wrapped (letters + their niqqud / te'amim only) while they glow, then the row re-renders plain.
+    const body = glowing && highlightTerms?.length ? markTerms(split.text, highlightTerms) : split.text;
     return { html: body, verse: split.marker };
-  }, [row.display_text, row.is_heading, typo.showNikkud, typo.showCantillation, highlightNonce, highlightTerms]);
-  // Accent at ~35% alpha: stays visible on top of the (highlight-coloured) row glow.
-  const markStyle = useMemo(() => ({ backgroundColor: `${typo.palette.accent}59`, borderRadius: 3 }), [typo.palette.accent]);
-  const [glow] = useState(() => new Animated.Value(0));
+  }, [row.display_text, row.is_heading, typo.showNikkud, typo.showCantillation, glowing, highlightTerms]);
+  // Warm glow behind the searched words (the text colour is untouched, so stacked marks render as usual).
+  const rgb = typo.palette.termGlow;
+  const markStyle = useMemo(
+    () => ({
+      backgroundColor: `rgba(${rgb}, ${(typo.palette.name === 'dark' ? 0.42 : 0.55) * glow})`,
+      textShadowColor: `rgba(${rgb}, ${0.85 * glow})`,
+      textShadowRadius: 6 * glow,
+      textShadowOffset: { width: 0, height: 0 },
+      borderRadius: 3,
+    }),
+    [rgb, glow, typo.palette.name],
+  );
+  const [rowGlow] = useState(() => new Animated.Value(0));
   useEffect(() => {
-    glow.stopAnimation();
+    rowGlow.stopAnimation();
     if (!highlightNonce) {
-      glow.setValue(0);
+      rowGlow.setValue(0);
       return;
     }
-    glow.setValue(1);
+    rowGlow.setValue(1);
     // Decorative: as an "interaction" it would hold back every FlatList's rendering (the TOC
     // columns, commentaries) for the whole 2 s highlight.
-    Animated.timing(glow, { toValue: 0, delay: HIGHLIGHT_MS - 450, duration: 450, useNativeDriver: useNative, isInteraction: false }).start();
-  }, [highlightNonce, glow]);
+    Animated.timing(rowGlow, { toValue: 0, delay: HIGHLIGHT_MS - 450, duration: 450, useNativeDriver: useNative, isInteraction: false }).start();
+  }, [highlightNonce, rowGlow]);
 
   const { palette: c } = typo;
   let size = typo.fontSize;
@@ -663,8 +803,9 @@ const ParagraphView = memo(function ParagraphView({ row, typo, selected, onPress
       accessibilityHint={links ? `${links} מפרשים` : undefined}
       testID={`para-${row.line_index}`}
     >
+      {glowing ? <View pointerEvents="none" style={styles.probe} testID={`term-glow-${row.line_index}`} /> : null}
       {selected || marked ? <View pointerEvents="none" style={[styles.selectedBar, { backgroundColor: c.accent }]} /> : null}
-      <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: glow }]} />
+      <Animated.View pointerEvents="none" style={[styles.glow, { backgroundColor: c.highlight, opacity: rowGlow }]} />
       {verse ? (
         <View style={styles.verseRow}>
           {/*
@@ -715,6 +856,8 @@ const styles = StyleSheet.create({
   copyBar: { position: 'absolute', top: spacing.xs, start: spacing.sm, end: spacing.sm, zIndex: 30 },
   row: { paddingVertical: 6, paddingHorizontal: spacing.sm },
   glow: { position: 'absolute', top: 0, bottom: 0, start: 0, end: 0, borderRadius: 6 },
+  // Zero-size marker (e2e: the searched words of this row are glowing).
+  probe: { position: 'absolute', width: 0, height: 0 },
   selectedBar: { position: 'absolute', top: 4, bottom: 4, start: -spacing.sm, width: 3, borderRadius: 2 },
   // Android: keep the font's ascent / descent padding so te'amim above the first line and below
   // the last one are never clipped by the text view.

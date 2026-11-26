@@ -14,6 +14,11 @@
  * screen only), and the Quick Source Opener jumping to a parsha / aliyah ("פרשת וישלח שני",
  * "בלק 3", "בראשית מפטיר") at its exact verse.
  *
+ * Search -> reader: tapping search results for a book that is already open (the reader stays mounted under
+ * the search screen) always lands on the new paragraph, also after scrolling away; the searched words glow
+ * (only the vocalized words themselves, no punctuation) and fade out; visible results are prefetched and open
+ * from the cache.
+ *
  *   npm run web                          # terminal 1 (Metro on :8081, sample DB)
  *   npm run e2e:reader [-- --shots=DIR]  # terminal 2
  */
@@ -843,6 +848,117 @@ try {
       await tid('toc-close').click();
       // Without topic data the TOC is the plain list with no switch (a non-halacha book never shows it either).
       step('Shulchan Aruch TOC: topic -> siman navigation exact in both modes; the mode persists');
+    }
+
+    // --- search -> reader: an already-open book always lands on the new result, words glow, prefetch -----------
+    {
+      await page.goto(BASE + '/', { timeout: 180000 });
+      await tid('open-search').waitFor({ timeout: 180000 });
+      await tid('open-search').click();
+      await tid('search-input').fill('ויאמר');
+      await tid('search-result').first().waitFor({ timeout: 20000 });
+      await page.locator('[data-testid="search-result"]').first().click();
+      await page.waitForURL(/\/reader/);
+      await tid('reader-search').waitFor();
+      /** Box of the visible copy of a paragraph (null when it is not rendered on screen). */
+      const paraBox = (line) =>
+        page.evaluate((l) => {
+          const el = [...document.querySelectorAll(`[data-testid="para-${l}"]`)].filter((e) => e.getBoundingClientRect().height > 0).pop();
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { top: r.top, bottom: r.bottom };
+        }, line);
+      /** Background alpha of the glowing words inside the visible paragraph (0 when none). */
+      const glowAlpha = (line) =>
+        page.evaluate((l) => {
+          // termGlow of the light / sepia / dark palettes (src/theme.ts) with its fading alpha.
+          const GLOW_RE = /^rgba\((?:255, 170, 0|230, 130, 10|255, 184, 64), ([\d.]+)\)/;
+          const el = [...document.querySelectorAll(`[data-testid="para-${l}"]`)].filter((e) => e.getBoundingClientRect().height > 0).pop();
+          if (!el) return 0;
+          const alphas = [...el.querySelectorAll('span, div')]
+            .filter((x) => x.children.length === 0)
+            .map((x) => getComputedStyle(x).backgroundColor.match(GLOW_RE))
+            .filter(Boolean)
+            .map((m) => Number(m[1]));
+          return alphas.length ? Math.max(...alphas) : 0;
+        }, line);
+      const glowText = (line) =>
+        page.evaluate((l) => {
+          const GLOW_RE = /^rgba\((?:255, 170, 0|230, 130, 10|255, 184, 64), ([\d.]+)\)/;
+          const el = [...document.querySelectorAll(`[data-testid="para-${l}"]`)].filter((e) => e.getBoundingClientRect().height > 0).pop();
+          return el ? [...el.querySelectorAll('span, div')].filter((x) => x.children.length === 0 && GLOW_RE.test(getComputedStyle(x).backgroundColor)).map((x) => x.textContent) : [];
+        }, line);
+      const hits0 = await page.evaluate(() => globalThis.__KODESHREAD_PREFETCH__.hits);
+      let prefetched = 0;
+      const landed = [];
+      let lastPick = '';
+      // From the open book: search inside it (the reader stays mounted under the search screen) and tap results
+      // all over the book, including one tapped twice in a row.
+      for (const word of ['יוסף', 'אברהם', 'לבן', 'שרה', 'יוסף']) {
+        await tid('reader-search').click();
+        await tid('search-input').waitFor();
+        await tid('search-input').fill(word);
+        // The previous query's rows stay visible while the new one runs: wait for this word's hits.
+        await page.waitForFunction(
+          (w) => {
+            const hits = [...document.querySelectorAll('[data-testid="search-hit"]')].filter((e) => e.getBoundingClientRect().height > 0);
+            const cards = [...document.querySelectorAll('[data-testid="search-result"]')].filter((e) => e.getBoundingClientRect().height > 0);
+            return cards.length > 4 && hits.length > 0 && hits.every((e) => e.textContent.replace(/[^\u05D0-\u05EA]/g, '') === w);
+          },
+          word,
+          { timeout: 20000 },
+        );
+        const ids = await page.evaluate(() => [...document.querySelectorAll('[data-testid="search-result"]')].filter((e) => e.getBoundingClientRect().height > 0).map((e) => e.id));
+        const pick = ids[4];
+        const [, bookId, line] = pick.split('-').map(Number);
+        // The search settled: the visible results are prefetched in the background (zero-delay open).
+        const cached = await page
+          .waitForFunction(([b, l]) => globalThis.__KODESHREAD_PREFETCH__.covered(b, l), [bookId, line], { timeout: 6000 })
+          .then(() => true, () => false);
+        if (cached) prefetched++;
+        await page.locator(`[id="${pick}"]`).last().click();
+        await page.waitForURL(/\/reader/);
+        await page.waitForFunction((l) => [...document.querySelectorAll(`[data-testid="para-${l}"]`)].some((e) => e.getBoundingClientRect().height > 0), line, { timeout: 5000 });
+        await page.waitForTimeout(250);
+        const box = await paraBox(line);
+        assert.ok(box && box.top >= 60 && box.top < 260, `${word}: paragraph ${line} on the reading line (top ${box && Math.round(box.top)})`);
+        assert.strictEqual(await tid(`term-glow-${line}`).count(), 1, `${word}: the searched words glow`);
+        const words = await glowText(line);
+        assert.ok(words.length && words.every((w) => w.replace(/[֑-ׇ]/g, '').includes(word)), `${word}: only the matched (vocalized) words glow: ${JSON.stringify(words)}`);
+        assert.ok(words.every((w) => !/[\s(),:;׃]$/.test(w)), 'punctuation stays outside the glow');
+        landed.push(line);
+        lastPick = pick;
+      }
+      assert.ok(prefetched >= 3, `the tapped results were prefetched (${prefetched}/5)`);
+      const hits1 = await page.evaluate(() => globalThis.__KODESHREAD_PREFETCH__.hits);
+      assert.ok(hits1 - hits0 >= 3, `the reader opened prefetched windows (${hits1 - hits0} cache hits)`);
+      // The glow holds, then fades out smoothly and disappears: sample it every 120 ms for 3.2 s.
+      const line = landed[landed.length - 1];
+      const samples = [];
+      for (let t = 0; t < 27; t++) {
+        samples.push(await glowAlpha(line));
+        await page.waitForTimeout(120);
+      }
+      const peak = Math.max(...samples);
+      const mid = samples.filter((a) => a > 0.05 && a < peak - 0.05);
+      assert.ok(peak > 0.4, `full glow first (${peak})`);
+      assert.ok(mid.length >= 3, `fades through intermediate levels: ${samples.map((a) => a.toFixed(2)).join(' ')}`);
+      for (let k = 1; k < samples.length; k++) assert.ok(samples[k] <= samples[k - 1] + 1e-6, `never brightens again: ${samples.map((a) => a.toFixed(2)).join(' ')}`);
+      await page.waitForFunction((l) => !document.querySelector(`[data-testid="term-glow-${l}"]`), line, { timeout: 3000 });
+      assert.strictEqual(await glowAlpha(line), 0, 'the glow is gone');
+      // An explicit jump wins over the saved scroll position: scroll away, then tap the same result again.
+      await page.mouse.move(200, 500);
+      await page.mouse.wheel(0, 2500);
+      await page.waitForTimeout(500);
+      await tid('reader-search').click();
+      await tid('search-input').waitFor();
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="search-result"]')].filter((e) => e.getBoundingClientRect().height > 0).length > 4, null, { timeout: 20000 });
+      await page.locator(`[id="${lastPick}"]`).last().click();
+      await page.waitForURL(/\/reader/);
+      await page.waitForFunction((l) => [...document.querySelectorAll(`[data-testid="para-${l}"]`)].some((e) => e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().top < 260 && e.getBoundingClientRect().top >= 60), line, { timeout: 5000 });
+      assert.strictEqual(await tid(`term-glow-${line}`).count(), 1, 'the same result tapped again glows again');
+      await shot('r7-search-jump-glow');
+      step(`search -> reader: an already-open book lands on every new result (${landed.join(', ')}), even after scrolling away; the matched words glow and fade; ${prefetched}/5 targets prefetched, ${hits1 - hits0} zero-delay opens`);
     }
 
     // --- tablet: docked TOC stays open after a jump -------------------------------------------

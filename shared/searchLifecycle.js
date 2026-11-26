@@ -4,6 +4,10 @@
  *
  *   idle -> searching -> done | cancelled | (done with error)
  *
+ * Progressive search (shared/searchStream.js): the first 'batch' turns `searching` into `done` with
+ * `streaming: true` (rows on screen, more arriving), later batches append, 'end' settles the count.
+ * "ביטול" mid-stream keeps the rows already shown and stops the stream (count "N+", load more continues).
+ *
  * Every action carries the id of the request that produced it (monotonic, from createRequestCounter).
  * Actions of a superseded request are ignored, so a slow older query can never overwrite the state
  * of a newer one, and results that arrive after "ביטול" are dropped.
@@ -27,7 +31,7 @@ function createRequestCounter() {
 }
 
 function initialLifecycle() {
-  return { status: 'idle', id: 0, key: '', stage: 'query', scanned: 0, startedAt: 0, counting: false, results: null };
+  return { status: 'idle', id: 0, key: '', stage: 'query', scanned: 0, startedAt: 0, counting: false, streaming: false, results: null };
 }
 
 /**
@@ -37,12 +41,12 @@ function initialLifecycle() {
 function lifecycleReducer(state, a) {
   if (a.type === 'start') {
     if (a.id <= state.id) return state; // never go back to an older request
-    return { ...state, status: 'searching', id: a.id, key: a.key, stage: 'query', scanned: 0, startedAt: a.now, counting: false };
+    return { ...state, status: 'searching', id: a.id, key: a.key, stage: 'query', scanned: 0, startedAt: a.now, counting: false, streaming: false };
   }
   if (a.id !== state.id) return state; // stale: a newer request owns the state
   switch (a.type) {
     case 'progress':
-      if (state.status !== 'searching' && !state.counting) return state;
+      if (state.status !== 'searching' && !state.counting && !state.streaming) return state;
       return { ...state, stage: a.stage, scanned: a.scanned == null ? state.scanned : a.scanned };
     case 'page':
       if (state.status !== 'searching') return state; // cancelled meanwhile
@@ -53,8 +57,32 @@ function lifecycleReducer(state, a) {
     case 'more':
       if (state.status !== 'done' || !state.results) return state;
       return { ...state, results: { ...state.results, rows: state.results.rows.concat(a.rows), hasMore: a.hasMore, cursor: a.cursor } };
+    case 'batch':
+      // First rows of a streamed run: on screen at once, the rest keeps arriving behind a subtle indicator.
+      if (state.status === 'searching') {
+        return { ...state, status: 'done', streaming: true, stage: 'query', scanned: 0, results: { ...a.base, rows: a.rows, hasMore: true, cursor: a.cursor || null, count: null } };
+      }
+      if (state.status !== 'done' || !state.streaming || !state.results) return state; // cancelled / finished meanwhile
+      return { ...state, results: { ...state.results, rows: state.results.rows.concat(a.rows), cursor: a.cursor || state.results.cursor } };
+    case 'end':
+      if (state.status === 'searching') {
+        // Nothing matched (or an error before the first batch).
+        return { ...state, status: 'done', streaming: false, scanned: 0, results: { ...a.base, rows: [], hasMore: false, cursor: null, count: a.count || { count: 0, capped: false } } };
+      }
+      if (state.status !== 'done' || !state.streaming || !state.results) return state;
+      return {
+        ...state,
+        streaming: false,
+        scanned: 0,
+        results: { ...state.results, count: a.count, hasMore: a.hasMore, cursor: a.cursor, elapsed: a.base && a.base.elapsed != null ? a.base.elapsed : state.results.elapsed },
+      };
     case 'cancel':
-      if (state.status === 'searching') return { ...state, status: 'cancelled', counting: false };
+      if (state.status === 'searching') return { ...state, status: 'cancelled', counting: false, streaming: false };
+      if (state.streaming && state.results) {
+        // Keep what is on screen; the rest can still be paged in from the last batch's cursor.
+        const r = state.results;
+        return { ...state, streaming: false, results: { ...r, count: { count: r.rows.length, capped: true }, hasMore: !!r.cursor } };
+      }
       if (state.counting) return { ...state, counting: false }; // keep the first page, drop only the count
       return state;
     default:

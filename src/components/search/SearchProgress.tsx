@@ -5,6 +5,8 @@
  *    the moment a search is pending — a fixed 3 px track, so nothing jumps when it appears;
  *  - a status banner after BANNER_DELAY_MS (no flicker on instant queries): the scope / real stage,
  *    a live elapsed timer (numbers isolated LTR) and a compact "ביטול" button;
+ *  - progressive search: while results are still streaming in (rows already on screen) the same bar keeps
+ *    sweeping, dimmed, with no banner and nothing that blocks the list;
  *  - a "החיפוש בוטל" banner with "חפש שוב" (distinct from "לא נמצאו תוצאות");
  *  - LoadingMoreFooter for pagination.
  */
@@ -30,7 +32,7 @@ function useElapsed(startedAt: number, active: boolean) {
   return active ? Math.max(0, now - startedAt) : 0;
 }
 
-function SweepBar({ active }: { active: boolean }) {
+function SweepBar({ active, soft }: { active: boolean; soft?: boolean }) {
   const s = useThemedStyles(createStyles);
   const [w, setW] = useState(0);
   const sweep = useState(() => new Animated.Value(0))[0];
@@ -38,8 +40,8 @@ function SweepBar({ active }: { active: boolean }) {
 
   // Fade in / out so a query that finishes in < 200 ms never produces a hard flash.
   useEffect(() => {
-    Animated.timing(fade, { toValue: active ? 1 : 0, duration: active ? 160 : 220, easing: Easing.out(Easing.quad), useNativeDriver: Platform.OS !== 'web' }).start();
-  }, [active, fade]);
+    Animated.timing(fade, { toValue: active ? (soft ? 0.45 : 1) : 0, duration: active ? 160 : 220, easing: Easing.out(Easing.quad), useNativeDriver: Platform.OS !== 'web' }).start();
+  }, [active, soft, fade]);
 
   useEffect(() => {
     if (!active || !w) return;
@@ -70,6 +72,8 @@ function SweepBar({ active }: { active: boolean }) {
 interface Props {
   /** 'searching' | 'cancelled' | other = quiet. */
   phase: string;
+  /** Rows are on screen and more are still arriving: a subtle, non-blocking indicator. */
+  streaming?: boolean;
   scope: SearchScope;
   progress: { stage: SearchStage; scanned: number; startedAt: number };
   onCancel: () => void;
@@ -77,14 +81,15 @@ interface Props {
   testIDPrefix?: string;
 }
 
-export const SearchProgress = memo(function SearchProgress({ phase, scope, progress, onCancel, onRetry, testIDPrefix = 'search' }: Props) {
+export const SearchProgress = memo(function SearchProgress({ phase, streaming, scope, progress, onCancel, onRetry, testIDPrefix = 'search' }: Props) {
   const s = useThemedStyles(createStyles);
   const searching = phase === 'searching';
   const elapsed = useElapsed(progress.startedAt, searching);
   const showBanner = searching && elapsed >= BANNER_DELAY_MS;
   return (
     <View>
-      <SweepBar active={searching} />
+      <SweepBar active={searching || !!streaming} soft={!searching && !!streaming} />
+      {streaming && !searching ? <View style={s.marker} testID={`${testIDPrefix}-streaming`} accessibilityLabel="תוצאות נוספות בדרך" /> : null}
       {showBanner ? (
         <View style={s.banner} testID={`${testIDPrefix}-status`} accessibilityLiveRegion="polite">
           <Text style={s.stage} numberOfLines={1} testID={`${testIDPrefix}-stage`}>
@@ -126,6 +131,7 @@ const createStyles = (c: Palette) =>
   StyleSheet.create({
     track: { height: 3, overflow: 'hidden', backgroundColor: c.accentSoft, alignItems: 'flex-start' },
     thumb: { height: 3, borderRadius: 2, backgroundColor: c.accent },
+    marker: { position: 'absolute', width: 1, height: 1, opacity: 0 },
     banner: {
       flexDirection: 'row',
       alignItems: 'center',
