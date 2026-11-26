@@ -142,7 +142,7 @@ export default function AdvancedSearchScreen() {
     setFormOpen(true);
   }, [resetAdvanced]);
 
-  const back = nav.goHome; // in-app Back always lands on Home with an empty back stack
+  const back = useCallback(() => nav.open('/search'), [nav]); // header ← returns to Simple Search (dedup: pops back to it)
 
   const onOpen = useCallback(
     (row: SearchRow) => {

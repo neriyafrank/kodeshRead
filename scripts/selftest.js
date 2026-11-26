@@ -6469,8 +6469,17 @@ async function navHistoryTests() {
     assert.strictEqual(nav.screenOf('/reader?x=1'), 'reader');
     assert.strictEqual(nav.screenOf('/'), 'home');
   });
+  await check('nav history: Advanced Search header back returns to Simple Search (deduplicated), then Search back goes Home', () => {
+    let st = nav.createHistory();
+    for (const h of ['/search', '/advanced-search', '/reader']) st = nav.open(st, h);
+    st = nav.open(st, '/advanced-search'); // reader -> advanced (collapse)
+    st = nav.open(st, '/search'); // advanced header back
+    assert.deepStrictEqual(st, ['home', 'search']);
+    assert.deepStrictEqual(nav.appBack(st), ['home'], 'Simple Search header back then goes Home');
+    assert.deepStrictEqual(nav.open(['home', 'advanced-search'], '/search'), ['home', 'advanced-search', 'search'], 'without Simple Search underneath it is pushed');
+  });
   await check('nav history: the in-app Back button jumps straight Home and empties the back stack, from any screen', () => {
-    for (const path of [['search'], ['search', 'reader'], ['search', 'advanced-search', 'reader'], ['library-manager'], ['reader', 'search', 'library-manager']]) {
+    for (const path of [['search'], ['search', 'reader'], ['reader', 'search', 'reader'], ['library-manager'], ['reader', 'search', 'library-manager']]) {
       let st = nav.createHistory();
       for (const p of path) st = nav.open(st, '/' + p);
       st = nav.appBack(st);
@@ -6487,7 +6496,7 @@ async function navHistoryTests() {
       assert.ok(s.includes('useAppNav()') && !/router\.(navigate|push|back|replace)\(/.test(s), `${f}: navigates only through useAppNav`);
     }
     assert.ok(src('src/app/reader.tsx').includes('const goLibrary = nav.goHome'));
-    assert.ok(src('src/app/advanced-search.tsx').includes('const back = nav.goHome'));
+    assert.ok(src('src/app/advanced-search.tsx').includes("nav.open('/search')") && !src('src/app/advanced-search.tsx').includes('nav.goHome'), 'advanced search header back returns to Simple Search');
     for (const f of ['src/app/search.tsx', 'src/app/library-manager.tsx']) {
       const s = src(f);
       assert.ok(s.includes('headerBackVisible: false') && s.includes('<HomeBackButton onPress={nav.goHome} />'), f);

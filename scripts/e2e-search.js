@@ -647,14 +647,19 @@ try {
     assert.ok((await page.locator('body').innerText()).includes(advTarget.split('‹')[0].trim()));
     step('advanced result opens the reader');
 
-    // The in-app ← always goes Home (empty back stack), then back to Search for the rest of the run.
+    // The Advanced Search ← returns to Simple Search (query kept); Simple Search's own ← then goes Home.
     await page.goBack();
     await tid('advanced-search').waitFor({ timeout: 20000 });
     await tid('adv-back').click();
-    await tid('open-search').waitFor({ timeout: 20000 });
-    assert.ok(!/\/(search|advanced-search|reader)/.test(new URL(page.url()).pathname), 'the in-app back arrow lands on Home');
+    await page.waitForURL(/\/search$/);
+    await tid('search-input').waitFor();
+    assert.strictEqual(await tid('search-input').inputValue(), 'שבת');
     assert.strictEqual(await tid('advanced-search').count(), 0);
-    step('the ← back arrow goes straight Home');
+    step('the Advanced Search ← returns to Simple Search');
+    await tid('header-back').click();
+    await tid('open-search').waitFor({ timeout: 20000 });
+    assert.ok(!/\/(search|advanced-search|reader)/.test(new URL(page.url()).pathname), 'Simple Search ← lands on Home');
+    step('Simple Search ← goes straight Home');
     await tid('open-search').click();
     await page.waitForURL(/\/search$/);
     await tid('search-input').waitFor();
