@@ -7,7 +7,7 @@
  * text on wide screens. Only the active tab's reader is mounted; the others are restored from
  * their saved positions when re-activated.
  */
-import { Stack, useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,11 +21,12 @@ import { TocDrawer } from '../components/reader/TocDrawer';
 import { VocalizationToggles } from '../components/reader/VocalizationToggles';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
+import { useAppNav } from '../lib/appNav';
 
 export default function ReaderWorkspace() {
   const s = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
-  const router = useRouter();
+  const nav = useAppNav();
   const activeTab = useTabs(selectActiveTab);
   const requestJump = useTabs((x) => x.requestJump);
   const [tocOpen, setTocOpen] = useState(false);
@@ -35,7 +36,7 @@ export default function ReaderWorkspace() {
   // Tablets / desktop: the TOC docks beside the text and stays open after a jump.
   const docked = width >= 900;
 
-  const goLibrary = () => (router.canGoBack() ? router.back() : router.replace('/'));
+  const goLibrary = nav.goHome;
 
   return (
     <View style={s.screen}>
@@ -62,8 +63,8 @@ export default function ReaderWorkspace() {
         <Pressable
           onPress={() =>
             activeTab
-              ? router.navigate({ pathname: '/search', params: { bookId: String(activeTab.bookId), title: activeTab.bookTitle } })
-              : router.navigate('/search')
+              ? nav.open({ pathname: '/search', params: { bookId: String(activeTab.bookId), title: activeTab.bookTitle } })
+              : nav.open('/search')
           }
           hitSlop={6}
           style={s.iconBtn}

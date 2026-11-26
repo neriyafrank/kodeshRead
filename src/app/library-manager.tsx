@@ -7,6 +7,8 @@
  */
 import { Stack } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
+import { HomeBackButton } from '../components/HomeBackButton';
+import { useAppNav } from '../lib/appNav';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { USER_ROOT_NAME } from '../../shared/sources';
@@ -45,6 +47,7 @@ const num = (n: number | null | undefined) => (n == null ? '—' : n.toLocaleStr
 type Check = { status: 'idle' } | { status: 'checking' } | { status: 'done'; release: ReleaseInfo } | { status: 'error'; message: string };
 
 export default function LibraryManagerScreen() {
+  const nav = useAppNav();
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
   const lib = useLibrary();
@@ -108,7 +111,7 @@ export default function LibraryManagerScreen() {
 
   return (
     <ScrollView style={s.screen} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="library-manager">
-      <Stack.Screen options={{ title: 'ניהול ספרייה ועדכונים' }} />
+      <Stack.Screen options={{ title: 'ניהול ספרייה ועדכונים', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.goHome} /> }} />
 
       <JobStatus />
       <View style={s.resumeWrap}>

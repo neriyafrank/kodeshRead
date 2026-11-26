@@ -1,23 +1,23 @@
 /**
  * First launch (no core_library.db yet): welcome card with the two ways to get books.
  */
-import { useRouter } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { isWeb } from '../../db/library';
 import { useLibraryJobs } from '../../state/libraryJobs';
 import { useLibrarySettings } from '../../state/libraryStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../../theme';
+import { useAppNav } from '../../lib/appNav';
 
 export function OnboardingCard({ hasUserBooks, starter }: { hasUserBooks: boolean; starter?: boolean }) {
   const s = useThemedStyles(createStyles);
-  const router = useRouter();
+  const nav = useAppNav();
   const busy = useLibraryJobs((x) => !!x.job);
   const dismiss = useLibrarySettings((x) => x.dismissOnboarding);
 
   // The multi-GB cloud library starts from the manager's cloud card, after it showed the size, the
   // build date and the free-storage check.
-  const download = () => router.navigate('/library-manager');
+  const download = () => nav.open('/library-manager');
 
   return (
     <View style={[s.card, starter && s.cardInList]} testID="onboarding-card">
@@ -38,7 +38,7 @@ export function OnboardingCard({ hasUserBooks, starter }: { hasUserBooks: boolea
         <Text style={s.primaryText}>☁︎  הורד ספרייה מוכנה מהענן</Text>
         <Text style={s.hint}>ספריית אוצריא מאונדקסת לחיפוש — מורדת בחלקים, אפשר להמשיך אחרי הפסקה</Text>
       </Pressable>
-      <Pressable onPress={() => router.navigate('/library-manager')} style={({ pressed }) => [s.secondary, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-import">
+      <Pressable onPress={() => nav.open('/library-manager')} style={({ pressed }) => [s.secondary, pressed && s.pressed]} accessibilityRole="button" testID="onboarding-import">
         <Text style={s.secondaryText}>📁  ייבא ספרים מהמכשיר</Text>
         <Text style={s.hintMuted}>קובצי ‎.txt או תיקייה שלמה (גם תיקיית אוצריא)</Text>
       </Pressable>

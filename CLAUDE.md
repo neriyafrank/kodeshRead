@@ -270,6 +270,12 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > `ANDROID_KEYSTORE_BASE64` / `_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` switch release signing from the debug
 > keystore to a real one via `plugins/withAndroidReleaseSigning.js` (env-driven, no-op without them). See README "GitHub Actions build".
 
+> **Navigation history & Back:** `shared/navHistory.js` is the pure model; `src/lib/appNav.ts` (`useAppNav`) is the only way screens navigate.
+> `open` returns to an existing occurrence of a screen with `dismissTo` (else `push`), so each screen is in the back stack at most once
+> (no `Search <-> Reader` build-up). Android system Back = the stack's native pop (overlays' `Modal.onRequestClose` close first; Home -> OS exit).
+> The in-app header Back (`HomeBackButton`, reader / advanced-search / search / library-manager) is `goHome`: straight to Home, empty stack.
+> Self-tested (`nav history:` checks), `e2e:search`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

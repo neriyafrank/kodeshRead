@@ -15,7 +15,7 @@
  * Route params (optional): bookId + title name the "current book" chip.
  */
 import { FlashList } from '@shopify/flash-list';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useMemo, useState } from 'react';
 import { Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -38,6 +38,7 @@ import { cancelPrefetch } from '../services/searchPrefetch';
 import { advancedDefaults, scopeLabel, useSearch, type AdvancedState, type LinguisticOptions } from '../state/searchStore';
 import { selectActiveTab, useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
+import { useAppNav } from '../lib/appNav';
 
 const TOGGLES: { key: keyof LinguisticOptions; label: string; hint: string }[] = [
   { key: 'prefixesAndSuffixes', label: 'תחיליות וסופיות', hint: 'ושבת, בשבת, שבתות, שבתו · תפילה → לתפילתו' },
@@ -80,7 +81,7 @@ function planOf(a: AdvancedState): SearchPlan {
 export default function AdvancedSearchScreen() {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
-  const router = useRouter();
+  const nav = useAppNav();
   const insets = useSafeAreaInsets();
   const [helpOpen, setHelpOpen] = useState(false);
   const params = useLocalSearchParams<{ bookId?: string; title?: string }>();
@@ -141,19 +142,16 @@ export default function AdvancedSearchScreen() {
     setFormOpen(true);
   }, [resetAdvanced]);
 
-  const back = useCallback(() => {
-    if (router.canGoBack()) router.back();
-    else router.replace('/search');
-  }, [router]);
+  const back = nav.goHome; // in-app Back always lands on Home with an empty back stack
 
   const onOpen = useCallback(
     (row: SearchRow) => {
       Keyboard.dismiss();
       cancelPrefetch(); // the reader's own queries go first
       openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true, terms: shown?.terms ?? [] });
-      router.navigate('/reader');
+      nav.open('/reader');
     },
-    [openBook, router, shown?.terms],
+    [openBook, nav, shown?.terms],
   );
 
   // Jump / filter bar over the (streaming) results; a new search resets it to הכל.

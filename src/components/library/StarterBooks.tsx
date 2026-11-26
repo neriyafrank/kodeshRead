@@ -8,7 +8,6 @@
  *     בראשית   תורה · עם רש"י, אונקלוס                    ☁ · 165 KB
  *     במדבר    תורה                                         ✓ זמין לא מקוון
  */
-import { useRouter } from 'expo-router';
 import type { ReactElement } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -19,6 +18,7 @@ import { useLoadedStarterPaths, useOpenStarterBook, useStarterCatalog } from '..
 import { useLibrarySettings } from '../../state/libraryStore';
 import { useStarter, type StarterPhase } from '../../state/starterStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../../theme';
+import { useAppNav } from '../../lib/appNav';
 
 interface Props {
   onOpenBook: (bookId: number, title: string) => void;
@@ -48,7 +48,7 @@ const PHASE_TEXT: Record<StarterPhase, (title: string) => string> = {
 export function StarterBooks({ onOpenBook, footer, compact }: Props) {
   const s = useThemedStyles(createStyles);
   const colors = useAppTheme();
-  const router = useRouter();
+  const nav = useAppNav();
   const { status, catalog, stale, error, retry } = useStarterCatalog(true);
   const loaded = useLoadedStarterPaths();
   const busy = useStarter((x) => x.busy);
@@ -100,7 +100,7 @@ export function StarterBooks({ onOpenBook, footer, compact }: Props) {
     <ScrollView style={s.flex} contentContainerStyle={s.content} keyboardShouldPersistTaps="handled" testID="starter-books">
       <View style={s.banner} testID="starter-upgrade-banner">
         <Text style={s.bannerText}>ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא</Text>
-        <Pressable onPress={() => router.navigate('/library-manager')} style={({ pressed }) => [s.bannerBtn, pressed && s.pressed]} accessibilityRole="button" testID="starter-upgrade-button">
+        <Pressable onPress={() => nav.open('/library-manager')} style={({ pressed }) => [s.bannerBtn, pressed && s.pressed]} accessibilityRole="button" testID="starter-upgrade-button">
           <Text style={s.bannerBtnText}>הורד ספרייה מלאה</Text>
         </Pressable>
       </View>

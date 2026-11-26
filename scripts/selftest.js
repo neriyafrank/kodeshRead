@@ -1154,6 +1154,7 @@ async function main() {
   await copyFormatTests();
   await scanSafetyTests();
   await homeLayoutTests();
+  await navHistoryTests();
   await marginLetterTests();
   // 17. Library cold start: persisted catalog snapshot, lazy Quick Jump aliases, cheap startup queries.
   await coldStartTests();
@@ -1506,7 +1507,7 @@ async function starterPackTests() {
       const ui = fs.readFileSync(path.join(ROOT, 'src/components/library/StarterBooks.tsx'), 'utf8');
       const home = fs.readFileSync(path.join(ROOT, 'src/app/index.tsx'), 'utf8');
       assert.ok(ui.includes('ספריית התחלה מהענן · להורדת הספרייה המלאה לאופליין ולחיפוש מלא') && ui.includes('testID="starter-upgrade-banner"'));
-      assert.ok(ui.includes("router.navigate('/library-manager')"), 'the banner leads to the manager with the cloud library card');
+      assert.ok(ui.includes("nav.open('/library-manager')"), 'the banner leads to the manager with the cloud library card');
       assert.ok(ui.includes('טוען את ${t} מהענן…') && ui.includes('☁ · ${formatBytes(b.sizeBytes)}') && ui.includes('✓ זמין לא מקוון'));
       assert.ok(/const starterMode = layout\.starter/.test(home) && home.includes('homeLayout(') && home.includes('<StarterBooks'));
       const svc = fs.readFileSync(path.join(ROOT, 'src/services/starterLibrary.ts'), 'utf8');
@@ -6434,6 +6435,66 @@ async function coreFinalizeTests() {
   } finally {
     fs.rmSync(fx.tmp, { recursive: true, force: true });
   }
+}
+
+/** Navigation history: deduplicated back stack (no Search <-> Reader ping-pong), system Back vs in-app Back. */
+async function navHistoryTests() {
+  const nav = require('../shared/navHistory');
+  await check('nav history: Home > Search > Reader repeated 3x stays deduplicated; system Back goes Reader > Search > Home, never bouncing', () => {
+    let st = nav.createHistory();
+    st = nav.open(st, '/search');
+    for (let i = 0; i < 3; i++) {
+      st = nav.open(st, '/reader');
+      if (i < 2) st = nav.open(st, { pathname: '/search', params: { bookId: '1' } }); // reader -> search, again
+    }
+    assert.deepStrictEqual(st, ['home', 'search', 'reader']);
+    for (let i = 0; i < 8; i++) { // many more hops never grow the stack
+      st = nav.open(nav.open(st, '/search'), '/reader');
+      assert.ok(st.length <= 3, st.join('>'));
+    }
+    let r = nav.systemBack(st);
+    assert.deepStrictEqual([r.stack, r.handled], [['home', 'search'], true]);
+    r = nav.systemBack(r.stack);
+    assert.deepStrictEqual([r.stack, r.handled], [['home'], true]);
+    r = nav.systemBack(r.stack);
+    assert.deepStrictEqual([r.stack, r.handled], [['home'], false], 'Back on Home is left to Android (exit / minimise)');
+  });
+  await check('nav history: advanced search and the library manager are deduplicated too; screenOf understands hrefs', () => {
+    let st = nav.createHistory();
+    for (const h of ['/search', '/advanced-search', '/reader', '/search', '/advanced-search', '/reader', '/library-manager', '/library-manager']) st = nav.open(st, h);
+    assert.deepStrictEqual(st, ['home', 'search', 'advanced-search', 'reader', 'library-manager']);
+    assert.strictEqual(new Set(st).size, st.length, 'each screen appears at most once');
+    assert.deepStrictEqual(nav.open(['home', 'search', 'reader'], '/'), ['home'], 'opening Home collapses to Home');
+    assert.strictEqual(nav.screenOf({ pathname: '/search', params: { a: 1 } }), 'search');
+    assert.strictEqual(nav.screenOf('/reader?x=1'), 'reader');
+    assert.strictEqual(nav.screenOf('/'), 'home');
+  });
+  await check('nav history: the in-app Back button jumps straight Home and empties the back stack, from any screen', () => {
+    for (const path of [['search'], ['search', 'reader'], ['search', 'advanced-search', 'reader'], ['library-manager'], ['reader', 'search', 'library-manager']]) {
+      let st = nav.createHistory();
+      for (const p of path) st = nav.open(st, '/' + p);
+      st = nav.appBack(st);
+      assert.deepStrictEqual(st, ['home'], path.join('>'));
+      assert.strictEqual(nav.systemBack(st).handled, false, 'Android Back afterwards does not re-enter the previous screen');
+    }
+  });
+  await check('nav history: UI wiring (all navigation goes through useAppNav / dismissTo; header Back = goHome; overlays close on Back)', () => {
+    const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const appNav = src('src/lib/appNav.ts');
+    assert.ok(appNav.includes('router.dismissTo(href') && appNav.includes('router.push(href') && appNav.includes("router.dismissTo('/')") && appNav.includes("router.replace('/')"));
+    for (const f of ['src/app/index.tsx', 'src/app/search.tsx', 'src/app/advanced-search.tsx', 'src/app/reader.tsx', 'src/components/library/StarterBooks.tsx', 'src/components/library/OnboardingCard.tsx']) {
+      const s = src(f);
+      assert.ok(s.includes('useAppNav()') && !/router\.(navigate|push|back|replace)\(/.test(s), `${f}: navigates only through useAppNav`);
+    }
+    assert.ok(src('src/app/reader.tsx').includes('const goLibrary = nav.goHome'));
+    assert.ok(src('src/app/advanced-search.tsx').includes('const back = nav.goHome'));
+    for (const f of ['src/app/search.tsx', 'src/app/library-manager.tsx']) {
+      const s = src(f);
+      assert.ok(s.includes('headerBackVisible: false') && s.includes('<HomeBackButton onPress={nav.goHome} />'), f);
+    }
+    const ov = src('src/components/Overlay.tsx');
+    assert.strictEqual((ov.match(/onRequestClose=\{onClose\}/g) || []).length, 2, 'bottom sheets and drawers close on system Back before the stack pops');
+  });
 }
 
 main();

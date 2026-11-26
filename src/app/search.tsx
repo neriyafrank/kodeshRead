@@ -18,7 +18,7 @@
  * (used by the reader's search button).
  */
 import { FlashList } from '@shopify/flash-list';
-import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
@@ -41,13 +41,15 @@ import { cancelPrefetch } from '../services/searchPrefetch';
 import { scopeLabel, useSearch } from '../state/searchStore';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useAppTheme, useThemedStyles, type Palette } from '../theme';
+import { HomeBackButton } from '../components/HomeBackButton';
+import { useAppNav } from '../lib/appNav';
 
 const DEBOUNCE_MS = 250;
 
 export default function SearchScreen() {
   const c = useAppTheme();
   const s = useThemedStyles(createStyles);
-  const router = useRouter();
+  const nav = useAppNav();
   const params = useLocalSearchParams<{ bookId?: string; title?: string }>();
   const query = useSearch((x) => x.query);
   const setQuery = useSearch((x) => x.setQuery);
@@ -107,8 +109,8 @@ export default function SearchScreen() {
     // Carry the typed words over (the advanced fields keep their own state otherwise).
     if (query.trim() && !advanced.fields.query.trim()) setAdvanced({ fields: { ...advanced.fields, query } });
     const book = scope.kind === 'book' ? { bookId: String(scope.bookId), title: scope.title } : undefined;
-    router.push(book ? { pathname: '/advanced-search', params: book } : '/advanced-search');
-  }, [advanced.fields, query, router, scope, setAdvanced]);
+    nav.open(book ? { pathname: '/advanced-search', params: book } : '/advanced-search');
+  }, [advanced.fields, query, nav, scope, setAdvanced]);
 
   const onOpen = useCallback(
     (row: SearchRow) => {
@@ -116,9 +118,9 @@ export default function SearchScreen() {
       remember(query);
       cancelPrefetch(); // the reader's own queries go first
       openBook({ bookId: row.book_id, bookTitle: row.book_title }, { line: row.line_index, highlight: true, terms: shown?.terms ?? [] });
-      router.navigate('/reader');
+      nav.open('/reader');
     },
-    [openBook, query, remember, router, shown?.terms],
+    [openBook, query, remember, nav, shown?.terms],
   );
 
   const renderItem = useCallback(
@@ -128,7 +130,7 @@ export default function SearchScreen() {
 
   return (
     <View style={s.screen}>
-      <Stack.Screen options={{ title: 'חיפוש בטקסט' }} />
+      <Stack.Screen options={{ title: 'חיפוש בטקסט', headerBackVisible: false, headerLeft: () => <HomeBackButton onPress={nav.goHome} /> }} />
       <View style={s.top}>
         <View style={s.searchRow}>
           <View style={s.inputRow}>

@@ -1,4 +1,4 @@
-import { Stack, useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
 import { useCallback } from 'react';
 import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -17,10 +17,11 @@ import { useLibrarySettings } from '../state/libraryStore';
 import { useOpenLearningTarget } from '../services/dailyLearningNav';
 import { useTabs } from '../state/tabsStore';
 import { radius, spacing, useThemedStyles, type Palette } from '../theme';
+import { useAppNav } from '../lib/appNav';
 
 export default function LibraryScreen() {
   const s = useThemedStyles(createStyles);
-  const router = useRouter();
+  const nav = useAppNav();
   const openBookInTab = useTabs((x) => x.openBook);
   const tabCount = useTabs((x) => x.tabs.length);
   const { core, starter, userBookCount } = useLibrary();
@@ -36,9 +37,9 @@ export default function LibraryScreen() {
   const openBook = useCallback(
     (bookId: number, bookTitle: string, line?: number, highlight = false) => {
       openBookInTab({ bookId, bookTitle }, { line, highlight });
-      router.navigate('/reader');
+      nav.open('/reader');
     },
-    [openBookInTab, router],
+    [openBookInTab, nav],
   );
 
   const onJump = useCallback((r: JumpResult) => openBook(r.bookId, r.bookTitle, r.targetLine, !r.suggestion), [openBook]);
@@ -46,7 +47,7 @@ export default function LibraryScreen() {
   // A study item whose book is not on the device (not in the personal / starter books either): explain how to get it.
   const onMissingLearning = useCallback(
     (item: { title: string }) => {
-      const go = () => router.navigate('/library-manager');
+      const go = () => nav.open('/library-manager');
       const msg = `הספר ״${item.title}״ עדיין לא נמצא במכשיר. אפשר להוריד ספרייה מוכנה מהענן, או לייבא אותו כספר אישי. לפתוח את ניהול הספרייה?`;
       if (Platform.OS === 'web') {
         if (typeof window !== 'undefined' && window.confirm(msg)) go();
@@ -57,7 +58,7 @@ export default function LibraryScreen() {
         { text: 'לניהול ספרייה', onPress: go },
       ]);
     },
-    [router],
+    [nav],
   );
 
   return (
@@ -68,7 +69,7 @@ export default function LibraryScreen() {
           headerRight: () => (
             <View style={s.headerBtns}>
               <Pressable
-                onPress={() => router.navigate('/library-manager')}
+                onPress={() => nav.open('/library-manager')}
                 hitSlop={8}
                 style={s.searchBtn}
                 accessibilityRole="button"
@@ -77,12 +78,12 @@ export default function LibraryScreen() {
               >
                 <Text style={s.tabsBtnText}>ניהול</Text>
               </Pressable>
-              <Pressable onPress={() => router.navigate('/search')} hitSlop={8} style={s.searchBtn} accessibilityRole="button" accessibilityLabel="חיפוש בטקסט" testID="open-search">
+              <Pressable onPress={() => nav.open('/search')} hitSlop={8} style={s.searchBtn} accessibilityRole="button" accessibilityLabel="חיפוש בטקסט" testID="open-search">
                 <SearchIcon size={18} />
                 <Text style={s.tabsBtnText}>חיפוש</Text>
               </Pressable>
               {tabCount ? (
-                <Pressable onPress={() => router.navigate('/reader')} hitSlop={8} style={s.tabsBtn} accessibilityRole="button" testID="open-workspace">
+                <Pressable onPress={() => nav.open('/reader')} hitSlop={8} style={s.tabsBtn} accessibilityRole="button" testID="open-workspace">
                   <Text style={s.tabsBtnText}>לשוניות</Text>
                   <View style={s.badge}>
                     <Text style={s.badgeText}>{tabCount}</Text>
@@ -93,11 +94,11 @@ export default function LibraryScreen() {
           ),
         }}
       />
-      <JobStatus compact onPress={() => router.navigate('/library-manager')} />
+      <JobStatus compact onPress={() => nav.open('/library-manager')} />
       <ResumeCards />
       <QuickJumpBar onJump={onJump} />
       {/* Always shown, above the starter books: never hidden by them. */}
-      <DailyLearningCard onOpen={(t) => openLearningTarget(t) && router.navigate('/reader')} onMissing={onMissingLearning} />
+      <DailyLearningCard onOpen={(t) => openLearningTarget(t) && nav.open('/reader')} onMissing={onMissingLearning} />
       <View style={s.divider} />
       {starterMode ? (
         // The onboarding card (import / full download) closes the starter list.
