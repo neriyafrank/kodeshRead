@@ -58,3 +58,8 @@ export function tocPanelWidth(columnWidths: number[], opts?: { min?: number; cap
 
 /** Shrinks column widths to fit `cap` (columns above `minCol` give way proportionally); all-minCol columns scroll when still too wide. */
 export function fitColumnWidths(widths: number[], cap: number, minCol?: number): number[];
+
+/** false = the first child starts right after the parent (no "לתחילת" row); null = lines in between (ask `startRowNeeded`); true = no child. */
+export function startRowByLines(parentLine: number, firstChildLine: number | null | undefined): boolean | null;
+/** Whether body text lies between the parent heading and its first child, i.e. the "לתחילת <parent>" row is useful. */
+export function startRowNeeded(db: LibraryDb, bookId: number, parentLine: number, firstChildLine: number | null | undefined): Promise<boolean>;

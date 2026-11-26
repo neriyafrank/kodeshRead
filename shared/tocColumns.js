@@ -237,4 +237,27 @@ function fitColumnWidths(widths, cap, minCol) {
   return out;
 }
 
-module.exports = { fitColumnWidths, buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail, TOC_COLUMN_WIDTH, estimateTextWidth, tocColumnWidth, tocPanelWidth };
+/**
+ * Whether the child column of `parentLine` needs its "לתחילת <parent>" row: only when tapping the first child
+ * (`firstChildLine`) would skip real text. No row when the child starts right after the parent heading (סימן א -> סעיף א on
+ * the next line) or on the very same line (a topic header over its first siman). Pure line arithmetic: `startRowNeeded`
+ * adds the one query for the gap case.
+ * @returns {boolean|null} false = adjacent (no row), null = lines in between, ask the database
+ */
+function startRowByLines(parentLine, firstChildLine) {
+  if (firstChildLine == null) return true; // nothing to navigate to: the row is the only way in
+  return firstChildLine <= parentLine + 1 ? false : null;
+}
+
+/** True when a body (non-heading) paragraph lies strictly between the parent heading and the first child. */
+async function startRowNeeded(db, bookId, parentLine, firstChildLine) {
+  const quick = startRowByLines(parentLine, firstChildLine);
+  if (quick !== null) return quick;
+  const rows = await adapterForBook(db, bookId).all(
+    'SELECT 1 AS x FROM paragraphs WHERE book_id = ? AND line_index > ? AND line_index < ? AND is_heading = 0 AND length(trim(clean_text)) > 0 LIMIT 1',
+    [bookId, parentLine, firstChildLine],
+  );
+  return rows.length > 0;
+}
+
+module.exports = { startRowByLines, startRowNeeded, fitColumnWidths, buildTocTree, hasChildren, tocColumns, pathForLine, nodeEnd, fetchInlineVerses, verseForLine, filterToc, nodeTrail, TOC_COLUMN_WIDTH, estimateTextWidth, tocColumnWidth, tocPanelWidth };

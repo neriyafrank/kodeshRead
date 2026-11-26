@@ -284,8 +284,10 @@ try {
     const ch3 = page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"]', { hasText: /^פרק ג$/ }).last();
     await ch3.scrollIntoViewIfNeeded();
     await ch3.click();
-    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="toc-open-section"]')].some((e) => e.innerText.includes('פרק ג')));
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid^="toc-verse-"]').length > 5);
     assert.ok((await all('toc-verse-').count()) > 5, 'chapter ג verses listed');
+    // פסוק א starts right after the פרק ג heading (nothing to skip): no "לתחילת פרק ג" row above the verses.
+    assert.strictEqual(await page.locator('[data-testid="toc-col-1"] [data-testid="toc-open-section"]').count(), 0, 'no לתחילת row when the first verse follows the chapter heading');
     await page.locator('[data-testid^="toc-verse-"]', { hasText: /^פסוק ד$/ }).last().click();
     await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
     await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק ג'));
@@ -815,8 +817,15 @@ try {
       await page.locator('[data-testid="toc-col-0"] [data-testid^="toc-node-"]', { hasText: 'הלכות ציצית' }).last().click();
       await tid('toc-col-1').waitFor();
       await page.waitForTimeout(250);
-      assert.ok((await page.locator('[data-testid="toc-col-0"] [data-testid="toc-col-head"], [data-testid="toc-col-1"] [data-testid="toc-col-head"]').allInnerTexts()).some((t) => t.includes('לתחילת הלכות ציצית')), 'לתחילת <topic> header');
-      await page.locator('[data-testid="toc-col-1"] [data-testid="toc-open-section"]').last().click();
+      // The topic starts exactly at its first siman: no "לתחילת <topic>" row, the simanim column starts at the top.
+      assert.strictEqual(await page.locator('[data-testid="toc-col-1"] [data-testid="toc-open-section"]').count(), 0, 'no לתחילת <topic> row (the first siman is the start)');
+      const first = page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"]').first();
+      const colTop = (await tid('toc-col-1').boundingBox()).y;
+      assert.ok(Math.abs((await first.boundingBox()).y - colTop) < 2, 'the first siman sits flush at the top of its column');
+      await first.click();
+      await page.locator('[data-testid^="toc-verse-"]').first().waitFor();
+      assert.strictEqual(await page.locator('[data-testid="toc-col-2"] [data-testid="toc-open-section"]').count(), 0, 'no לתחילת סימן row above סעיף א (it follows the heading)');
+      await page.locator('[data-testid^="toc-verse-"]').first().click();
       await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('סימן ח'), null, { timeout: 20000 });
       step('Shulchan Aruch TOC: סימנים (flat, current siman) | נושאים (plain topic names, current topic); a topic jumps to its first siman');
       // Mode is remembered; a siman inside a topic navigates exactly.
@@ -825,7 +834,7 @@ try {
       assert.strictEqual((await activeLabel()).trim(), 'הלכות ציצית');
       await page.locator('[data-testid="toc-col-1"] [data-testid^="toc-node-"]', { hasText: /^סימן יא$/ }).last().click();
       await page.locator('[data-testid^="toc-verse-"]').first().waitFor();
-      await page.locator('[data-testid="toc-col-2"] [data-testid="toc-open-section"]').last().click();
+      await page.locator('[data-testid^="toc-verse-"]').first().click();
       await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('סימן יא'), null, { timeout: 20000 });
       await openToc(0);
       await tid('toc-mode-simanim').click();

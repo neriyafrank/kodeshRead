@@ -41,6 +41,8 @@ import {
   fetchInlineVerses,
   filterToc,
   fitColumnWidths,
+  startRowByLines,
+  startRowNeeded,
   hasChildren,
   nodeEnd,
   nodeTrail,
@@ -268,6 +270,30 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
   const verseList = deepest && verses?.nodeId === deepest.id && verses.list.length ? verses.list : null;
   const currentVerse = verseList && deepest && currentLine >= deepest.start_line && currentLine <= nodeEnd(tree, deepest, total) ? verseForLine(verseList, currentLine) : null;
 
+  // "לתחילת <parent>" rows only where the first child skips real text (see shared/tocColumns.startRowNeeded); until the
+  // one-off gap check answers, a row with lines in between stays visible (never hide the way to an intro).
+  const [gap, setGap] = useState<Record<string, boolean>>({});
+  const rowFor = (key: string, parentLine: number, firstChildLine: number | null | undefined) => {
+    const quick = startRowByLines(parentLine, firstChildLine);
+    return quick !== null ? quick : gap[key] !== false;
+  };
+  useEffect(() => {
+    let alive = true;
+    const ask = (key: string, parentLine: number, firstLine: number | null | undefined) => {
+      if (key in gap || startRowByLines(parentLine, firstLine) !== null) return;
+      startRowNeeded(adapter, bookId, parentLine, firstLine).then((need) => alive && setGap((g) => (key in g ? g : { ...g, [key]: need })));
+    };
+    for (const col of columns) {
+      const parent = col.parentId != null ? tree.byId.get(col.parentId) : undefined;
+      if (parent) ask(`n${parent.id}`, parent.start_line, col.items[0]?.start_line);
+    }
+    if (deepest && verseList) ask(`v${deepest.id}`, deepest.start_line, verseList[0]?.line);
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, deepest?.id, verses]);
+
   // --- fit-to-content widths ---------------------------------------------------------------
   // Each column's width from its rows alone (`rows`) and from rows + its "לתחילת …" header (`full`).
   const widthsOf = (withHeader: boolean) => ({
@@ -280,7 +306,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
           chrome: ROW_CHROME,
           branch: col.items.some((n) => hasChildren(tree, n.id)),
           branchSpace: CHEVRON_SPACE,
-          header: withHeader && parent ? `לתחילת ${parent.title}` : null,
+          header: withHeader && parent && rowFor(`n${parent.id}`, parent.start_line, col.items[0]?.start_line) ? `לתחילת ${parent.title}` : null,
           headerFontSize: HEAD_FONT,
           headerChrome: HEAD_CHROME,
         },
@@ -290,7 +316,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
       verseList && deepest
         ? tocColumnWidth(
             verseList.map((v) => v.title),
-            { fontSize: ROW_FONT, chrome: ROW_CHROME, header: withHeader ? `לתחילת ${deepest.title}` : null, headerFontSize: HEAD_FONT, headerChrome: HEAD_CHROME },
+            { fontSize: ROW_FONT, chrome: ROW_CHROME, header: withHeader && rowFor(`v${deepest.id}`, deepest.start_line, verseList[0]?.line) ? `לתחילת ${deepest.title}` : null, headerFontSize: HEAD_FONT, headerChrome: HEAD_CHROME },
           )
         : 0,
   });
@@ -339,7 +365,7 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
         style={[s.column, nativeDir('rtl'), { width: widthAt((verseList ? 1 : 0) + columns.length - 1 - col.depth) }]}
         testID={`toc-col-${col.depth}`}
       >
-        {parent ? (
+        {parent && rowFor(`n${parent.id}`, parent.start_line, col.items[0]?.start_line) ? (
           <Pressable onPress={() => onJump(parent.start_line)} style={({ pressed }) => [s.colHead, pressed && s.pressed]} testID="toc-open-section">
             <Text style={s.colHeadText} numberOfLines={2} testID="toc-col-head">
               לתחילת {parent.title}
@@ -386,11 +412,13 @@ function TocColumnsView({ bookId, tree, total, currentLine, cap, onFitWidth, onJ
     const idx = currentVerse ? verseList.indexOf(currentVerse) : -1;
     return (
       <View key={`v${deepest.id}`} ref={(n) => setWebDir(n, 'rtl')} style={[s.column, nativeDir('rtl'), { width: widthAt(0) }]} testID={`toc-col-${columns.length}`}>
-        <Pressable onPress={() => onJump(deepest.start_line)} style={({ pressed }) => [s.colHead, pressed && s.pressed]} testID="toc-open-section">
-          <Text style={s.colHeadText} numberOfLines={2} testID="toc-col-head">
-            לתחילת {deepest.title}
-          </Text>
-        </Pressable>
+        {rowFor(`v${deepest.id}`, deepest.start_line, verseList[0]?.line) ? (
+          <Pressable onPress={() => onJump(deepest.start_line)} style={({ pressed }) => [s.colHead, pressed && s.pressed]} testID="toc-open-section">
+            <Text style={s.colHeadText} numberOfLines={2} testID="toc-col-head">
+              לתחילת {deepest.title}
+            </Text>
+          </Pressable>
+        ) : null}
         <FlatList
           data={verseList}
           keyExtractor={(v) => String(v.line)}

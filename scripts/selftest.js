@@ -471,6 +471,7 @@ async function main() {
       sa('יורה דעה', 80, 100);
       tw('הלכה/שולחן ערוך/שולחן ערוך, אבן העזר.txt', ['<h1>שולחן ערוך, אבן העזר</h1>', '<h2>סימן א</h2>', 'x']); // too few simanim: stays flat
       tw('הלכה/טור/טור.txt', ['<h1>טור</h1>', '<h2>אורח חיים</h2>', ...Array.from({ length: 30 }, (_, i) => [`<h3>סימן ${num(i + 1)}</h3>`, `<p>טור ${i + 1}</p>`]).flat(), '<h2>יורה דעה</h2>', ...Array.from({ length: 10 }, (_, i) => [`<h3>סימן ${num(i + 1)}</h3>`, `<p>טור יד ${i + 1}</p>`]).flat()]);
+      tw('הלכה/מבחן פתיחה.txt', ['<h1>מבחן פתיחה</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'תוכן', '<h2>פרק ב</h2>', 'פתיחה לפרק ב: טקסט לפני ההלכה הראשונה.', '<h3>הלכה א</h3>', 'תוכן', '<h2>פרק ג</h2>', '<h3>הלכה א</h3>', 'תוכן']);
       tw('הלכה/שולחן ערוך/מפרשים/פרי מגדים/פרי מגדים על אורח חיים.txt', ['<h1>פרי מגדים על אורח חיים</h1>', '<h2>סימן ח</h2>', 'x']);
       const tOut = path.join(tmp, 'topics.db');
       const tp = spawnSync(process.execPath, [path.join(__dirname, 'build-db.js'), `--source=${tlib}`, `--out=${tOut}`], { encoding: 'utf8' });
@@ -564,6 +565,27 @@ async function main() {
         assert.ok(fitted.reduce((a, b) => a + b, 0) <= 340 && fitted.every((w, i) => w <= [200, 150, 150][i] && w >= 84), `shrinks to the cap, never below the minimum: ${fitted}`);
         assert.ok(fitted[0] > fitted[1], 'the wider column keeps more room');
         assert.deepStrictEqual(fit([200, 200, 200, 200], 300), [96, 96, 96, 96], 'too many columns: minimum widths (scroll)');
+        // "לתחילת <parent>" row: only when the first child skips real text.
+        {
+          assert.strictEqual(toc.startRowByLines(10, 11), false, 'first child on the very next line (סימן א -> סעיף א)');
+          assert.strictEqual(toc.startRowByLines(10, 10), false, 'topic header over its first siman (same line)');
+          assert.strictEqual(toc.startRowByLines(10, 14), null, 'lines in between: ask the database');
+          assert.strictEqual(toc.startRowByLines(10, undefined), true, 'no child: keep the row');
+          // Virtual topic nodes start at their first siman: never a row.
+          for (const t of g.roots.filter((n) => n.synthetic)) assert.strictEqual(toc.startRowByLines(t.start_line, g.children.get(t.id)[0].start_line), false, t.title);
+          const bookId = (title) => [...tidx.books.values()].find((b) => b.title === title).id;
+          const nodeOf = async (title, node) => (await tdb.all('SELECT start_line FROM toc_nodes WHERE book_id = ? AND title = ? ORDER BY start_line', [bookId(title), node]));
+          const [pa] = await nodeOf('מבחן פתיחה', 'פרק א');
+          const [pb] = await nodeOf('מבחן פתיחה', 'פרק ב');
+          const [pc] = await nodeOf('מבחן פתיחה', 'פרק ג');
+          const firstHalacha = async (title, parentLine) => (await tdb.all("SELECT MIN(start_line) AS l FROM toc_nodes WHERE book_id = ? AND title = 'הלכה א' AND start_line > ?", [bookId(title), parentLine]))[0].l;
+          const bid = bookId('מבחן פתיחה');
+          assert.strictEqual(await toc.startRowNeeded(tdb, bid, pa.start_line, await firstHalacha('מבחן פתיחה', pa.start_line)), false, 'הלכה א right after the פרק א heading: no row');
+          assert.strictEqual(await toc.startRowNeeded(tdb, bid, pb.start_line, await firstHalacha('מבחן פתיחה', pb.start_line)), true, 'intro paragraph between פרק ב and its first הלכה: row kept');
+          assert.strictEqual(await toc.startRowNeeded(tdb, bid, pc.start_line, await firstHalacha('מבחן פתיחה', pc.start_line)), false, 'פרק ג: adjacent again');
+          const drawerSrc = fs.readFileSync(path.join(ROOT, 'src/components/reader/TocDrawer.tsx'), 'utf8');
+          assert.ok(drawerSrc.includes('rowFor(`n${parent.id}`') && drawerSrc.includes('rowFor(`v${deepest.id}`'), 'both the node columns and the verse column use the rule');
+        }
         // Tur: each section container is grouped under its own topics.
         const tur = await treeOf('טור');
         const gt = ht.groupTocTree(tur.flat, { title: tur.book.title, categoryPath: tur.book.categoryPath }, fixtureData);
