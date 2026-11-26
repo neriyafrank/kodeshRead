@@ -6499,10 +6499,51 @@ async function navHistoryTests() {
       assert.strictEqual(nav.systemBack(st).handled, false, 'Android Back afterwards does not re-enter the previous screen');
     }
   });
+  await check('nav history: opening the current screen (same or different params) never adds a stack entry', () => {
+    for (const screen of ['search', 'reader', 'advanced-search', 'library-manager']) {
+      let st = nav.open(nav.createHistory(), '/' + screen);
+      const before = st.slice();
+      for (const h of ['/' + screen, { pathname: '/' + screen, params: { q: '1' } }, { pathname: '/' + screen, params: { q: '2', book: 'B' } }, '/' + screen + '?book=A']) {
+        assert.strictEqual(nav.openAction(st, h), 'replace', `${screen}: same screen on top updates params in place`);
+        st = nav.open(st, h);
+        assert.deepStrictEqual(st, before);
+      }
+    }
+    assert.strictEqual(nav.openAction(['home', 'search', 'reader'], '/search'), 'dismissTo');
+    assert.strictEqual(nav.openAction(['home'], '/reader'), 'push');
+    assert.deepStrictEqual(nav.open(['home', 'reader', 'reader'], '/search'), ['home', 'reader', 'search'], 'a corrupted stack is repaired on open');
+    assert.deepStrictEqual(nav.collapse(['home', 'reader', 'reader', 'search', 'search']), ['home', 'reader', 'search']);
+    // random walk: never two consecutive equal entries
+    let st = nav.createHistory(), seed = 7;
+    const screens = ['/', '/search', '/advanced-search', '/reader', '/library-manager'];
+    for (let i = 0; i < 500; i++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      st = nav.open(st, screens[seed % screens.length]);
+      assert.ok(st.every((x, j) => j === 0 || x !== st[j - 1]), st.join('>'));
+      assert.strictEqual(new Set(st).size, st.length);
+    }
+  });
+  await check('nav history: Back always lands on a different screen, even from a corrupted stack with duplicates', () => {
+    const stacks = [['home'], ['home', 'search'], ['home', 'reader', 'search'], ['home', 'reader', 'reader'], ['home', 'search', 'search', 'search'],
+      ['search', 'search'], ['reader', 'reader'], ['home', 'home', 'search'], ['home', 'search', 'reader', 'reader']];
+    for (const st of stacks) {
+      const top = st[st.length - 1];
+      const r = nav.systemBack(st);
+      if (r.handled) assert.notStrictEqual(r.stack[r.stack.length - 1], top, `system Back from ${st.join('>')} -> ${r.stack.join('>')}`);
+      const one = nav.appBackOne(st);
+      if (st.length > 1 && !st.every((x) => x === top && top === 'home')) assert.ok(top === 'home' && one.length === 1 ? true : one[one.length - 1] !== top, `appBackOne from ${st.join('>')} -> ${one.join('>')}`);
+      const plan = nav.backPlan(st);
+      assert.ok(plan.home ? plan.stack[0] === 'home' : plan.pop >= 1 && plan.stack[plan.stack.length - 1] !== top);
+    }
+    assert.deepStrictEqual(nav.backPlan(['home', 'reader', 'reader']), { pop: 2, home: false, stack: ['home'] });
+    assert.deepStrictEqual(nav.backPlan(['search', 'search']), { pop: 0, home: true, stack: ['home'] }, 'nothing different underneath: Home');
+    assert.deepStrictEqual(nav.systemBack(['reader', 'reader']), { stack: ['home'], handled: true });
+    assert.deepStrictEqual(nav.systemBack(['home']), { stack: ['home'], handled: false });
+  });
   await check('nav history: UI wiring (all navigation goes through useAppNav / dismissTo; Reader header Back = goHome, other screens = back; overlays close on Back)', () => {
     const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
     const appNav = src('src/lib/appNav.ts');
-    assert.ok(appNav.includes('router.dismissTo(href') && appNav.includes('router.push(href') && appNav.includes("router.dismissTo('/')") && appNav.includes("router.replace('/')"));
+    assert.ok(appNav.includes('router.dismissTo(href') && appNav.includes('router.push(href') && appNav.includes('router.replace(href') && appNav.includes('useBackGuard') && src('src/app/_layout.tsx').includes('useBackGuard()') && appNav.includes("router.dismissTo('/')") && appNav.includes("router.replace('/')"));
     for (const f of ['src/app/index.tsx', 'src/app/search.tsx', 'src/app/advanced-search.tsx', 'src/app/reader.tsx', 'src/components/library/StarterBooks.tsx', 'src/components/library/OnboardingCard.tsx']) {
       const s = src(f);
       assert.ok(s.includes('useAppNav()') && !/router\.(navigate|push|back|replace)\(/.test(s), `${f}: navigates only through useAppNav`);

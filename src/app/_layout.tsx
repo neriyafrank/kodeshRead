@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { LibraryProvider } from '../db/LibraryContext';
 import { CloudDownloadLifecycle, IngestionLifecycle } from '../services/ingestionLifecycle';
+import { useBackGuard } from '../lib/appNav';
 import { ensureRTL } from '../lib/rtl';
 import { useLibrarySettings, useLibraryUi } from '../state/libraryStore';
 import { useSearch } from '../state/searchStore';
@@ -31,6 +32,7 @@ export default function RootLayout() {
   const [fontsLoaded, fontError] = useFonts(fontAssets);
   const storesHydrated = useHydrated(PERSISTED_STORES);
   const theme = useAppTheme();
+  useBackGuard();
 
   useEffect(() => {
     if (fontError) {

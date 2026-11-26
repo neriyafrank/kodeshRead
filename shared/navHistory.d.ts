@@ -5,3 +5,7 @@ export function createHistory(): string[];
 export function open(stack: string[], href: NavHref): string[];
 export function systemBack(stack: string[]): { stack: string[]; handled: boolean };
 export function appBack(): string[];
+export function collapse(stack: string[]): string[];
+export function openAction(stack: string[], href: NavHref): 'replace' | 'dismissTo' | 'push';
+export function backPlan(stack: string[]): { pop: number; home: boolean; stack: string[] };
+export function appBackOne(stack: string[]): string[];
