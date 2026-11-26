@@ -8331,6 +8331,25 @@ async function searchUpgradeTests() {
       assert.deepStrictEqual(rg.summarizeGroups(rowsOf([books[0]], 3), 'section', ctxOf()).map((g) => g.label), ['פרק 1', 'פרק 2', 'פרק 3']);
       assert.strictEqual(rg.shortTitle('שולחן ערוך, אורח חיים'), 'אורח חיים');
       assert.strictEqual(rg.shortTitle('חזון איש, זרעים'), 'חזון איש, זרעים', 'only known work heads are stripped');
+      {
+        const pt = (title, ...corp) => rg.pillTitle(title, { kind: 'books', ids: [1], name: 'x', corpora: corp });
+        assert.strictEqual(pt('משנה ברכות', 'mishna'), 'ברכות');
+        assert.strictEqual(pt('משנה פאה', 'mishna'), 'פאה');
+        assert.strictEqual(pt('תלמוד ירושלמי ברכות', 'yerushalmi'), 'ברכות');
+        assert.strictEqual(pt('ירושלמי ברכות', 'yerushalmi'), 'ברכות');
+        assert.strictEqual(rg.pillTitle('תוספתא ברכות', { kind: 'category', path: 'משנה/תוספתא', name: 'תוספתא' }), 'ברכות');
+        assert.strictEqual(pt('תלמוד בבלי ברכות', 'bavli'), 'ברכות');
+        assert.strictEqual(pt('מסכת ברכות', 'bavli'), 'ברכות');
+        assert.strictEqual(pt('משנה תורה, הלכות שבת', 'rambam'), 'הלכות שבת');
+        assert.strictEqual(pt('משנה תורה - הלכות שבת', 'rambam'), 'הלכות שבת');
+        assert.strictEqual(pt('שולחן ערוך, יורה דעה', 'shulchan-aruch'), 'יורה דעה');
+        assert.strictEqual(pt('טור, אורח חיים', 'shulchan-aruch'), 'אורח חיים');
+        assert.strictEqual(pt('שבת', 'bavli'), 'שבת', 'no prefix: unchanged');
+        assert.strictEqual(pt('משנה', 'mishna'), 'משנה', 'never an empty label');
+        assert.strictEqual(pt('משנה ברורה', 'mishna'), 'משנה ברורה', 'a different work is not stripped');
+        assert.strictEqual(rg.pillTitle('משנה ברכות', null), 'משנה ברכות', 'no scope: unchanged');
+        assert.strictEqual(rg.scopedTitle('ירושלמי ברכות', []), 'ירושלמי ברכות');
+      }
       // Streaming: adding batch by batch == one shot; groups only ever append, counts grow in place.
       const rows = rowsOf(books.filter((_, i) => i % 7 === 0), 2);
       const tracker = rg.createGroupTracker('category', ctxOf());

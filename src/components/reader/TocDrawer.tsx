@@ -153,6 +153,9 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
       // Shulchan Aruch / Tur with topic data: a second, grouped view (הלכות topics -> simanim); null = plain TOC only.
       const grouped = groupTocTree(tree, { title: bookTitle, categoryPath: bookIndex.books.get(bookId)?.categoryPath });
       setData({ bookId, tree, grouped: grouped !== tree ? grouped : null, total: b[0]?.total_lines ?? 0 });
+    }).catch(() => {
+      // A failed read shows the empty state instead of an endless spinner.
+      if (alive) setData({ bookId, tree: buildTocTree<TocNode>([]), grouped: null, total: 0 });
     });
     return () => {
       alive = false;
@@ -204,9 +207,12 @@ function TocPanel({ bookId, bookTitle, currentLine, onClose, onSelect, cap, onFi
       {parshiotMode && chumash ? (
         <ParshiotColumnsView key={`p${bookId}`} bookId={bookId} book={chumash} currentLine={currentLine} cap={cap} onFitWidth={onFitWidth} onJump={jump} />
       ) : !ready ? (
-        <ActivityIndicator style={{ marginTop: spacing.xl }} color={s.palette.accent} />
+        <View style={s.loading} testID="toc-loading" accessibilityRole="progressbar" accessibilityLabel="טוען תוכן עניינים">
+          <ActivityIndicator color={s.palette.accent} />
+          <Text style={s.loadingText}>טוען תוכן עניינים...</Text>
+        </View>
       ) : !ready.tree.roots.length ? (
-        <Text style={s.empty}>אין תוכן עניינים לספר זה</Text>
+        <Text style={s.empty} testID="toc-empty">אין תוכן עניינים לספר זה</Text>
       ) : (
         <TocColumnsView
           key={`${bookId}-${topicsMode ? 'topics' : 'flat'}`}
@@ -706,6 +712,8 @@ const createStyles = (c: Palette) => ({
     close: { padding: spacing.sm },
     closeText: { fontSize: 16, color: c.textMuted },
     empty: { textAlign: 'center', color: c.textMuted, marginTop: spacing.xl },
+    loading: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.sm, paddingVertical: spacing.xl },
+    loadingText: { fontSize: 14, color: c.textMuted, textAlign: 'center' },
     filter: {
       margin: spacing.sm,
       paddingHorizontal: spacing.md,

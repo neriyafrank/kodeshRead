@@ -64,6 +64,63 @@ function shortTitle(title) {
   return t;
 }
 
+/** Extra spellings of a preset's name that its book titles repeat ("תלמוד בבלי ברכות", "מסכת ברכות", "תוספתא ברכות"). */
+const SCOPE_HEADS = {
+  mishna: ['משנה', 'מסכת'],
+  bavli: ['תלמוד בבלי', 'בבלי', 'מסכת'],
+  yerushalmi: ['תלמוד ירושלמי', 'ירושלמי', 'מסכת'],
+  rambam: ['משנה תורה', 'רמב"ם'],
+  'shulchan-aruch': ['שולחן ערוך', 'שו"ע', 'טור', 'ארבעה טורים'],
+  tanach: ['תנ"ך', 'תנך'],
+};
+/** A remainder after these words means the title is a different work ("משנה ברורה"), not a tractate of the scope. */
+const NOT_A_TRACTATE = new Set(['ברורה', 'תורה', 'למלך', 'לחם', 'ראשונה', 'אחרונה', 'אחרונים'].map(key));
+
+/**
+ * Pill label of a book inside a scoped search: the title without the scope's own name ("משנה ברכות" -> "ברכות").
+ * `heads` = names the scope goes by. Titles without such a prefix, and titles that would become empty, stay whole.
+ * @param {string} title
+ * @param {string[]} [heads]
+ */
+function scopedTitle(title, heads) {
+  const full = String(title || '').trim();
+  const t = shortTitle(full);
+  if (t !== full) return t; // "משנה תורה, הלכות שבת" / "שולחן ערוך, אורח חיים"
+  const list = [...new Set((heads || []).map((h) => String(h || '').replace(/\s*\(.*?\)\s*$/, '').trim()).filter(Boolean))].sort((a, b) => b.length - a.length);
+  for (const h of list) {
+    if (full.length <= h.length || key(full.slice(0, h.length)) !== key(h)) continue;
+    const m = /^\s*(?:[,،\-–—:]\s*|\s)(.+)$/.exec(full.slice(h.length));
+    if (!m) continue;
+    const rest = m[1].trim();
+    if (!rest || NOT_A_TRACTATE.has(key(rest.split(/\s+/)[0]))) continue;
+    return rest;
+  }
+  return full;
+}
+
+/** Names a scope goes by (its preset names + their alternate spellings, its folder, its display name). */
+function scopeHeads(scope) {
+  if (!scope) return [];
+  const heads = [];
+  for (const id of scope.corpora || []) {
+    const def = corpora.CORPORA.find((c) => c.id === id);
+    if (def) heads.push(def.label);
+    heads.push(...(SCOPE_HEADS[id] || []));
+  }
+  if (scope.kind === 'category' && scope.path) {
+    const leaf = String(scope.path).split('/').filter(Boolean).pop();
+    if (leaf) heads.push(leaf);
+  }
+  if (scope.name) heads.push(scope.name);
+  if (scope.kind === 'category' && /תוספתא/.test(String(scope.path || scope.name || ''))) heads.push('תוספתא');
+  return heads;
+}
+
+/** Book pill label in the current scope (full titles stay on the result cards). */
+function pillTitle(title, scope) {
+  return scopedTitle(title, scopeHeads(scope));
+}
+
 /** Broad category of a book (its corpus root folder). */
 function broadCategory(categoryPath, bookId) {
   if (bookId >= USER_ID_BASE) return { key: 'c:user', label: 'ספרים אישיים' };
@@ -116,11 +173,11 @@ function groupOf(row, mode, ctx) {
     }
     case 'hilchot':
     case 'book':
-      return { key: `b:${row.book_id}`, label: shortTitle(title) };
+      return { key: `b:${row.book_id}`, label: pillTitle(title, ctx && ctx.scope) };
     case 'folder': {
       const base = String((ctx && ctx.scope && ctx.scope.path) || '').replace(/\/+$/, '');
       const rest = base && (path === base || path.startsWith(base + '/')) ? path.slice(base.length).split('/').filter(Boolean) : [];
-      return rest.length ? { key: `f:${rest[0]}`, label: rest[0] } : { key: `b:${row.book_id}`, label: shortTitle(title) };
+      return rest.length ? { key: `f:${rest[0]}`, label: rest[0] } : { key: `b:${row.book_id}`, label: pillTitle(title, ctx && ctx.scope) };
     }
     case 'corpus': {
       const wanted = (ctx && ctx.scope && ctx.scope.corpora) || [];
@@ -187,4 +244,4 @@ function filterByGroup(rows, groupKey, tracker) {
   return rows.filter((r) => tracker.keyOf(r) === groupKey);
 }
 
-module.exports = { BROAD_LABELS, shortTitle, broadCategory, groupModeFor, topSection, groupOf, createGroupTracker, summarizeGroups, filterByGroup };
+module.exports = { BROAD_LABELS, shortTitle, scopedTitle, scopeHeads, pillTitle, broadCategory, groupModeFor, topSection, groupOf, createGroupTracker, summarizeGroups, filterByGroup };

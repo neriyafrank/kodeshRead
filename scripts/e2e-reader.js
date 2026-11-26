@@ -298,6 +298,16 @@ try {
     await page.waitForFunction(() => (document.querySelector('[data-testid^="tab-"][aria-selected="true"]')?.innerText || '').includes('פרק ג'));
     step('TOC columns: synced to פרק כז › פסוק טו, verses open to the left, verse tap jumps and closes');
 
+    // The TOC button never ignores a tap: the drawer opens at once, with a loading state until the TOC is there.
+    await tid('toc-button').click();
+    await tid('toc-drawer').waitFor({ timeout: 3000 });
+    await page.waitForFunction(() => document.querySelector('[data-testid="toc-loading"]') || document.querySelector('[data-testid="toc-col-0"]') || document.querySelector('[data-testid="toc-empty"]'));
+    await tid('toc-col-0').waitFor({ timeout: 10000 });
+    assert.strictEqual(await tid('toc-loading').count(), 0, 'loading state gone once the TOC is shown');
+    await tid('toc-close').click();
+    await page.waitForFunction(() => !document.querySelector('[data-testid="toc-col-0"]'));
+    step('TOC button opens the drawer immediately (loading state, then the TOC)');
+
     // Quick filter: gematria / digits / chapter + verse.
     await openTools();
     await tid('toc-button').click();

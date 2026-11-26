@@ -27,6 +27,9 @@ export interface GroupTracker {
 }
 export const BROAD_LABELS: Map<string, string>;
 export function shortTitle(title: string): string;
+export function scopedTitle(title: string, heads?: string[]): string;
+export function scopeHeads(scope: SearchScope | null | undefined): string[];
+export function pillTitle(title: string, scope: SearchScope | null | undefined): string;
 export function broadCategory(categoryPath: string, bookId: number): { key: string; label: string };
 export function groupModeFor(scope: SearchScope | null | undefined): GroupMode;
 export function topSection(tocPath: string | null | undefined): string;

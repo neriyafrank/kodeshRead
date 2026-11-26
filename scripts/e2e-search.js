@@ -283,6 +283,12 @@ try {
     assert.strictEqual(await tid('corpus-chip-all').getAttribute('aria-checked'), 'false');
     assert.ok((await tid('scope-button').innerText()).includes('בבלי (3 ספרים)'), await tid('scope-button').innerText());
     for (const t of await tid('search-result').allInnerTexts()) assert.ok(!/^(רש"י|תוספות)/.test(t), `no commentary: ${t.slice(0, 20)}`);
+    {
+      // Scoped pills are short book names: never repeat the active scope ("תלמוד בבלי ..." / "מסכת ...").
+      const labels = await page.evaluate(() => [...document.querySelectorAll('[data-testid^="group-pill-"][data-testid$="-label"]')].map((el) => el.textContent));
+      assert.ok(labels.length >= 2, `book pills shown: ${labels}`);
+      for (const l of labels) assert.ok(!/^(תלמוד בבלי|בבלי|מסכת)\s/.test(l), `pill without scope prefix: ${l}`);
+    }
     await shot('1-simple-corpus');
     // An unmatched preset is an honest empty scope, never "all".
     await tid('corpus-chip-bavli').click();
