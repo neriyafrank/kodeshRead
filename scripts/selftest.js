@@ -2198,6 +2198,78 @@ async function libraryCatalogTests() {
       const pinned = rank.rankCommentaries(groups, { context: { title: 'בראשית' }, pinned: [rank.commentatorKey('תרגום יונתן')] });
       assert.strictEqual(pinned[0].name, 'תרגום יונתן');
     });
+
+    await check('commentary dedup: same name AND same content -> one; different content or different name -> both kept', () => {
+      const g = (bookId, title, texts, extra) => ({ bookId, bookTitle: title, name: commentary.commentatorName(title), linkType: 'commentary', rank: 0, entries: texts.map((t, i) => ({ book_id: bookId, line: i + 1, display_text: t })), ...extra });
+      const plain = ['בְּרֵאשִׁית בָּרָא', 'אלהים את השמים'];
+      // Same normalized name (quotes / spacing) + same content (HTML, niqqud, punctuation, whitespace) -> a single entry.
+      const a = g(10, 'רש"י על בראשית', ['בראשית ברא', 'אלהים את השמים']);
+      const b = g(20, 'רש״י  על בראשית', ['<b>בְּרֵאשִׁית</b>   בָּרָא.', '<small>אלהים</small> את השמים,'], {});
+      const one = commentary.dedupeCommentaryGroups([a, b]);
+      assert.strictEqual(one.length, 1);
+      assert.strictEqual(one[0].bookId, 20, 'the richer-formatted (niqqud / inline tags) copy wins');
+      assert.strictEqual(commentary.dedupeCommentaryGroups([b, a])[0].bookId, 20, 'order independent');
+      // Equal richness: the canonical (lower) book id, regardless of input order.
+      const c = g(30, 'רש"י על בראשית', plain.map((t) => t));
+      const d = g(5, "רש'י על בראשית", plain.map((t) => t));
+      assert.strictEqual(commentary.dedupeCommentaryGroups([c, d])[0].bookId, 5);
+      assert.strictEqual(commentary.dedupeCommentaryGroups([d, c])[0].bookId, 5);
+      // The winner keeps the first copy's position.
+      const mid = g(15, 'רמב"ן על בראשית', ['טקסט אחר לגמרי']);
+      assert.deepStrictEqual(commentary.dedupeCommentaryGroups([a, mid, b]).map((x) => x.bookId), [20, 15]);
+      // Same name, DIFFERENT content: both kept (two editions).
+      const e = g(40, 'רש"י על בראשית', ['בראשית ברא', 'אלהים את הארץ']);
+      assert.deepStrictEqual(commentary.dedupeCommentaryGroups([a, e]).map((x) => x.bookId), [10, 40]);
+      // DIFFERENT names, identical content: both kept.
+      const f = g(50, 'תוספות על בראשית', ['בראשית ברא', 'אלהים את השמים']);
+      const f2 = g(51, 'תוספות רבי יהודה החסיד על בראשית', ['בראשית ברא', 'אלהים את השמים']);
+      assert.deepStrictEqual(commentary.dedupeCommentaryGroups([a, f]).map((x) => x.bookId), [10, 50]);
+      assert.deepStrictEqual(commentary.dedupeCommentaryGroups([f, f2]).map((x) => x.bookId), [50, 51], 'תוספות vs תוספות רבי יהודה החסיד stay separate even with the same text');
+      // Empty content is never a duplicate; groupLinkedEntries applies the safeguard (grouped by book, then deduped).
+      assert.strictEqual(commentary.dedupeCommentaryGroups([g(60, 'X על ב', []), g(61, 'X על ב', [])]).length, 2);
+      const entry = (book_id, book_title, text) => ({ book_id, book_title, line: 1, display_text: text, link_type: 'commentary' });
+      const grouped = commentary.groupLinkedEntries([entry(1, 'רש"י על שבת', 'א ב ג'), entry(2, 'רש"י על שבת', '<b>א</b> ב ג.'), entry(3, 'תוספות על שבת', 'א ב ג')]);
+      assert.deepStrictEqual(grouped.map((x) => x.bookId), [2, 3]);
+    });
+
+    await check('tosafot: plain תוספות stays separate from תוספות רבי יהודה החסיד / ישנים / הרא"ש / רי"ד and is ordered right after רש"י', () => {
+      const mk = (id, t) => ({ bookId: id, bookTitle: t, categoryPath: 'תלמוד בבלי/ראשונים', linkType: 'commentary' });
+      const titles = [
+        'תוספות רבי יהודה החסיד על ברכות', 'תוספות רבינו יהודה החסיד על ברכות', 'תוספות רבי יהודה החסיד ברכות', 'תוספות ישנים על ברכות', 'תוספות ישנים ברכות',
+        'תוספות הרא"ש על ברכות', 'תוספות רי"ד על ברכות', 'חידושי הרשב"א על ברכות', 'תוספות על ברכות', 'רש"י על ברכות',
+      ];
+      const groups = titles.map((t, i) => mk(i + 1, t));
+      for (const input of [groups, [...groups].reverse()]) {
+        const ranked = rank.rankCommentaries(input, { context: { title: 'ברכות', categoryPath: 'תלמוד בבלי/סדר זרעים' } });
+        assert.strictEqual(ranked[0].bookTitle, 'רש"י על ברכות');
+        assert.strictEqual(ranked[1].bookTitle, 'תוספות על ברכות', 'plain תוספות is #2, right after רש"י');
+        assert.strictEqual(ranked[1].displayName, 'תוספות');
+        const keys = ranked.map((r) => r.key);
+        assert.strictEqual(new Set(keys).size, keys.length, 'every book is its own commentator (no shared key): ' + keys.join(' | '));
+        for (const r of ranked.slice(2)) assert.ok(!r.core || r.bookTitle.startsWith('חידושי הרשב"א') || r.coreIndex > 1, r.bookTitle + ' is not the plain תוספות');
+        assert.strictEqual(ranked.filter((r) => r.key === rank.commentatorKey('תוספות')).length, 1);
+        assert.ok(ranked.slice(2).every((r) => r.bookTitle !== 'תוספות על ברכות'));
+      }
+      // Filtering by the name "תוספות" shows them all (prefix match) but as distinct cards; a ⭐ on תוספות pins only the plain one.
+      const pinned = rank.rankCommentaries(groups, { context: { title: 'ברכות', categoryPath: 'תלמוד בבלי/סדר זרעים' }, pinned: [rank.commentatorKey('תוספות')] });
+      assert.deepStrictEqual(pinned.filter((r) => r.pinned).map((r) => r.bookTitle), ['תוספות על ברכות']);
+      // The loader never groups two books together: one group per book id.
+      const grouped = commentary.groupLinkedEntries([
+        { book_id: 1, book_title: 'תוספות על ברכות', line: 1, display_text: 'א', link_type: 'commentary' },
+        { book_id: 2, book_title: 'תוספות רבי יהודה החסיד על ברכות', line: 1, display_text: 'א', link_type: 'commentary' },
+      ]);
+      assert.deepStrictEqual(grouped.map((x) => x.name), ['תוספות', 'תוספות רבי יהודה החסיד']);
+    });
+
+    await check('tosefta editions (pure): Lieberman ranks first, commentaries on it are not editions', () => {
+      const te = require('../shared/toseftaEditions');
+      const lieb = { title: 'תוספתא ברכות (ליברמן)', categoryPath: 'תוספתא/מהדורת ליברמן/סדר זרעים' };
+      const vil = { title: 'תוספתא ברכות', categoryPath: 'תוספתא/דפוס וילנא/סדר זרעים' };
+      const com = { title: 'פירוש קצר על ברכות', categoryPath: 'תוספתא/מהדורת ליברמן/מפרשים/פירוש קצר/סדר זרעים' };
+      assert.ok(te.isToseftaBook(lieb) && te.isToseftaBook(vil) && !te.isToseftaBook(com) && !te.isToseftaBook({ title: 'תוספות על ברכות', categoryPath: 'תלמוד בבלי/ראשונים/תוספות' }));
+      assert.deepStrictEqual([vil, lieb].sort(te.compareEditions).map((b) => b.title), ['תוספתא ברכות (ליברמן)', 'תוספתא ברכות']);
+      assert.strictEqual(te.compareEditions(vil, { title: 'x', categoryPath: 'y' }), 0);
+    });
     await check('catalog: commentaries from ראשונים / אחרונים / תרגומים are one group under their base, in canonical rank order', () => {
       const bereshit = idOfPath.get('תנך/תורה/בראשית');
       const list = catalog.commentariesOf(bereshit);
@@ -7748,6 +7820,10 @@ async function parallelWorksTests() {
     put('תלמוד ירושלמי/סדר מועד/תלמוד ירושלמי שבת', ['<h1>תלמוד ירושלמי שבת</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'ירושלמי שבת א א', '<h2>פרק ב</h2>', '<h3>הלכה א</h3>', 'ירושלמי שבת ב א']);
     put('תוספתא/דפוס וילנא/סדר מועד/תוספתא שבת', ['<h1>תוספתא שבת</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'תוספתא שבת א א', '<h2>פרק ב</h2>', 'תוספתא שבת ב א']);
     put('תלמוד בבלי/ראשונים/ראש/סדר מועד/פסקי הראש על שבת', ['<h1>פסקי הראש על שבת</h1>', '<h2>פרק א</h2>', '<h3>סימן א</h3>', 'ראש שבת א א', '<h2>פרק ב</h2>', 'ראש שבת ב א']);
+    // Berakhot: two separate Tosefta editions (Lieberman + Vilna); Shabbat only has Vilna (fallback).
+    put('תלמוד בבלי/סדר זרעים/ברכות', ['<h1>ברכות</h1>', '<h2>דף ב.</h2>', 'בבלי ברכות פרק א', 'הדרן עלך מאימתי קורין', '<h2>דף יג.</h2>', 'בבלי ברכות פרק ב']);
+    put('תוספתא/דפוס וילנא/סדר זרעים/תוספתא ברכות', ['<h1>תוספתא ברכות</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'תוספתא ברכות וילנא א א', '<h2>פרק ב</h2>', 'תוספתא ברכות וילנא ב א']);
+    put('תוספתא/מהדורת ליברמן/סדר זרעים/תוספתא ברכות (ליברמן)', ['<h1>תוספתא ברכות (ליברמן)</h1>', '<h2>פרק א</h2>', '<h3>הלכה א</h3>', 'תוספתא ברכות ליברמן א א', '<h2>פרק ב</h2>', 'תוספתא ברכות ליברמן ב א']);
     put('משנה/סדר זרעים/משנה שביעית', ['<h1>משנה שביעית</h1>', '<h2>פרק א</h2>', 'משנה שביעית א']);
     put('משנה/סדר נזיקין/משנה שבועות', ['<h1>משנה שבועות</h1>', '<h2>פרק א</h2>', 'משנה שבועות א']);
     put('תלמוד ירושלמי/סדר זרעים/תלמוד ירושלמי שביעית', ['<h1>תלמוד ירושלמי שביעית</h1>', '<h2>פרק א</h2>', 'ירושלמי שביעית א']);
@@ -7924,6 +8000,35 @@ async function parallelWorksTests() {
       for (let i = 0; i < 50; i++) await pw.findParallels(counting, at.bookId, at.line);
       assert.ok(Number(process.hrtime.bigint() - t) / 1e6 / 50 < 15, 'cached lookups stay fast');
     });
+    await check('tosefta: two editions stay separate books; Lieberman is first in the drawer parallels, Library and Quick Jump; Vilna is the fallback where there is no Lieberman', async () => {
+      const r = await par('ברכות', 'בבלי ברכות פרק א');
+      const tos = r.parallels.filter((p) => p.work === 'tosefta');
+      assert.deepStrictEqual(tos.map((p) => p.name), ['תוספתא (מהדורת ליברמן)', 'תוספתא (דפוס וילנא)'], 'two labelled editions, Lieberman first');
+      assert.notStrictEqual(tos[0].bookId, tos[1].bookId);
+      assert.deepStrictEqual(tos.map((p) => p.preview[0].display_text), ['תוספתא ברכות ליברמן א א', 'תוספתא ברכות וילנא א א'], 'each edition shows its own text');
+      // From either edition: the Bavli and the other edition (Lieberman still first).
+      const fromV = await par('תוספתא ברכות', 'תוספתא ברכות וילנא ב א');
+      assert.strictEqual(fromV.family, 'shas');
+      assert.ok(!fromV.parallels.some((p) => p.work === 'tosefta'), 'editions are separate books, not parallels of each other');
+      // Only Vilna exists for Shabbat: one plain "תוספתא".
+      assert.deepStrictEqual((await par('שבת', 'בבלי שבת ב א פסקה 1')).parallels.filter((p) => p.work === 'tosefta').map((p) => p.name), ['תוספתא']);
+      // Library: both editions are separate books under the Tosefta, Lieberman's section first.
+      const cat = require('../shared/libraryCatalog').buildLibraryCatalog(await sources.loadCatalog(db.read));
+      const walk = (nodes, fn) => nodes.forEach((n) => { fn(n); if (n.children) walk(n.children, fn); });
+      let toseftaNode = null;
+      walk(cat.sections, (n) => { if (n.name === 'תוספתא' && n.children) toseftaNode = n; });
+      assert.ok(toseftaNode, 'a תוספתא section exists');
+      const editions = toseftaNode.children.filter((n) => n.children).map((n) => n.name);
+      assert.strictEqual(editions[0], 'מהדורת ליברמן', 'Lieberman edition section first: ' + editions.join(' | '));
+      assert.ok(editions.includes('דפוס וילנא'));
+      // Quick Jump: "תוספתא ברכות" -> Lieberman first, Vilna second (never merged); no Lieberman -> Vilna.
+      const index = await loadBookIndex(db.read);
+      const hits = await resolveReference(db.read, index, 'תוספתא ברכות');
+      assert.deepStrictEqual(hits.slice(0, 2).map((h) => h.bookTitle), ['תוספתא ברכות (ליברמן)', 'תוספתא ברכות']);
+      const sh = await resolveReference(db.read, index, 'תוספתא שבת');
+      assert.strictEqual(sh[0].bookTitle, 'תוספתא שבת');
+    });
+
     db.raw.close();
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });

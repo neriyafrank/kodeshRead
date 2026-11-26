@@ -21,6 +21,7 @@
 
 const { adapterForBook, sourcesOf } = require('./sources');
 const { paragraphNumber } = require('./refAlign');
+const { normalizeHebrew } = require('./hebrew');
 
 /** Longest commentary / base block rendered in the drawer (a whole chapter at most). */
 const MAX_BLOCK_LINES = 400;
@@ -276,7 +277,64 @@ function groupLinkedEntries(entries) {
   const out = [...groups.values()];
   for (const g of out) g.entries.sort((a, b) => a.line - b.line);
   out.sort((a, b) => a.rank - b.rank || a.bookId - b.bookId);
-  return out;
+  return dedupeCommentaryGroups(out);
+}
+
+// --- Duplicate safeguard: same name AND same content -> shown once ------------------------------------
+
+/** Comparison form of a commentary name: tags / niqqud / quotes / geresh / gershayim / punctuation / spacing / final letters. */
+const dupName = (s) => normalizeHebrew(s, { keepPunctuation: false });
+
+/**
+ * Comparison form of a group's content (its already-loaded entries; no queries): HTML, niqqud + te'amim,
+ * punctuation and whitespace are ignored. '' when the group has no text (never deduplicated).
+ */
+function dupContent(g) {
+  let s = '';
+  for (const e of g.entries || []) s += ' ' + (e.display_text || '');
+  return normalizeHebrew(s, { keepPunctuation: false });
+}
+
+/** How richly a group is formatted (niqqud / te'amim + inline tags): the richer duplicate wins. */
+function richness(g) {
+  let n = 0;
+  for (const e of g.entries || []) {
+    const t = String(e.display_text || '');
+    n += (t.match(/[\u0591-\u05C7]/g) || []).length + (t.match(/<[^>]+>/g) || []).length;
+  }
+  return n;
+}
+
+/**
+ * Collapses groups that have BOTH the same normalized name AND the same normalized content (two copies of one
+ * commentary, e.g. one per edition folder). Different names OR different content are never touched ("תוספות" vs
+ * "תוספות רבי יהודה החסיד"). The winner is the richer-formatted copy, then the lower (canonical) book id, then
+ * the first; it takes the position of the first copy. Works on loaded text only.
+ */
+function dedupeCommentaryGroups(groups) {
+  const list = groups || [];
+  if (list.length < 2) return list;
+  const slot = new Map(); // fingerprint -> index in `kept`
+  const kept = [];
+  for (const g of list) {
+    const content = dupContent(g);
+    const name = dupName(g.name || g.bookTitle);
+    if (!content || !name) {
+      kept.push(g);
+      continue;
+    }
+    const fp = name + '\u0000' + content;
+    if (!slot.has(fp)) {
+      slot.set(fp, kept.length);
+      kept.push(g);
+      continue;
+    }
+    const i = slot.get(fp);
+    const cur = kept[i];
+    const better = richness(g) - richness(cur) || (cur.bookId || 0) - (g.bookId || 0);
+    if (better > 0) kept[i] = g;
+  }
+  return kept;
 }
 
 /**
@@ -321,4 +379,4 @@ function mergeParallelGroups(groups, parallels) {
   return [...(groups || []).filter((g) => !ids.has(g.bookId)), ...(parallels || [])];
 }
 
-module.exports = { MAX_BLOCK_LINES, parallelGroups, mergeParallelGroups, fetchUnitLinks, fetchLinkCounts, attachLinkCounts, fetchLinkedEntries, commentatorName, groupLinkedEntries, clearRefCache };
+module.exports = { MAX_BLOCK_LINES, parallelGroups, mergeParallelGroups, fetchUnitLinks, fetchLinkCounts, attachLinkCounts, fetchLinkedEntries, commentatorName, groupLinkedEntries, dedupeCommentaryGroups, clearRefCache };

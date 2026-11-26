@@ -34,6 +34,7 @@ const torah = require('./torahParshiot');
 const pairing = require('./pairing');
 const { sourcesOf, adapterForBook, USER_ID_BASE } = require('./sources');
 const L = require('./canonLists');
+const tosefta = require('./toseftaEditions');
 
 const K = (s) => aliasKey(s);
 
@@ -591,7 +592,8 @@ async function findParallels(db, bookId, line, opts) {
   const perWork = new Map();
   for (const p of out) perWork.set(p.work, (perWork.get(p.work) || 0) + 1);
   for (const p of out) if (perWork.get(p.work) === 1 && p.work === 'tosefta') p.name = p.workLabel;
-  out.sort((a, b) => a.order - b.order || String(a.name).localeCompare(String(b.name)) || a.bookId - b.bookId);
+  // Two Tosefta editions: Lieberman's first (the default), the other edition after it; never merged.
+  out.sort((a, b) => a.order - b.order || tosefta.compareEditions(a, b) || String(a.name).localeCompare(String(b.name)) || a.bookId - b.bookId);
   return { family: self.member.family, familyLabel: FAMILIES[self.member.family].label, coordinate: { key: here.key, label: here.label, start: here.start, end: here.end }, parallels: out };
 }
 

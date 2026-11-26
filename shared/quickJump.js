@@ -26,6 +26,7 @@ const { sourcesOf, adapterForBook } = require('./sources');
 const dict = require('./hebrewTorahDict');
 const torah = require('./torahParshiot');
 const halacha = require('./halachaTopics');
+const tosefta = require('./toseftaEditions');
 
 const MAX_BOOK_CANDIDATES = 5;
 
@@ -592,6 +593,25 @@ async function resolveHalachaTopic(db, index, words, limit) {
   return results.length ? results : null;
 }
 
+/** A literal title hit; Lieberman's Tosefta ("תוספתא ברכות (ליברמן)") counts as one: the edition label is not part of the name. */
+const exactEdition = (c) => c.exactTitle || (tosefta.isToseftaBook(c.book) && tosefta.editionRank(c.book) === tosefta.LIEBERMAN_RANK);
+
+/**
+ * A Tosefta hit also brings the other edition(s) of the same tractate ("תוספתא ברכות" -> + "תוספתא ברכות (ליברמן)"): the
+ * edition label is not part of the name typed, and both editions stay separate candidates (Lieberman first, see above).
+ */
+function withOtherEditions(index, candidates) {
+  const stem = (t) => String(t || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+  const wanted = new Set(candidates.filter((c) => tosefta.isToseftaBook(c.book)).map((c) => stem(c.book.title)));
+  if (!wanted.size) return candidates;
+  const have = new Set(candidates.map((c) => c.book.id));
+  const extra = [];
+  for (const b of index.books.values()) {
+    if (!have.has(b.id) && tosefta.isToseftaBook(b) && wanted.has(stem(b.title))) extra.push({ book: b, exactTitle: false });
+  }
+  return extra.length ? [...candidates, ...extra] : candidates;
+}
+
 async function resolveBookReference(db, index, input, opts) {
   const limit = (opts && opts.limit) || MAX_BOOK_CANDIDATES;
   const words = rawTokens(input);
@@ -643,7 +663,7 @@ async function resolveBookReference(db, index, input, opts) {
         }
       }
     }
-    out.sort((a, b) => Number(b.c.exactTitle) - Number(a.c.exactTitle) || a.alias.length - b.alias.length);
+    out.sort((a, b) => Number(exactEdition(b.c)) - Number(exactEdition(a.c)) || tosefta.compareEditions(a.c.book, b.c.book) || a.alias.length - b.alias.length);
     const results = [];
     for (const { c } of out.slice(0, limit)) {
       results.push({
@@ -654,9 +674,10 @@ async function resolveBookReference(db, index, input, opts) {
     return results;
   }
 
+  candidates = withOtherEditions(index, candidates);
   const unique = [];
   const seen = new Set();
-  for (const c of [...candidates].sort((a, b) => Number(b.exactTitle) - Number(a.exactTitle))) {
+  for (const c of [...candidates].sort((a, b) => Number(exactEdition(b)) - Number(exactEdition(a)) || tosefta.compareEditions(a.book, b.book))) {
     if (!seen.has(c.book.id)) {
       seen.add(c.book.id);
       unique.push(c.book);
@@ -685,7 +706,7 @@ async function resolveBookReference(db, index, input, opts) {
     });
   }
   // Fully resolved references first, then the most specific.
-  results.sort((a, b) => Number(b.complete) - Number(a.complete) || a.unmatched.length - b.unmatched.length);
+  results.sort((a, b) => Number(b.complete) - Number(a.complete) || a.unmatched.length - b.unmatched.length || tosefta.compareEditions(a, b));
   return results;
 }
 

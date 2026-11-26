@@ -133,6 +133,14 @@ const CORE_LISTS = {
   ],
 };
 
+/**
+ * First word after a core name that makes a title a DIFFERENT commentary: "תוספות רבי יהודה החסיד ברכות",
+ * "תוספות ישנים ...", "תוספות הרא"ש ...", "תוספות רי"ד ..." are never the plain תוספות (series matching).
+ */
+const DISTINCT_QUALIFIERS = new Set(
+  ['רבי', 'רבינו', 'רבנו', 'ר', 'ישנים', 'ישן', 'הראש', 'ראש', 'ריד', 'הריד', 'שאנץ', 'הרשבא', 'הרמבן'].flatMap((w) => [normKey(w), skeletonPhrase(normKey(w))]),
+);
+
 /** Core entries that sort after EVERY other commentary (but before parallel works). */
 const LATE_DISPLAY = new Set(['תרגום יונתן']);
 
@@ -239,7 +247,8 @@ function findCore(name, corpus, title) {
     for (const e of list) {
       for (const a of e.aliases) {
         for (const f of nameForms(a)) {
-          if (f.length > bestLen && f.length >= 3 && (tk.startsWith(f + ' ') || tks.startsWith(f + ' '))) {
+          const rest = tk.startsWith(f + ' ') ? tk.slice(f.length + 1) : tks.startsWith(f + ' ') ? tks.slice(f.length + 1) : null;
+          if (rest != null && f.length > bestLen && f.length >= 3 && !DISTINCT_QUALIFIERS.has(rest.split(' ')[0])) {
             best = e;
             alias = a;
             bestLen = f.length;

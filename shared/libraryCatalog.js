@@ -32,6 +32,7 @@ const pairing = require('./pairing');
 const commentaryRank = require('./commentaryRank');
 const bookRoles = require('./bookRoles');
 const parallelWorks = require('./parallelWorks');
+const tosefta = require('./toseftaEditions');
 
 const USER_ID_BASE = 1000000000;
 const USER_ROOT_KEY = aliasKey('הספרים שלי');
@@ -194,7 +195,9 @@ function placeBook(b, member) {
   if (topKey === T('תוספתא')) {
     const key = tractateKey(b.title);
     const i = prefixIndex(MISHNA_INDEX, key);
-    return { levels: top('mishna', lv('תוספתא', 20), ...genericLevels(dirs, 1, 1)), order: i >= 0 ? i : 500 };
+    // Two separate editions (folders), Lieberman's first; the label is the edition folder.
+    const edition = genericLevels(dirs, 1, 1).map((l) => ({ ...l, order: tosefta.isLiebermanText(l.name) ? 0 : 1 }));
+    return { levels: top('mishna', lv('תוספתא', 20), ...edition), order: i >= 0 ? i : 500 };
   }
 
   if (topKey === T('תלמוד בבלי')) {
