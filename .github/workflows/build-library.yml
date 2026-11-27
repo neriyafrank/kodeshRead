@@ -165,6 +165,17 @@ jobs:
           cd "$WORK"
           version=$(node -p "require('./library-manifest.json').version")
           notes="Pre-indexed core library (${SOURCE_REPO}, scope ${LIBRARY_SCOPE}), version ${version}, built $(date -u +%Y-%m-%dT%H:%MZ). Multi-part: download from the app (Library manager)."
+          if [ "$SOURCE_REPO" = "Sivan22/otzaria-library" ]; then
+            notes="${notes}
+
+          ## License & attribution
+          The texts in these database files come from the legacy Otzaria library repository [Sivan22/otzaria-library](https://github.com/Sivan22/otzaria-library), licensed under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (Attribution-NonCommercial-ShareAlike). The only changes made here are technical: conversion and indexing into SQLite for offline use. Texts that Otzaria took from external sources retain their original licenses. These files are distributed under the same CC BY-NC-SA 4.0 terms (non-commercial use only; share alike)."
+          else
+            notes="${notes}
+
+          ## License & attribution
+          The texts in these database files come from [${SOURCE_REPO}](https://github.com/${SOURCE_REPO}); its own license and the licenses of the original texts it contains apply (see that repository). The only changes made here are technical: conversion and indexing into SQLite for offline use."
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes "$notes" --latest=false
             # Unpublish the old manifest first: no client pairs it with half-replaced parts.
