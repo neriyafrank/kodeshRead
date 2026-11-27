@@ -6649,7 +6649,10 @@ async function navHistoryTests() {
       'אינה מאושרת', 'ללא אחריות', 'Constants.expoConfig?.version', 'Linking.openURL(url)', 'url={ABOUT.sourceUrl}', 'url={ABOUT.licenseUrl}', 'url={ABOUT.licenseDeedHeUrl}', 'ltr(ABOUT.licenseName)']) {
       assert.ok(about.includes(needle), `about.tsx lacks: ${needle}`);
     }
-    for (const f of ['src/app/index.tsx', 'src/app/library-manager.tsx']) assert.ok(src(f).includes("nav.open('/about')"), `${f}: entry to About`);
+    assert.ok(src('src/app/library-manager.tsx').includes("nav.open('/about')"), 'library-manager.tsx: entry to About');
+    const home = src('src/app/index.tsx');
+    assert.ok(!home.includes('/about') && !home.includes('open-about'), 'Home has no אודות entry');
+    assert.ok(home.includes('<Text style={s.tabsBtnText}>הגדרות</Text>') && home.includes('accessibilityLabel="הגדרות"') && home.includes("nav.open('/library-manager')"), 'Home settings button: label + a11y הגדרות, same route');
     assert.ok(!src('src/app/reader.tsx').includes('/about'), 'the reader stays distraction free');
   });
 }
