@@ -222,6 +222,9 @@ export default function LibraryManagerScreen() {
         <PersonalBooks />
       </View>
       {isWeb ? <Text style={s.empty}>הורדה וייבוא זמינים באפליקציית Android בלבד; בתצוגה המקדימה בדפדפן מוצגת ספריית הדוגמה.</Text> : null}
+      <Pressable onPress={() => nav.open('/about')} hitSlop={8} style={s.aboutLink} accessibilityRole="button" testID="manager-open-about">
+        <Text style={s.link}>אודות, מקורות ורישיון</Text>
+      </Pressable>
     </ScrollView>
   );
 }
@@ -270,6 +273,7 @@ const createStyles = (c: Palette) =>
     label: { fontSize: 13, color: c.textMuted, writingDirection: 'rtl' },
     input: { borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: spacing.sm, color: c.text, backgroundColor: c.background, fontSize: 13, textAlign: 'left', writingDirection: 'ltr' },
     link: { color: c.accent, fontSize: 13 },
+    aboutLink: { alignSelf: 'center', paddingVertical: spacing.md },
     btnRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
     btn: { flexGrow: 1, backgroundColor: c.accent, borderRadius: radius.md, paddingVertical: spacing.md, paddingHorizontal: spacing.md, alignItems: 'center' },
     btnSecondary: { backgroundColor: 'transparent', borderWidth: 1.5, borderColor: c.accent },

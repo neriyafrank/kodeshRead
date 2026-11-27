@@ -174,6 +174,35 @@ try {
     assert.strictEqual(await tid('onboarding-card').count(), 0, 'no onboarding while a core library exists');
     step('library screen has the manager button, no onboarding');
 
+    // --- "אודות": reachable from Home and the manager; header / browser Back pop exactly one screen -------------------
+    await tid('open-about').click();
+    await tid('about-screen').waitFor();
+    const aboutText = (await tid('about-screen').innerText()).replace(/[\u2066-\u2069]/g, '');
+    for (const needle of ['על האפליקציה', `גרסה ${require('../app.json').expo.version}`, 'פירוט שינויים', 'CC BY-NC-SA 4.0', 'https://github.com/Sivan22/otzaria-library', 'ללא אחריות']) assert.ok(aboutText.includes(needle), `about screen lacks: ${needle}`);
+    for (const [id, url] of [['about-source-link', 'https://github.com/Sivan22/otzaria-library'], ['about-license-link', 'https://creativecommons.org/licenses/by-nc-sa/4.0/'], ['about-deed-link', 'https://creativecommons.org/licenses/by-nc-sa/4.0/deed.he']]) {
+      await page.evaluate(() => { globalThis.__opened = []; window.open = (u) => { globalThis.__opened.push(String(u)); return null; }; });
+      await tid(id).click();
+      await page.waitForFunction(() => globalThis.__opened.length === 1);
+      assert.deepStrictEqual(await page.evaluate(() => globalThis.__opened), [url], id);
+    }
+    await shot('about');
+    await tid('header-back').last().click();
+    await tid('about-screen').waitFor({ state: 'hidden' });
+    await tid('open-library-manager').click();
+    await tid('manager-open-about').click();
+    await tid('about-screen').waitFor();
+    await tid('header-back').last().click(); // Home > Manager > About > Back = Manager
+    await tid('about-screen').waitFor({ state: 'hidden' });
+    await tid('manager-open-about').waitFor();
+    await tid('manager-open-about').click();
+    await tid('about-screen').waitFor();
+    await page.goBack(); // stack pop, as with system Back
+    await tid('about-screen').waitFor({ state: 'hidden' });
+    await tid('manager-open-about').waitFor();
+    await tid('header-back').last().click();
+    await tid('open-library-manager').waitFor();
+    step('אודות: Home / manager entries, version, the three license links, Back pops one screen');
+
 
 
     await tid('open-library-manager').click();

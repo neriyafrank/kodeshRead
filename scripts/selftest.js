@@ -6551,6 +6551,9 @@ async function navHistoryTests() {
     assert.deepStrictEqual(nav.appBackOne(run(['search', 'advanced-search'])), ['home', 'search']);
     assert.deepStrictEqual(nav.appBackOne(run(['search'])), ['home']);
     assert.deepStrictEqual(nav.appBackOne(run(['library-manager'])), ['home']);
+    assert.deepStrictEqual(nav.appBackOne(run(['about'])), ['home']);
+    assert.deepStrictEqual(nav.appBackOne(run(['library-manager', 'about'])), ['home', 'library-manager'], 'Manager > About > Back = Manager');
+    assert.deepStrictEqual(nav.systemBack(run(['library-manager', 'about'])), { stack: ['home', 'library-manager'], handled: true });
     assert.deepStrictEqual(nav.appBackOne(['home']), ['home'], 'no previous screen: Home');
   });
   await check('nav history: Advanced Search header back returns to Simple Search (deduplicated), then Search back goes Home', () => {
@@ -6563,7 +6566,7 @@ async function navHistoryTests() {
     assert.deepStrictEqual(nav.open(['home', 'advanced-search'], '/search'), ['home', 'advanced-search', 'search'], 'without Simple Search underneath it is pushed');
   });
   await check('nav history: the READER in-app Back button jumps straight Home and empties the back stack, from any screen', () => {
-    for (const path of [['reader'], ['search', 'reader'], ['reader', 'search', 'reader'], ['library-manager', 'reader']]) {
+    for (const path of [['reader'], ['search', 'reader'], ['reader', 'search', 'reader'], ['library-manager', 'reader'], ['about', 'reader']]) {
       let st = nav.createHistory();
       for (const p of path) st = nav.open(st, '/' + p);
       st = nav.appBack(st);
@@ -6572,7 +6575,7 @@ async function navHistoryTests() {
     }
   });
   await check('nav history: opening the current screen (same or different params) never adds a stack entry', () => {
-    for (const screen of ['search', 'reader', 'advanced-search', 'library-manager']) {
+    for (const screen of ['search', 'reader', 'advanced-search', 'library-manager', 'about']) {
       let st = nav.open(nav.createHistory(), '/' + screen);
       const before = st.slice();
       for (const h of ['/' + screen, { pathname: '/' + screen, params: { q: '1' } }, { pathname: '/' + screen, params: { q: '2', book: 'B' } }, '/' + screen + '?book=A']) {
@@ -6587,7 +6590,7 @@ async function navHistoryTests() {
     assert.deepStrictEqual(nav.collapse(['home', 'reader', 'reader', 'search', 'search']), ['home', 'reader', 'search']);
     // random walk: never two consecutive equal entries
     let st = nav.createHistory(), seed = 7;
-    const screens = ['/', '/search', '/advanced-search', '/reader', '/library-manager'];
+    const screens = ['/', '/search', '/advanced-search', '/reader', '/library-manager', '/about'];
     for (let i = 0; i < 500; i++) {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;
       st = nav.open(st, screens[seed % screens.length]);
@@ -6616,19 +6619,38 @@ async function navHistoryTests() {
     const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
     const appNav = src('src/lib/appNav.ts');
     assert.ok(appNav.includes('router.dismissTo(href') && appNav.includes('router.push(href') && appNav.includes('router.replace(href') && appNav.includes('useBackGuard') && src('src/app/_layout.tsx').includes('useBackGuard()') && appNav.includes("router.dismissTo('/')") && appNav.includes("router.replace('/')"));
-    for (const f of ['src/app/index.tsx', 'src/app/search.tsx', 'src/app/advanced-search.tsx', 'src/app/reader.tsx', 'src/components/library/StarterBooks.tsx', 'src/components/library/OnboardingCard.tsx']) {
+    for (const f of ['src/app/index.tsx', 'src/app/search.tsx', 'src/app/advanced-search.tsx', 'src/app/reader.tsx', 'src/app/library-manager.tsx', 'src/app/about.tsx', 'src/components/library/StarterBooks.tsx', 'src/components/library/OnboardingCard.tsx']) {
       const s = src(f);
       assert.ok(s.includes('useAppNav()') && !/router\.(navigate|push|back|replace)\(/.test(s), `${f}: navigates only through useAppNav`);
     }
     assert.ok(src('src/app/reader.tsx').includes('const goLibrary = nav.goHome'));
     assert.ok(src('src/app/advanced-search.tsx').includes('nav.back()') && !src('src/app/advanced-search.tsx').includes('nav.goHome'), 'advanced search header back is a normal stack back');
     assert.ok(appNav.includes('back: () =>') && appNav.includes('router.back()'));
-    for (const f of ['src/app/search.tsx', 'src/app/library-manager.tsx']) {
+    for (const f of ['src/app/search.tsx', 'src/app/library-manager.tsx', 'src/app/about.tsx']) {
       const s = src(f);
       assert.ok(s.includes('headerBackVisible: false') && s.includes('<HomeBackButton onPress={nav.back} />') && !s.includes('nav.goHome'), f);
     }
     const ov = src('src/components/Overlay.tsx');
     assert.strictEqual((ov.match(/onRequestClose=\{onClose\}/g) || []).length, 2, 'bottom sheets and drawers close on system Back before the stack pops');
+  });
+  await check('about: attribution points at the repository the cloud library is built from; entry points and required sections', () => {
+    const src = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+    const { ABOUT } = require('../shared/about');
+    const workflow = src('.github/workflows/build-library.yml');
+    const def = /source_repo:[\s\S]*?default:\s*(\S+)/.exec(workflow);
+    assert.ok(def, 'the workflow declares a default source_repo');
+    assert.strictEqual(ABOUT.sourceRepo, def[1], 'About credits the default build source');
+    assert.strictEqual(ABOUT.sourceUrl, 'https://github.com/Sivan22/otzaria-library');
+    assert.strictEqual(ABOUT.licenseName, 'Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)');
+    assert.strictEqual(ABOUT.licenseUrl, 'https://creativecommons.org/licenses/by-nc-sa/4.0/');
+    assert.strictEqual(ABOUT.licenseDeedHeUrl, 'https://creativecommons.org/licenses/by-nc-sa/4.0/deed.he');
+    const about = src('src/app/about.tsx');
+    for (const needle of ['על האפליקציה', 'מקור הספרייה ורישיון', 'פירוט שינויים', 'תנאי שימוש ושיתוף זהה', 'הסתייגות', 'פרויקט אוצריא', 'לא מסחרי', 'רישיונות המקור',
+      'אינה מאושרת', 'ללא אחריות', 'Constants.expoConfig?.version', 'Linking.openURL(url)', 'url={ABOUT.sourceUrl}', 'url={ABOUT.licenseUrl}', 'url={ABOUT.licenseDeedHeUrl}', 'ltr(ABOUT.licenseName)']) {
+      assert.ok(about.includes(needle), `about.tsx lacks: ${needle}`);
+    }
+    for (const f of ['src/app/index.tsx', 'src/app/library-manager.tsx']) assert.ok(src(f).includes("nav.open('/about')"), `${f}: entry to About`);
+    assert.ok(!src('src/app/reader.tsx').includes('/about'), 'the reader stays distraction free');
   });
 }
 

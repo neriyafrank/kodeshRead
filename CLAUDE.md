@@ -278,6 +278,11 @@ An ultra-fast, offline-first **Android** mobile application built with **Expo (R
 > is no previous screen): Reader > Search > Back = Reader, Search > Advanced > Back = Search, Home > Search > Back = Home.
 > Self-tested (`nav history:` checks, `shared/navHistory.appBackOne`), `e2e:search` / `e2e:reader` / `e2e:library`.
 
+> **About screen & library license:** `src/app/about.tsx` (`אודות`, entries: Home footer `open-about`, library manager
+> `manager-open-about`; header Back = `nav.back`) shows version + attribution from `shared/about.js` (`Sivan22/otzaria-library`,
+> CC BY-NC-SA 4.0; external texts keep their own licenses). Keep it equal to the workflow's default `source_repo` and update the
+> "פירוט שינויים" list when the ingestion pipeline changes what it keeps. Self-tested (`about:` check), `e2e:library`.
+
 ### Key Architectural Decision: Pre-Built Bundled SQLite Database
 - The entire library is **bundled inside the APK** (zero runtime file importing needed on the device).
 - A build-time Node.js ingestion script (`scripts/build-db.js`) runs on the developer's PC before building the app. It parses Otzaria folders, `.txt` files (with HTML heading tags), and commentary links into a single pre-indexed SQLite database (`assets/db/library.db`) with **SQLite FTS5**, book acronyms/aliases, and clean TOC reference keys.

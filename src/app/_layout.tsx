@@ -80,6 +80,7 @@ export default function RootLayout() {
               }}
             >
               <Stack.Screen name="library-manager" options={{ presentation: 'modal', title: 'ניהול ספרייה ועדכונים' }} />
+              <Stack.Screen name="about" options={{ title: 'אודות' }} />
             </Stack>
           </LibraryProvider>
         ) : (

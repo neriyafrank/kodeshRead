@@ -2,7 +2,7 @@
 /**
  * Navigation history model (pure JS, no React): the contract the app's router calls must follow.
  *
- *  - Every top-level screen (home / search / advanced-search / reader / library-manager) appears AT MOST ONCE in the
+ *  - Every top-level screen (home / search / advanced-search / reader / library-manager / about) appears AT MOST ONCE in the
  *    back stack. Opening a screen that is already in the stack collapses the stack back to that occurrence
  *    (expo-router `dismissTo`), so `Search -> Reader -> Search -> Reader ...` never piles up.
  *  - INVARIANT: the stack never holds two consecutive entries of one screen (opening the screen you are on updates params in

@@ -482,6 +482,13 @@ Nothing is bundled in the APK. On the device there are two SQLite databases in t
   closed or reset automatically.
 * Upgrading from a pre-M5 build: the old copied `library.db` is adopted as `core_library.db`.
 
+## About screen & library license
+
+`src/app/about.tsx` (`אודות`; footer of the Home screen and bottom of the library manager) shows the app version and the
+library attribution: source repository, CC BY-NC-SA 4.0, changes made, non-commercial / share-alike terms and disclaimers.
+The URLs live in `shared/about.js`; the self-test keeps its repository equal to the workflow's default `source_repo`.
+Publishing a release built from another repository requires updating this screen first.
+
 ## Cloud library (GitHub Actions, multi-part release)
 
 No PC needed: the **Build cloud library** workflow (`.github/workflows/build-library.yml`, *Run workflow*) indexes

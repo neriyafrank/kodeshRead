@@ -1,6 +1,7 @@
 import { Stack } from 'expo-router';
 import { useCallback } from 'react';
 import { Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { homeLayout } from '../../shared/homeLayout';
 import type { JumpResult } from '../../shared/quickJump';
@@ -22,6 +23,7 @@ import { useAppNav } from '../lib/appNav';
 export default function LibraryScreen() {
   const s = useThemedStyles(createStyles);
   const nav = useAppNav();
+  const insets = useSafeAreaInsets();
   const openBookInTab = useTabs((x) => x.openBook);
   const tabCount = useTabs((x) => x.tabs.length);
   const { core, starter, userBookCount } = useLibrary();
@@ -117,6 +119,16 @@ export default function LibraryScreen() {
           />
         </View>
       ) : null}
+      {/* Pinned to the bottom edge: license attribution, out of the way of the library. */}
+      <Pressable
+        onPress={() => nav.open('/about')}
+        hitSlop={8}
+        style={[s.footer, { paddingBottom: spacing.xs + insets.bottom }]}
+        accessibilityRole="button"
+        testID="open-about"
+      >
+        <Text style={s.footerText}>אודות</Text>
+      </Pressable>
     </View>
   );
 }
@@ -126,6 +138,8 @@ const createStyles = (c: Palette) =>
     screen: { flex: 1, backgroundColor: c.background },
     divider: { height: 1, backgroundColor: c.border },
     tree: { flex: 1 },
+    footer: { marginTop: 'auto', alignItems: 'center', paddingTop: spacing.xs, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.border },
+    footerText: { color: c.textMuted, fontSize: 13 },
     headerBtns: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
     searchBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.sm },
     tabsBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.sm },
